@@ -1,0 +1,34 @@
+{{- if .Values.autoscaling.enabled }}
+# KEDA, not a bare HPA (D68): it wraps a plain HPA for the concurrency cases,
+# handles queue depth natively for the write path, and gives scale-to-zero for a
+# disabled plugin (D1). One mechanism instead of prometheus-adapter plus special
+# cases.
+#
+# minReplicaCount is 2 and that is NOT a tuning choice — D55 makes at least two
+# replicas a correctness property, because D18's cache coherence, D23's
+# client-side balancing and D47's atomic claim are all multi-replica behaviours.
+# Allowing this to scale to one would make an entire class of defect unreachable.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ .Chart.Name }}
+spec:
+  scaleTargetRef:
+    name: {{ .Chart.Name }}
+  minReplicaCount: {{ .Values.autoscaling.minReplicas }}
+  maxReplicaCount: {{ .Values.autoscaling.maxReplicas }}
+  # Slow to scale down, quick to scale up. A gRPC client holds a long-lived
+  # HTTP/2 connection (D23), so removing a pod costs more than adding one.
+  cooldownPeriod: 120
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: {{ .Values.autoscaling.prometheusAddress | quote }}
+        # Per-replica rate: the sum over the deployment divided by the pods
+        # serving it. Scaling on the SUM would add replicas as traffic grows even
+        # when each pod is idle.
+        query: >-
+          sum(rate(yadgar_calls_total{service="{{ .Chart.Name }}"}[2m]))
+          / clamp_min(count(up{app="{{ .Chart.Name }}"}), 1)
+        threshold: {{ .Values.autoscaling.threshold | quote }}
+{{- end }}

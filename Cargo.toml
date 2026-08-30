@@ -1,0 +1,61 @@
+[package]
+name = "yadgar-iam-db"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+license = "Apache-2.0"
+description = "The identity module's -db twin: the only writer of its store, serving IamDbService over gRPC."
+
+[dependencies]
+# Pinned by REVISION, not by tag or branch. store has no tags yet, and a branch
+# is a moving target — the same reasoning that pins images by digest (D61) and
+# actions by SHA (D62). Bumped deliberately, never drifting underneath a build.
+yadgar-store = { git = "https://github.com/yadgarhq/store.git", rev = "76caf925da16f1dbb10ba68f79c22efb439a18ff" }
+# In tonic 0.14 prost codegen moved out to tonic-prost; there is no "prost"
+# feature on tonic itself. Also no TLS feature here: the gateway terminates
+# outward TLS, and in-cluster hops are plain HTTP/2 today (D23).
+tonic = { version = "0.14", default-features = false, features = [
+  "codegen",
+  "router",
+  "server",
+  "transport",
+] }
+tonic-prost = "0.14"
+prost = "0.14"
+prost-types = "0.14"
+# The shared instrumentation seam (D67), pinned by revision like every in-org crate.
+yadgar-telemetry = { git = "https://github.com/yadgarhq/telemetry.git", rev = "1273e45e641c6af5187af1203dfb153d4369b5bc", features = ["grpc"] }
+sqlx = { version = "0.9", default-features = false, features = [
+  "runtime-tokio",
+  "tls-rustls-ring",
+  "mysql",
+  "macros",
+] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v7"] }
+# Password hashing (D72): argon2id is what GetPasswordHashResponse and
+# SetPasswordRequest carry across the wire, and this module is the only place
+# that ever compares a submitted password against the stored hash.
+argon2 = "0.6"
+# Blind-index equality lookups (D72): a username or external ID is HMAC'd under
+# a key held in a Secret rather than encrypted, because AES-GCM is randomised
+# and a randomised ciphertext can never satisfy `WHERE x = ?`. A blind index
+# leaks equality — two identical inputs share an index — which is exactly what
+# a lookup key must leak and nothing more.
+hmac = "0.13"
+sha2 = "0.11"
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }

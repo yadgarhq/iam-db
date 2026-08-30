@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Chart.Name }}
+  labels:
+    app: {{ .Chart.Name }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Chart.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Chart.Name }}
+      annotations:
+        # OPT-IN scraping. Prometheus discovers pods by this annotation rather
+        # than from a static list, so a new module is scraped by declaring itself
+        # rather than by someone remembering to add it centrally (D62's shape).
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      # POD-level, and distinct from the container block below. Setting only the
+      # container context leaves the pod admitting root — runAsNonRoot is the
+      # assertion that actually refuses an image which would run as one, rather
+      # than trusting the Containerfile to have said so.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: {{ .Chart.Name }}
+          # A published chart carries image.digest and no tag (D65, D61).
+          image: "{{ .Values.image.repository }}{{ if .Values.image.digest }}@{{ .Values.image.digest }}{{ else }}:{{ .Values.image.tag }}{{ end }}"
+          # EXPLICIT, because the implicit default flips with the tag form and
+          # this chart uses both. In git the image is a moving tag (D65), and a
+          # moving tag with IfNotPresent means a node serves whatever it cached
+          # first — forever, silently, while the deployment looks current.
+          #
+          # Kubernetes defaults to Always only when the tag is literally `latest`,
+          # so the published chart's digest form defaults to IfNotPresent — and a
+          # Deployment created from one and later pointed at the other keeps the
+          # old policy. That is how a cluster ends up running a build nobody
+          # shipped, which is exactly what happened here.
+          #
+          # Always is correct for both forms: a digest that is already present is
+          # not re-downloaded, so this costs nothing where the digest is pinned.
+          imagePullPolicy: Always
+          ports:
+            - name: grpc
+              containerPort: 50051
+          env:
+            - name: DB_HOST
+              value: {{ .Values.database.host | quote }}
+            - name: DB_NAME
+              value: {{ .Values.database.name | quote }}
+            - name: DB_USER
+              value: {{ .Values.database.user | quote }}
+            - name: REPLICAS
+              value: {{ .Values.replicaCount | quote }}
+          volumeMounts:
+            - name: db-password
+              mountPath: /var/run/secrets/iam-db
+              readOnly: true
+          # NO readiness probe hitting a /health that returns early. The process
+          # does not listen until the capability probe and migrations have both
+          # succeeded (D69), so "the port is open" already means "ready" — and a
+          # probe that passed earlier than that would report ready for a pod that
+          # cannot serve, which under D68 is a pod the HPA adds replicas around.
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: db-password
+          secret:
+            secretName: {{ .Values.database.passwordSecret }}

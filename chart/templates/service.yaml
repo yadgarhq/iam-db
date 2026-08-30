@@ -1,0 +1,16 @@
+# HEADLESS, deliberately. A normal Service load-balances at L4, and a gRPC client
+# holds one long-lived HTTP/2 connection — so it would pin to a single pod and
+# leave the others idle. clusterIP: None publishes every pod address so the
+# client can balance across them itself (D23).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Chart.Name }}
+spec:
+  clusterIP: None
+  selector:
+    app: {{ .Chart.Name }}
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: grpc

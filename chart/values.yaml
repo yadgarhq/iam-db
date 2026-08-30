@@ -1,0 +1,47 @@
+# In git the image points at a moving TAG; the PUBLISHED chart pins a DIGEST,
+# rewritten by ci-release at package time (D65). The two differ deliberately: a
+# chart in git that pinned a digest would need a commit per release, and a
+# published chart that pointed at a tag would not be reproducible.
+image:
+  repository: ghcr.io/yadgarhq/iam-db
+  tag: latest
+
+# At least two, always (D55). D18's cache coherence, D23's client-side balancing
+# and D47's atomic claim are multi-replica behaviours; one replica makes an
+# entire category of defect unreachable.
+replicaCount: 2
+
+# Requests are MANDATORY: an HPA cannot compute utilisation without them, and a
+# pod with no request is BestEffort and evicted first (D68). Memory has a limit;
+# CPU deliberately does not — throttling a latency-bound service is the opposite
+# of what scaling out is for.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+database:
+  host: iam-db-mariadb
+  name: iam
+  user: iam
+  passwordSecret: iam-db-password
+
+# D68: scale on CONCURRENCY, not CPU. A -db waits on MariaDB and a logic service
+# waits on its -db, so both saturate at low CPU — a CPU-driven HPA stays quiet
+# exactly when the system is in trouble.
+#
+# The signal is call RATE per replica, read from D67's metrics. Rate rather than
+# a gauge because nothing tracks in-flight requests yet: rate is what the
+# instrumentation actually exposes today, and pretending otherwise would give a
+# scaler that reads nothing. Stated here rather than silently substituted.
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  # At least two, always (D55) — the floor is a correctness property, not a
+  # tuning knob: one replica makes a class of defect unreachable.
+  maxReplicas: 6
+  # Calls per second per replica before adding one.
+  threshold: "10"
+  prometheusAddress: http://prometheus-server.observability.svc.cluster.local

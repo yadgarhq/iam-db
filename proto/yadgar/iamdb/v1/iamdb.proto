@@ -1,0 +1,172 @@
+// The identity module's STORAGE boundary (D4). Only `iam` calls this.
+//
+// Every RPC is one business operation and one transaction (D5). There is no
+// generic "run this query" arm, deliberately: a storage API shaped like SQL is
+// one the logic tier can drive into states the module never intended.
+syntax = "proto3";
+
+package yadgar.iamdb.v1;
+
+import "google/protobuf/timestamp.proto";
+import "yadgar/common/v1/common.proto";
+
+message User {
+  yadgar.common.v1.Meta meta = 1;
+
+  // DEAD FIELDS. Never set, never read.
+  //
+  // They held the username and display name in plaintext. D72 now requires
+  // personal data to be encrypted at rest, so the real values moved to the
+  // ciphertext fields below. They are not deleted because v1.4.0 published them
+  // and a published tag never moves — `buf breaking` refuses the removal, which
+  // is the gate doing its job rather than an obstacle. Deleting them is a
+  // major-version change whenever one happens for another reason.
+  string external_id = 16 [deprecated = true];
+  string display_name = 17 [deprecated = true];
+
+  // AES-GCM ciphertext, decryptable by `iam` with a key held in a Secret and
+  // never in the database — so a stolen backup decrypts nothing.
+  bytes external_id_ciphertext = 18;
+  bytes display_name_ciphertext = 19;
+
+  // HMAC of the username under a separate key, for equality lookup only.
+  //
+  // Encryption alone would make login impossible: AES-GCM is randomised, so the
+  // same username encrypts differently every time and `WHERE username = ?` can
+  // never match. This is the standard blind-index answer. It leaks equality —
+  // two identical usernames share an index — which is exactly what a lookup key
+  // must leak and nothing more.
+  bytes external_id_blind_index = 20;
+}
+
+message Team {
+  yadgar.common.v1.Meta meta = 1;
+  string name = 16;
+}
+
+// A credential, WITHOUT its token.
+//
+// The token itself appears in no message on this boundary in either direction
+// except at creation, and never in a read. What is stored is a hash (D72), so
+// there is nothing here for a read path to leak — including into a log line that
+// dumps a response.
+message Credential {
+  string id = 1;
+  string user_id = 2;
+  string label = 3;
+  google.protobuf.Timestamp created_at = 4;
+  // Absent means no expiry.
+  optional google.protobuf.Timestamp expires_at = 5;
+  // Absent means live. Revocation is a tombstone rather than a delete, so
+  // "which credential was used" stays answerable after it is withdrawn (D26).
+  optional google.protobuf.Timestamp revoked_at = 6;
+}
+
+// The hot one. Everything else on this boundary is administrative.
+message ResolveCredentialRequest {
+  // The HASH, computed by `iam`. The plain token never reaches the store, so it
+  // is never in a query log, a slow-query log, or a database backup.
+  bytes token_hash = 1;
+}
+message ResolveCredentialResponse {
+  // Empty user_id means no live credential matched. NOT an error: "no such
+  // credential" and "the store is broken" are different outcomes and a caller
+  // must be able to tell them apart — one is a 401, the other is a 503.
+  string user_id = 1;
+  repeated string team_ids = 2;
+  string credential_id = 3;
+}
+
+// Fetch what is needed to verify a password, and nothing else.
+//
+// The HASH comes back and `iam` does the comparison. The alternative — sending
+// the password here for the store to check — would put a plaintext password in a
+// second service, and eventually in its logs.
+message GetPasswordHashRequest {
+  // DEAD FIELD, superseded by the blind index below. See User's dead fields for
+  // why it stays.
+  string username = 1 [deprecated = true];
+
+  // The blind index, computed by `iam`. The plaintext username never crosses
+  // this boundary — the same rule the token already follows, for the same
+  // reason: it would otherwise reach a query log or a database backup.
+  bytes username_blind_index = 2;
+}
+message GetPasswordHashResponse {
+  // Empty means no such user. Callers MUST still perform a dummy verification
+  // before answering, or the response time distinguishes "no such user" from
+  // "wrong password" and the endpoint enumerates accounts.
+  string user_id = 1;
+  string argon2id_hash = 2;
+}
+
+message SetPasswordRequest {
+  yadgar.common.v1.Idempotency idempotency = 1;
+  string user_id = 2;
+  // Already hashed by `iam`. The plaintext never crosses this boundary.
+  string argon2id_hash = 3;
+}
+message SetPasswordResponse {}
+
+message CreateCredentialRequest {
+  yadgar.common.v1.Idempotency idempotency = 1;
+  string user_id = 2;
+  bytes token_hash = 3;
+  string label = 4;
+  optional google.protobuf.Timestamp expires_at = 5;
+}
+message CreateCredentialResponse {
+  string credential_id = 1;
+}
+
+message RevokeCredentialRequest {
+  yadgar.common.v1.Idempotency idempotency = 1;
+  string credential_id = 2;
+}
+message RevokeCredentialResponse {
+  // Who it belonged to, so the caller can publish the invalidation event (D72)
+  // without a second read. A revocation whose cache event never fires is a
+  // credential that keeps working.
+  string user_id = 1;
+}
+
+message CreateUserRequest {
+  yadgar.common.v1.Idempotency idempotency = 1;
+
+  // DEAD FIELDS, superseded below.
+  string external_id = 2 [deprecated = true];
+  string display_name = 3 [deprecated = true];
+
+  // Encrypted by `iam` before it gets here. This boundary never sees a name.
+  bytes external_id_ciphertext = 4;
+  bytes display_name_ciphertext = 5;
+  bytes external_id_blind_index = 6;
+}
+message CreateUserResponse {
+  yadgar.common.v1.Meta meta = 1;
+}
+
+message AddTeamMemberRequest {
+  yadgar.common.v1.Idempotency idempotency = 1;
+  string team_id = 2;
+  string user_id = 3;
+}
+message AddTeamMemberResponse {}
+
+message RemoveTeamMemberRequest {
+  yadgar.common.v1.Idempotency idempotency = 1;
+  string team_id = 2;
+  string user_id = 3;
+}
+message RemoveTeamMemberResponse {}
+
+service IamDbService {
+  rpc ResolveCredential(ResolveCredentialRequest) returns (ResolveCredentialResponse);
+  rpc GetPasswordHash(GetPasswordHashRequest) returns (GetPasswordHashResponse);
+  rpc SetPassword(SetPasswordRequest) returns (SetPasswordResponse);
+  rpc CreateCredential(CreateCredentialRequest) returns (CreateCredentialResponse);
+  rpc RevokeCredential(RevokeCredentialRequest) returns (RevokeCredentialResponse);
+  rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
+  rpc AddTeamMember(AddTeamMemberRequest) returns (AddTeamMemberResponse);
+  rpc RemoveTeamMember(RemoveTeamMemberRequest) returns (RemoveTeamMemberResponse);
+}

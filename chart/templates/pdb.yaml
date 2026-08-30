@@ -1,0 +1,11 @@
+# maxUnavailable, NEVER minAvailable equal to the replica count — that form
+# blocks a node drain forever, with no error, just a hang (D68).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Chart.Name }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: {{ .Chart.Name }}

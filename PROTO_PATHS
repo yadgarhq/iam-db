@@ -1,0 +1,4 @@
+# What this module vendors from yadgarhq/proto (D70). A subset, not the whole
+# set — buf closes the import graph itself, so listing yadgar/iamdb/v1 also
+# brings yadgar/common/v1.
+yadgar/iamdb/v1

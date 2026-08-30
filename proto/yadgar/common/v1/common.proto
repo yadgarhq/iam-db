@@ -1,0 +1,121 @@
+// Shared envelope and scope types. Every module imports this and nothing else
+// from outside its own package.
+//
+// Field numbers 1-15 encode in one byte, so the envelope fields that appear on
+// every row are kept inside that range. 13-15 are reserved for envelope growth;
+// entity-specific fields start at 16.
+syntax = "proto3";
+
+package yadgar.common.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// Ordered ladder, most restrictive first (D12).
+enum Visibility {
+  VISIBILITY_UNSPECIFIED = 0; // never persisted; rejected at validation
+  VISIBILITY_PRIVATE = 1; // owner_user_id only
+  VISIBILITY_TEAM = 2; // members of team_id
+  VISIBILITY_ORG = 3; // everyone in the installation
+}
+
+// Carried by every user-facing entity (D8, D9, D12, D26).
+message Meta {
+  // URN carrying a UUID, e.g. "yadgar:memory:0192f3c1-8a4e-7c2d-9b11-5f0e7a3d84c6".
+  // Assigned by the owning -db service; never supplied by a client. UUIDv7 for
+  // generated records (time-ordered, so keyset pagination and index locality
+  // behave); UUIDv5 over namespace + source file path for seeded ones, because
+  // D35 requires re-seeding to update in place rather than duplicate (D42).
+  // Never an engine's integer primary key — that is per-engine and stops being
+  // portable the moment a module swaps engines (D7).
+  string id = 1;
+
+  // Compare-and-set counter (D8). Incremented by the -db service on every
+  // successful update. A write whose expect_version does not match is rejected
+  // with FAILED_PRECONDITION.
+  uint64 version = 2;
+
+  // Hierarchical project path of variable depth (D53): "quinyx/forecast" for a
+  // single repo, "quinyx/qwfm/forecast" for a service inside a monorepo. The
+  // hierarchy is SEMANTIC — a query at "quinyx/qwfm" matches every descendant —
+  // so a -db filters this by prefix, not by equality. Renames resolve through an
+  // alias rather than rewriting records.
+  string project_id = 3;
+
+  // Who PRIVATE means, and the only user permitted to delete (D26).
+  string owner_user_id = 4;
+
+  // Meaningful only when visibility == VISIBILITY_TEAM. A user may belong to
+  // several teams, so this names which one. ORG needs no identifier: one
+  // deployment is one organisation (D27).
+  string team_id = 5;
+
+  Visibility visibility = 6;
+
+  // Authorship, deliberately distinct from ownership. A record edited by
+  // another member keeps its owner and changes updated_by; under D8's
+  // multi-writer CAS this is what makes a version conflict diagnosable.
+  string created_by = 7;
+  string updated_by = 8;
+
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp updated_at = 10;
+
+  // Soft-delete tombstone (D26). Absent means live. Physical removal is an
+  // administrative action, never a request-path operation.
+  optional google.protobuf.Timestamp deleted_at = 11;
+
+  // URNs this entity was synthesised from — set by the curator, consolidation,
+  // or an LLM path, never by an agent. Empty for directly authored records.
+  // Lineage cannot be reconstructed after the fact, which is why it is recorded
+  // unconditionally (D26).
+  repeated string derived_from = 12;
+
+  reserved 13 to 15; // envelope growth
+}
+
+// Caller identity and reach, attested by the gateway from the request's
+// credentials. Never supplied by the caller itself.
+// Scoping is TWO-DIMENSIONAL and the axes are independent (D53). Visibility says
+// who may see a record; project depth says where it lives. A TEAM-visible record
+// at "quinyx/qwfm/forecast" reaches a teammate querying "quinyx/qwfm" because it
+// passes on both axes. Collapsing them into one ladder is the plausible-looking
+// mistake.
+message Scope {
+  string user_id = 1;
+  // The subtree being queried. Matches this path and everything beneath it.
+  string project_id = 2;
+  // Every team the caller belongs to. A -db service filters
+  // visibility == TEAM against this list.
+  repeated string team_ids = 3;
+
+  // The calling instance — one agent session, narrower than the user, who may run
+  // several at once. Two uses, and they differ: throttling one runaway session without
+  // throttling the person (D46), where the instance IS the key; and delivering a
+  // write-failure notice (D39), where it is only a hint. A write failure is addressed
+  // to (user_id, project_id) so it survives the instance that caused it and is
+  // rectified by whichever instance of that project calls next (D47).
+  string instance_id = 4;
+
+  // Minted by the gateway, once, and propagated unchanged through every hop.
+  //
+  // WITHOUT THIS, D67's telemetry cannot be summed. One logical call fans out
+  // gateway -> logic -> -db, each hop emitting its own record, and with no shared
+  // key "bytes returned for this call" counts one call three times. The fields
+  // also mean different things per hop and only one is the user-facing answer:
+  // bytes returned to the caller is a GATEWAY fact, rows read is a -db fact.
+  //
+  // It is also the join key for spans, so a trace and its events correlate
+  // without a second identifier being invented later.
+  //
+  // Distinct from instance_id, which is a SESSION and spans many calls, and from
+  // Idempotency.key, which identifies a WRITE so a retry is not applied twice.
+  // Three identifiers with three lifetimes: session, request, write.
+  string request_id = 5;
+}
+
+// Applied to every mutating RPC (D9). The same key replayed returns the
+// original outcome rather than performing the write twice; required because a
+// retrying load balancer will deliver a write more than once.
+message Idempotency {
+  string key = 1;
+}
