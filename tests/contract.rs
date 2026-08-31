@@ -35,8 +35,22 @@ async fn fresh(db: &str) -> IamDb {
             .await
             .expect("reset database");
     }
-    let url = format!("{}/{db}", dsn().trim_end_matches('/'));
-    let pool = sqlx::MySqlPool::connect(&url).await.expect("pool");
+    // Strip the DSN's own database before appending ours.
+    //
+    // CI's DSN ends in a database name (`mysql://root:ci@127.0.0.1:3306/ci`), so
+    // appending produced `.../ci/iam_db_test_x` and every test failed with
+    // "Unknown database". It passed locally only because a local DSN usually has
+    // no database component — which is exactly why this was not caught until CI
+    // ran it, and why iam-db's first commit reaching main without a pull request
+    // meant nobody found out.
+    let base = dsn()
+        .rsplit_once('/')
+        .expect("dsn has a database component")
+        .0
+        .to_string();
+    let pool = sqlx::MySqlPool::connect(&format!("{base}/{db}"))
+        .await
+        .expect("pool");
     yadgar_store::migrate::apply(&pool, &schema::migrations().expect("migrations"))
         .await
         .expect("migrate");
