@@ -2,10 +2,15 @@
 //!
 //! It holds no business rules. Its job is the boundary: one call is one
 //! transaction (D5), identity is enforced here, and the logic service reaches
-//! this store only over gRPC — never by opening a connection of its own. It also
-//! holds the only argon2 and blind-index dependencies in the fleet (D72):
-//! passwords and other personal data leave this boundary already hashed,
-//! encrypted, or HMAC'd, and never as plaintext.
+//! this store only over gRPC — never by opening a connection of its own.
+//!
+//! **It holds NO key material and no cryptographic dependency at all (D72).**
+//! There is no argon2, hmac or sha2 in this crate's tree: passwords, usernames
+//! and tokens arrive already hashed, HMAC'd or encrypted by `iam`, which holds
+//! the keys — see `iam/src/crypto.rs`, which really is the only module in the
+//! fleet that has them. This file used to claim the opposite, and the two claims
+//! could not both be true; a dump of this database, on its own, is opaque
+//! precisely BECAUSE the primitives live on the other side of the boundary.
 
 #![forbid(unsafe_code)]
 

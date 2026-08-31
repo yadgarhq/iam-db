@@ -36,17 +36,14 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v7"] }
-# Password hashing (D72): argon2id is what GetPasswordHashResponse and
-# SetPasswordRequest carry across the wire, and this module is the only place
-# that ever compares a submitted password against the stored hash.
-argon2 = "0.6"
-# Blind-index equality lookups (D72): a username or external ID is HMAC'd under
-# a key held in a Secret rather than encrypted, because AES-GCM is randomised
-# and a randomised ciphertext can never satisfy `WHERE x = ?`. A blind index
-# leaks equality — two identical inputs share an index — which is exactly what
-# a lookup key must leak and nothing more.
-hmac = "0.13"
-sha2 = "0.11"
+
+# NO argon2, NO hmac and NO sha2, and that absence is D72 working. Every hash,
+# HMAC and ciphertext this service stores was computed by `iam`, which holds the
+# keys — so a submitted password, a plaintext username and a bearer token all
+# reach a value this process could compare against only after `iam` has already
+# transformed them. These three crates were declared here and never used by a
+# line of code; keeping them would leave the tools for doing that work in the one
+# process that must not be able to do it.
 
 [build-dependencies]
 tonic-prost-build = "0.14"

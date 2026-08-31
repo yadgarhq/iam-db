@@ -9,6 +9,12 @@
 //! naive implementation. Revoked, expired, and belonging-to-a-deleted-user are
 //! the cases where a missing `AND` clause leaves someone authenticated after they
 //! should not be, and none of them is visible in a happy-path test.
+//!
+//! **The deleted-user case was claimed by this very paragraph and not covered.**
+//! Deleting `AND u.deleted_at IS NULL` from either query left all thirteen tests
+//! green while every soft-deleted person authenticated indefinitely — and could
+//! still log in and mint a FRESH credential. A module doc is not a test; the two
+//! at the foot of this file are.
 
 use sqlx::Connection;
 use tonic::Request;
@@ -459,4 +465,214 @@ async fn a_credential_with_a_future_expiry_still_resolves() {
         .into_inner();
 
     assert_eq!(got.user_id, user_id);
+}
+
+/// Soft-delete a user the way the module eventually will, since no RPC does yet.
+///
+/// Through `svc.pool()` for the same reason the team rows are seeded that way:
+/// growing a `DeleteUser` endpoint that exists only so a test can reach a state
+/// is worse than reaching the state directly.
+async fn soft_delete(svc: &IamDb, user_id: &str) {
+    sqlx::query("UPDATE iam_user SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?")
+        .bind(user_id)
+        .execute(svc.pool())
+        .await
+        .expect("soft-delete the user");
+}
+
+#[tokio::test]
+async fn a_soft_deleted_users_credential_stops_resolving() {
+    // MUTATION THIS CATCHES: deleting `AND u.deleted_at IS NULL` from
+    // ResolveCredential's query. Every other test in this file stays green,
+    // because none of them has ever deleted a user — while every person removed
+    // from the system keeps authenticating with the credentials nobody thought
+    // to revoke, indefinitely and silently.
+    //
+    // The JOIN is what makes this reachable at all: a credential row carries no
+    // deleted_at of its own, so liveness of the PERSON is a property only the
+    // join can see.
+    let svc = fresh("iam_db_test_deleted_resolve").await;
+    let (user_id, _cred) = seed(&svc, &[20u8; 32], &[20u8; 32]).await;
+
+    // Live first, so a query that never resolved anything cannot pass this.
+    let before = svc
+        .resolve_credential(Request::new(ResolveCredentialRequest {
+            token_hash: vec![20u8; 32],
+        }))
+        .await
+        .expect("resolve")
+        .into_inner();
+    assert_eq!(before.user_id, user_id);
+
+    soft_delete(&svc, &user_id).await;
+
+    let after = svc
+        .resolve_credential(Request::new(ResolveCredentialRequest {
+            token_hash: vec![20u8; 32],
+        }))
+        .await
+        .expect("resolve")
+        .into_inner();
+    assert!(
+        after.user_id.is_empty(),
+        "a soft-deleted person must stop authenticating even with an un-revoked credential"
+    );
+}
+
+#[tokio::test]
+async fn a_soft_deleted_user_returns_no_password_hash() {
+    // A SEPARATE clause in a SEPARATE query from the one above, and worse in its
+    // consequence: resolving is what an existing credential does, but a password
+    // hash is what lets a deleted person LOG IN AGAIN and mint a fresh
+    // credential — one that no revocation sweep would know to look for.
+    //
+    // MUTATION THIS CATCHES: deleting `AND u.deleted_at IS NULL` from
+    // GetPasswordHash's query.
+    let svc = fresh("iam_db_test_deleted_password").await;
+    let (user_id, _cred) = seed(&svc, &[21u8; 32], &[21u8; 32]).await;
+
+    svc.set_password(Request::new(SetPasswordRequest {
+        user_id: user_id.clone(),
+        argon2id_hash: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA".into(),
+        ..Default::default()
+    }))
+    .await
+    .expect("set password");
+
+    let before = svc
+        .get_password_hash(Request::new(GetPasswordHashRequest {
+            username_blind_index: vec![21u8; 32],
+            ..Default::default()
+        }))
+        .await
+        .expect("get hash")
+        .into_inner();
+    assert_eq!(before.user_id, user_id);
+
+    soft_delete(&svc, &user_id).await;
+
+    let after = svc
+        .get_password_hash(Request::new(GetPasswordHashRequest {
+            username_blind_index: vec![21u8; 32],
+            ..Default::default()
+        }))
+        .await
+        .expect("get hash")
+        .into_inner();
+    assert!(
+        after.user_id.is_empty() && after.argon2id_hash.is_empty(),
+        "a soft-deleted person must not be able to log in again"
+    );
+}
+
+#[tokio::test]
+async fn changing_a_password_stops_the_old_hash_working() {
+    // Only the INSERT half of the upsert was covered. MUTATION THIS CATCHES:
+    // making `ON DUPLICATE KEY UPDATE` a no-op — writing
+    // `argon2id_hash = argon2id_hash`, or dropping the clause for an INSERT
+    // IGNORE. Setting a password then returns OK, the caller is told the change
+    // took, and the OLD password keeps working forever. Nothing in a
+    // set-then-read test can see it, because the first write is an insert.
+    let svc = fresh("iam_db_test_password_change").await;
+    let (user_id, _cred) = seed(&svc, &[22u8; 32], &[22u8; 32]).await;
+
+    const OLD: &str = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$b2xkaGFzaA";
+    const NEW: &str = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$bmV3aGFzaA";
+
+    for hash in [OLD, NEW] {
+        svc.set_password(Request::new(SetPasswordRequest {
+            user_id: user_id.clone(),
+            argon2id_hash: hash.into(),
+            ..Default::default()
+        }))
+        .await
+        .expect("setting a password twice must be accepted");
+    }
+
+    let got = svc
+        .get_password_hash(Request::new(GetPasswordHashRequest {
+            username_blind_index: vec![22u8; 32],
+            ..Default::default()
+        }))
+        .await
+        .expect("get hash")
+        .into_inner();
+
+    assert_eq!(got.argon2id_hash, NEW, "the new password must take effect");
+    assert_ne!(got.argon2id_hash, OLD, "the old password must stop working");
+}
+
+#[tokio::test]
+async fn a_resolve_returns_only_that_users_teams() {
+    // Every other team test uses ONE user, so `WHERE user_id = ?` can be deleted
+    // from the membership query with all thirteen staying green — while every
+    // user receives every team in the system, and D12's team visibility becomes
+    // no boundary at all.
+    //
+    // MUTATION THIS CATCHES: dropping that WHERE clause.
+    let svc = fresh("iam_db_test_team_isolation").await;
+    let (mine, _c) = seed(&svc, &[23u8; 32], &[23u8; 32]).await;
+    let (theirs, _c) = seed(&svc, &[24u8; 32], &[24u8; 32]).await;
+
+    for (id, name) in [
+        ("yadgar:team:mine", "mine"),
+        ("yadgar:team:theirs", "theirs"),
+    ] {
+        sqlx::query(
+            "INSERT INTO iam_team (id, name, created_by, updated_by) \
+             VALUES (?, ?, 'system', 'system')",
+        )
+        .bind(id)
+        .bind(name)
+        .execute(svc.pool())
+        .await
+        .expect("seed team");
+    }
+
+    for (team, user) in [("yadgar:team:mine", &mine), ("yadgar:team:theirs", &theirs)] {
+        svc.add_team_member(Request::new(AddTeamMemberRequest {
+            team_id: team.into(),
+            user_id: user.clone(),
+            ..Default::default()
+        }))
+        .await
+        .expect("add member");
+    }
+
+    let got = svc
+        .resolve_credential(Request::new(ResolveCredentialRequest {
+            token_hash: vec![23u8; 32],
+        }))
+        .await
+        .expect("resolve")
+        .into_inner();
+
+    assert_eq!(
+        got.team_ids,
+        vec!["yadgar:team:mine".to_string()],
+        "a resolve must never hand back another user's teams"
+    );
+}
+
+#[tokio::test]
+async fn revoking_an_unknown_credential_is_not_found() {
+    // The error path nothing exercised. It matters because the SUCCESS path is
+    // what publishes the cache invalidation, keyed on the user_id this call
+    // returns — so "no such credential" must be an error rather than an OK
+    // carrying an empty owner, which would publish an invalidation addressed to
+    // nobody and look like it worked.
+    //
+    // MUTATION THIS CATCHES: replacing the `ok_or_else` with
+    // `unwrap_or_default()`.
+    let svc = fresh("iam_db_test_revoke_unknown").await;
+
+    let err = svc
+        .revoke_credential(Request::new(RevokeCredentialRequest {
+            credential_id: "yadgar:credential:never-existed".into(),
+            ..Default::default()
+        }))
+        .await
+        .expect_err("revoking something that does not exist must not report success");
+
+    assert_eq!(err.code(), tonic::Code::NotFound);
 }
