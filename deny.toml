@@ -70,6 +70,33 @@ yanked = "deny"
 #    authentication runs over an INSECURE connection. Over TLS the password goes
 #    through the existing secure channel and the RSA exchange never happens —
 #    and D58 puts every `-db` on TLS to its engine.
+#
+#    CORRECTED 2026-09-02, because point 2 was not true as written. D58 covers
+#    the POOL. D7's capability probe in `main` opens a connection of its own,
+#    before the pool exists, from a string built by `format!` with no `ssl-mode`
+#    in it — so it inherits sqlx's default, `MySqlSslMode::Preferred`, which
+#    sqlx documents as falling back to an unencrypted connection when an
+#    encrypted one cannot be established. That one connection is not covered by
+#    the sentence above, and on an engine that permits the fallback it is
+#    exactly the insecure case the sentence says does not arise.
+#
+#    Two details of the mechanism, read from sqlx-mysql 0.9.0's
+#    `src/connection/auth.rs` rather than assumed:
+#
+#    - `encrypt_rsa` opens with `if stream.is_tls { return Ok(...) }`, so
+#      "skipped over TLS" is exactly right — for a connection that IS on TLS.
+#    - It is reached from `AuthPlugin::Sha256Password` and from
+#      caching_sha2_password's perform_full_authentication branch, so the
+#      trigger is wider than the one plugin named above.
+#
+#    Whether an unencrypted probe reaches that path therefore depends on the
+#    engine's transport policy and its authentication plugin — neither of which
+#    this file can assert for an adopter's engine, which is the whole reason the
+#    connection must not be left to a default.
+#
+#    `store` PR #11 makes the probe and the pool share one set of connection
+#    options. The unqualified claim comes back in the commit that bumps the
+#    `yadgar-store` revision to it.
 # 3. Both -db and engine sit inside the cluster (D27), so an attacker able to
 #    time this traffic is already inside the trust boundary.
 #
@@ -77,7 +104,7 @@ yanked = "deny"
 # or if any of the three points above stops holding — particularly a decision to
 # run a `-db` to its engine without TLS.
 ignore = [
-    { id = "RUSTSEC-2023-0071", reason = "client-side RSA encryption only; no private key held, and the path is skipped over TLS. No fix exists upstream. See the note above." },
+    { id = "RUSTSEC-2023-0071", reason = "client-side RSA encryption only; no private key held. The serving pool is on TLS, which skips the path; the D7 boot probe is NOT yet, so the exception is qualified until store#11 lands. No fix exists upstream. See the note above." },
 ]
 
 [sources]

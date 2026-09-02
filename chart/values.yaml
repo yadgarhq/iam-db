@@ -22,11 +22,30 @@ resources:
   limits:
     memory: 256Mi
 
+# D80: the platform is a deployment choice, so every number the binary needs is
+# a value here rather than a default only a fork can reach. These four were
+# compiled-in defaults until now, and three of them describe the REFERENCE
+# engine specifically — a stock MariaDB on 3306 allowing 151 connections. An
+# adopter on RDS, Aurora, Cloud SQL or Azure MySQL has different numbers and had
+# nothing to set.
 database:
   host: iam-db-mariadb
+  # Azure MySQL flexible-server and proxied setups do not all speak 3306.
+  port: 3306
   name: iam
   user: iam
   passwordSecret: iam-db-password
+
+  # THE OTHER HALF OF D4's ARITHMETIC, and the reason this one is not optional.
+  #
+  # `store`'s `check_engine_headroom` refuses boot when
+  # maxConnections x replicas exceeds engineMaxConnections minus five, the five
+  # being what the engine keeps back so an operator can still log in. 151 is
+  # stock MariaDB's number; RDS derives max_connections from instance size, and
+  # a small instance is well under it. On an engine with a smaller ceiling the
+  # pod could not start and the operator had no value to change.
+  maxConnections: 8
+  engineMaxConnections: 151
 
 # D68: scale on CONCURRENCY, not CPU. A -db waits on MariaDB and a logic service
 # waits on its -db, so both saturate at low CPU — a CPU-driven HPA stays quiet
@@ -36,8 +55,15 @@ database:
 # a gauge because nothing tracks in-flight requests yet: rate is what the
 # instrumentation actually exposes today, and pretending otherwise would give a
 # scaler that reads nothing. Stated here rather than silently substituted.
+#
+# OFF BY DEFAULT, and that is D80 rather than a change of mind about scaling. A
+# ScaledObject is `keda.sh/v1alpha1`, so a chart that emits one by default fails
+# to install on any cluster that has not adopted KEDA — a module chart may not
+# require a CRD the adopter did not choose. The reference deployment installs
+# KEDA and turns this on in its own values; everyone else gets `replicaCount`
+# replicas and a chart that applies cleanly.
 autoscaling:
-  enabled: true
+  enabled: false
   minReplicas: 2
   # At least two, always (D55) — the floor is a correctness property, not a
   # tuning knob: one replica makes a class of defect unreachable.
