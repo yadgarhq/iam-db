@@ -5,7 +5,21 @@ metadata:
   labels:
     app: {{ .Chart.Name }}
 spec:
+  {{- if not .Values.autoscaling.enabled }}
+  # OMITTED ENTIRELY WHEN KEDA OWNS THE COUNT, and that guard is the whole point
+  # of the condition. KEDA drives a ScaledObject through an HPA, which writes
+  # `spec.replicas` on this Deployment; Argo runs with `selfHeal: true` and no
+  # `ignoreDifferences` for this field, so a rendered `replicas:` is a value Argo
+  # keeps restoring and the autoscaler keeps overwriting. That is not a snap on
+  # each upgrade — it is a CONTINUOUS revert loop, in which a scale-up is undone
+  # within a sync interval and the load that caused it is served by
+  # `replicaCount` pods.
+  #
+  # Rendering nothing hands the field to the HPA, which is what `minReplicas`
+  # exists to floor. `replicaCount` still applies to every deployment that has
+  # not enabled autoscaling, which is the chart's own default (D80).
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       app: {{ .Chart.Name }}
