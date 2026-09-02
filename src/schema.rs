@@ -27,6 +27,10 @@ pub fn migrations() -> Result<MigrationSet, MigrationError> {
         team(),
         team_member(),
         credential(),
+        enrolment(),
+        enrolment_redemption(),
+        user_is_admin(),
+        rate_limit_override(),
     ])
 }
 
@@ -182,6 +186,161 @@ fn credential() -> Migration {
                   UNIQUE KEY uq_iam_credential_token (token_hash),
                   KEY ix_iam_credential_user (user_id),
                   CONSTRAINT fk_iam_credential_user FOREIGN KEY (user_id)
+                      REFERENCES iam_user (id) ON DELETE CASCADE
+              ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+            .into(),
+    }
+}
+
+fn enrolment() -> Migration {
+    Migration {
+        version: 6,
+        name: "create_enrolment".into(),
+        // secret_hash is the LOOKUP KEY, and it is UNIQUE for the same two
+        // reasons the credential token is: it is what a redemption is found by,
+        // and two enrolments hashing alike would redeem the wrong person's
+        // account. BINARY(32) rather than a text column, so the comparison is
+        // byte-for-byte with no collation able to make two different hashes
+        // compare equal.
+        //
+        // THERE IS DELIBERATELY NO UNIQUENESS TOUCHING user_id, and the absence
+        // is load-bearing rather than an omission. A spent enrolment must block
+        // no new one: a lost redemption response leaves a person locked out, and
+        // an admin minting a FRESH enrolment is the documented way back in. A
+        // `UNIQUE (user_id)` would make that recovery path fail with a duplicate
+        // key, and the failure would be indistinguishable from the store being
+        // broken. Liveness is `spent_at IS NULL AND expires_at > NOW()` — a
+        // property of a ROW, evaluated in the WHERE clause — never a property of
+        // the user.
+        //
+        // expires_at is NOT NULL, unlike the credential's. D73 gives an
+        // enrolment 24 hours, and the deadline is written down at creation
+        // rather than recomputed when the secret is presented — otherwise
+        // changing the policy silently re-dates every live token. An enrolment
+        // with no expiry is a permanent password-reset token, which is the thing
+        // this table exists not to be.
+        //
+        // spent_at is a TOMBSTONE, not a delete (D26). "This secret was
+        // presented again after it was used" stays answerable, and a replay is
+        // precisely the event worth keeping.
+        sql: "CREATE TABLE iam_enrolment (
+                  id           VARCHAR(96) NOT NULL PRIMARY KEY,
+                  user_id      VARCHAR(96) NOT NULL,
+                  secret_hash  BINARY(32)  NOT NULL,
+                  created_at   TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  expires_at   TIMESTAMP   NOT NULL,
+                  spent_at     TIMESTAMP   NULL DEFAULT NULL,
+                  UNIQUE KEY uq_iam_enrolment_secret (secret_hash),
+                  KEY ix_iam_enrolment_user (user_id),
+                  CONSTRAINT fk_iam_enrolment_user FOREIGN KEY (user_id)
+                      REFERENCES iam_user (id) ON DELETE CASCADE
+              ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+            .into(),
+    }
+}
+
+fn enrolment_redemption() -> Migration {
+    Migration {
+        version: 7,
+        name: "create_enrolment_redemption".into(),
+        // THE ONLY IDEMPOTENCY LEDGER IN THIS SCHEMA, and every other RPC on
+        // this boundary still gets by without one — AddTeamMember has a
+        // composite primary key, RevokeCredential has a tombstone in its WHERE
+        // clause, SetPassword is an upsert. Each of those is naturally
+        // repeatable, so replaying the key and re-running the write give the
+        // same answer.
+        //
+        // Redemption is the one that does not. Running it twice finds the secret
+        // already spent and reports REDEEM_OUTCOME_SPENT — and reporting spent
+        // to a caller that is merely retrying is what locks the person out, on
+        // the one path D73 gives no resend. So the ORIGINAL outcome has to be
+        // stored to be replayed, and this table is where.
+        //
+        // ONLY A REDEMPTION IS RECORDED HERE. A stored NOT_FOUND, SPENT or
+        // EXPIRED would replay a stale failure to a caller retrying after a
+        // transient error, and the contract's own words are "the one this key
+        // originally SPENT" — which only a redemption did.
+        //
+        // secret_hash is stored so a key reused with a DIFFERENT secret is
+        // refused rather than replayed (D9 as amended). This boundary can make
+        // that comparison precisely because the hash is deterministic — the same
+        // property that lets an enrolment be looked up by it. It cannot make the
+        // equivalent comparison on the password: a fresh Argon2id salt makes two
+        // hashes of one password differ, so that axis is checked in `iam`, the
+        // only place the plaintext exists. O21 records the general version of
+        // this gap — no `*-db` store persists a request fingerprint — so what is
+        // here is the one comparison that happens to be possible, not a
+        // mechanism another RPC can reuse.
+        //
+        // The FOREIGN KEY is what keeps a replay answerable. A replay must
+        // return the user's `external_id_ciphertext`, which is read by joining
+        // iam_user, and this cascade means a ledger row cannot outlive the row
+        // that join needs.
+        sql: "CREATE TABLE iam_enrolment_redemption (
+                  idempotency_key  VARCHAR(255) NOT NULL PRIMARY KEY,
+                  secret_hash      BINARY(32)   NOT NULL,
+                  enrolment_id     VARCHAR(96)  NOT NULL,
+                  user_id          VARCHAR(96)  NOT NULL,
+                  redeemed_at      TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  KEY ix_iam_enrolment_redemption_enrolment (enrolment_id),
+                  CONSTRAINT fk_iam_enrolment_redemption_enrolment
+                      FOREIGN KEY (enrolment_id)
+                      REFERENCES iam_enrolment (id) ON DELETE CASCADE
+              ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+            .into(),
+    }
+}
+
+fn user_is_admin() -> Migration {
+    Migration {
+        version: 8,
+        name: "add_user_is_admin".into(),
+        // A NEW MIGRATION RATHER THAN AN EDIT TO version 1. Deployed databases
+        // are already past 1 and `apply` runs only what is pending, so editing
+        // the CREATE TABLE would change a fresh install and nothing else — and
+        // the two schemas diverge with nothing to notice it.
+        //
+        // NOT encrypted, unlike every other fact about a person in iam_user. It
+        // is a fact about authority rather than about the person, and it has to
+        // be readable in a WHERE clause.
+        //
+        // DEFAULT 0, so every user that already exists is not an admin. D73's
+        // first admin is created with the flag already set, because it has to
+        // exist before anyone can log in to promote one.
+        sql: "ALTER TABLE iam_user
+                  ADD COLUMN is_admin TINYINT(1) NOT NULL DEFAULT 0"
+            .into(),
+    }
+}
+
+fn rate_limit_override() -> Migration {
+    Migration {
+        version: 9,
+        name: "create_rate_limit_override".into(),
+        // The composite primary key carries the idempotence, the same shape
+        // iam_team_member uses: setting one override twice is an upsert onto one
+        // row rather than a second row, so nothing checks first and there is no
+        // race between the check and the write.
+        //
+        // CLEARING AN OVERRIDE DELETES THE ROW. An absent row means "the
+        // deployment's configured default governs this bucket"; a stored rate of
+        // zero means "deny this bucket". Those are different instructions, so
+        // there is deliberately no nullable rate column able to express the
+        // ambiguity.
+        //
+        // `kind` is D67's enum stored as its INTEGER wire value. D74 keys the
+        // bucket on that existing bounded dimension rather than on a second
+        // taxonomy, and the integer is what the contract transmits.
+        sql: "CREATE TABLE iam_rate_limit_override (
+                  user_id     VARCHAR(96)     NOT NULL,
+                  module      VARCHAR(255)    NOT NULL,
+                  kind        INT             NOT NULL,
+                  rate        DOUBLE          NOT NULL,
+                  burst       INT UNSIGNED    NOT NULL,
+                  updated_at  TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                              ON UPDATE CURRENT_TIMESTAMP,
+                  PRIMARY KEY (user_id, module, kind),
+                  CONSTRAINT fk_iam_rate_limit_override_user FOREIGN KEY (user_id)
                       REFERENCES iam_user (id) ON DELETE CASCADE
               ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
             .into(),

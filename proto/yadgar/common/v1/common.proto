@@ -1,6 +1,15 @@
 // Shared envelope and scope types. Every module imports this and nothing else
 // from outside its own package.
 //
+// ONE EXCEPTION, recorded HERE because a reader of the rule above will not open
+// the files that break it: yadgar/iam/v1 and yadgar/iamdb/v1 also import
+// yadgar/telemetry/v1, for D67's `Kind`. D74 keys a rate limit on that existing
+// bounded dimension rather than on a second taxonomy, and `buf breaking`'s FILE
+// rule means the enum cannot be moved into this file without breaking the
+// contract. Both files carry the full reasoning. The practical consequence is
+// that a consumer vendoring `iam` now vendors `telemetry` too, because
+// `buf export` follows the import graph.
+//
 // Field numbers 1-15 encode in one byte, so the envelope fields that appear on
 // every row are kept inside that range. 13-15 are reserved for envelope growth;
 // entity-specific fields start at 16.
@@ -115,7 +124,10 @@ message Scope {
 
 // Applied to every mutating RPC (D9). The same key replayed returns the
 // original outcome rather than performing the write twice; required because a
-// retrying load balancer will deliver a write more than once.
+// retrying load balancer will deliver a write more than once. THE SAME KEY
+// CARRYING A DIFFERENT REQUEST IS REFUSED, with INVALID_ARGUMENT, rather than
+// replayed: replaying it would answer a request nobody made and report success.
+// Which fields count as the request is per-RPC, and D9 carries the argument.
 message Idempotency {
   string key = 1;
 }
