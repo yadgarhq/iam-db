@@ -1017,6 +1017,15 @@ enum Lock {
 /// comparison only because the secret hash is deterministic — the same property
 /// that lets an enrolment be found by it. It cannot make the equivalent
 /// comparison on the password, so `iam` makes that one.
+///
+/// **THAT `INVALID_ARGUMENT` IS A STORE-INTERNAL DISTINCTION AND MUST NOT REACH
+/// AN UNAUTHENTICATED CALLER.** The comparison precedes the lookup deliberately —
+/// a refusal issued after it would report whether the presented secret exists —
+/// but that ordering is also what lets somebody holding NO secret present any key
+/// and read the answer off the status code. This boundary is right to tell the
+/// cases apart, in the same way it tells NOT_FOUND from SPENT from EXPIRED; the
+/// collapsing belongs to `iam`, which owes its caller one refusal for all of
+/// them, and it now does it for this error too.
 async fn replay(
     conn: &mut sqlx::MySqlConnection,
     key: &str,
