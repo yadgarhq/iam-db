@@ -30,6 +30,23 @@ pub mod pb {
                 tonic::include_proto!("yadgar.common.v1");
             }
         }
+        /// D67's `Kind`, generated HERE rather than borrowed from
+        /// `yadgar-telemetry`.
+        ///
+        /// The two crates pin the contract independently, and a `Kind` reached
+        /// through the other crate's `pb` would silently couple this build to
+        /// whichever tag that revision happens to vendor. This one is generated
+        /// from the tag in `PROTO_VERSION`, like every other type here.
+        ///
+        /// So there are two `Kind` types in this process and that is fine,
+        /// because they never meet: this one is a stored request field, held as
+        /// an `i32` in the database, and the telemetry crate's is what
+        /// `Call::start` labels a record with.
+        pub mod telemetry {
+            pub mod v1 {
+                tonic::include_proto!("yadgar.telemetry.v1");
+            }
+        }
         pub mod iamdb {
             pub mod v1 {
                 tonic::include_proto!("yadgar.iamdb.v1");

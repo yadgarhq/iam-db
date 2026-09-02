@@ -1,0 +1,102 @@
+// D67's wide event: one record per call, from every hop.
+//
+// NOT AN RPC SERVICE, deliberately, and there is no service definition in this
+// file. A telemetry RPC on every call would add a network hop to the path D25
+// says must never block. Records are serialised as JSON to stdout and collected;
+// this file exists so the SHAPE is one thing across ~61 services, gated by
+// `buf breaking` like every other contract.
+//
+// The three signals D67 defines are not interchangeable. A metric carries only
+// bounded labels; a span carries causality; this carries the unbounded
+// dimensions — user, instance, project, exact timestamp — that would destroy a
+// metrics store as label values.
+syntax = "proto3";
+
+package yadgar.telemetry.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// What kind of work the record describes. Bounded on purpose: this is one of the
+// few fields that may also appear as a metric label.
+enum Kind {
+  KIND_UNSPECIFIED = 0;
+  KIND_READ = 1;
+  KIND_WRITE = 2;
+  KIND_GENERATE = 3;
+  KIND_JOB = 4;
+}
+
+// One call, from one hop.
+//
+// FIELD NUMBERING IS NOT ARBITRARY, and this is the message where it matters
+// most. Protobuf encodes 1-15 in one byte, and this is emitted on literally
+// every call in the system — so 1-15 hold what EVERY record carries, and 16+
+// hold what only some emitters set.
+message CallRecord {
+  google.protobuf.Timestamp at = 1;
+
+  // Minted by the gateway and propagated unchanged. THE JOIN KEY: one logical
+  // call fans out gateway -> logic -> -db, and without this "bytes returned for
+  // this call" sums one call three times. Also the correlation key for spans.
+  string request_id = 2;
+  // A SESSION, spanning many calls — not this one.
+  string instance_id = 3;
+  string user_id = 4;
+  // Hierarchical (D53).
+  string project_id = 5;
+
+  // The operation as a caller names it: "recall", "ask", "project_brief".
+  string tool = 6;
+  // Which hop emitted this. The same request_id appears once per hop, and the
+  // fields mean different things per hop — bytes returned to the caller is a
+  // GATEWAY fact, rows read is a -db fact.
+  string service = 7;
+  Kind kind = 8;
+  // The gRPC status name, e.g. "OK", "FAILED_PRECONDITION".
+  string outcome = 9;
+  uint64 duration_us = 10;
+
+  // THE MEASUREMENT, and both halves are needed because the RATIO is the signal.
+  //
+  // Words track tokens well for prose and badly for what yadgar actually
+  // returns — a UUID is one word and roughly fifteen tokens. So a high
+  // bytes-per-word means an identifier- and envelope-heavy payload, which calls
+  // for trimming the envelope rather than returning less content. Those are
+  // different fixes, and one number cannot distinguish them.
+  uint64 bytes_returned = 11;
+  uint32 words_returned = 12;
+  uint32 rows_returned = 13;
+
+  // D49, per call rather than as an aggregate rate.
+  bool suppressed_by_dedup = 14;
+  // What dedup SAVED. The efficiency number: a large total with a high
+  // suppression share is a working system, the same total with none is not.
+  uint64 bytes_suppressed = 15;
+
+  // ---- 16+ : set by SOME emitters, not all.
+
+  // Jobs: consolidation, vacuum, the drainer.
+  uint32 rows_touched = 16;
+
+  // Derived from bytes and words by the calibrated estimator, never by a
+  // vendored tokenizer — a tokenizer ships one model's vocabulary and is wrong
+  // for every other caller.
+  //
+  // MEANINGLESS WITHOUT ITS VERSION: retuning the estimator changes what every
+  // past number means, so a dashboard comparing months under different
+  // algorithms compares nothing. Bytes and words stay raw, so a retune never
+  // invalidates the underlying measurement.
+  optional uint32 tokens_estimated = 17;
+  optional string estimator_version = 18;
+
+  // What `ask` spent calling an LLM. A DIFFERENT FACT from the fields above —
+  // this is what yadgar spent, not what the caller was charged. Never sum them.
+  optional uint32 generation_tokens_in = 19;
+  optional uint32 generation_tokens_out = 20;
+
+  // Client-reported actual cost of the PREVIOUS response, riding D39's echo.
+  // Not the tuning target: it is ground truth for calibrating the estimator,
+  // which is a better reason to collect it than the one it was first proposed
+  // for.
+  optional uint32 tokens_actual = 21;
+}

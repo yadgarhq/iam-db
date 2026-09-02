@@ -3,12 +3,33 @@
 // Every RPC is one business operation and one transaction (D5). There is no
 // generic "run this query" arm, deliberately: a storage API shaped like SQL is
 // one the logic tier can drive into states the module never intended.
+//
+// THIS FILE IMPORTS `yadgar/telemetry/v1` for the same reason yadgar/iam/v1
+// does, and with the same reservation: D74 keys a rate limit on D67's `Kind`
+// rather than on a second taxonomy, and `buf breaking`'s FILE rule means that
+// enum cannot be moved into common.proto.
+//
+// `RateLimit` AND `RateLimitOverride` ARE DECLARED HERE AS WELL AS IN
+// yadgar/iam/v1, AND THE REASON IS DIRECTIONAL LAYERING rather than any lint
+// rule. The storage boundary sits below the logic one (D4), so importing
+// yadgar/iam/v1 here would make the store depend on the API it serves — which
+// is a different constraint from the one the neighbouring files live with,
+// where `buf lint` refuses to let two RPCs share a request or response type.
+//
+// Lifting the pair into common.proto is not available either:
+// `RateLimitOverride` embeds `yadgar.telemetry.v1.Kind`, and common.proto
+// importing telemetry would invert the base file's own layering. `RateLimit`
+// alone could be born there — it is two scalars and it is new — and
+// deliberately is not. common.proto carries what EVERY module carries: the
+// envelope, the scope, the idempotency key. Splitting one concept across two
+// files, permanently at the next tag (D15, D16), is the worse trade of the two.
 syntax = "proto3";
 
 package yadgar.iamdb.v1;
 
 import "google/protobuf/timestamp.proto";
 import "yadgar/common/v1/common.proto";
+import "yadgar/telemetry/v1/telemetry.proto";
 
 message User {
   yadgar.common.v1.Meta meta = 1;
@@ -37,6 +58,13 @@ message User {
   // two identical usernames share an index — which is exactly what a lookup key
   // must leak and nothing more.
   bytes external_id_blind_index = 20;
+
+  // D73's admin flag: the thing ordinary administration runs on, and what gives
+  // attribution — which admin created which account — without handing out
+  // cluster access. NOT encrypted, unlike the fields above: it is a fact about
+  // authority rather than about a person, and it has to be readable in a WHERE
+  // clause.
+  bool is_admin = 21;
 }
 
 message Team {
@@ -62,6 +90,41 @@ message Credential {
   optional google.protobuf.Timestamp revoked_at = 6;
 }
 
+// An enrolment, WITHOUT its secret.
+//
+// The same rule Credential follows, for the same reason: what is stored is a
+// hash, so there is nothing here for a read path to leak into a log line that
+// dumps a response.
+message Enrolment {
+  string id = 1;
+  string user_id = 2;
+  google.protobuf.Timestamp created_at = 3;
+  // D73's 24 hours, written down at creation rather than recomputed at read
+  // time — otherwise changing the policy silently re-dates every live token.
+  google.protobuf.Timestamp expires_at = 4;
+  // Absent means unspent. Spending is a tombstone rather than a delete, so
+  // "this secret was presented again after it was used" stays answerable (D26),
+  // and a replay is precisely the event worth keeping.
+  optional google.protobuf.Timestamp spent_at = 5;
+}
+
+// A token bucket (D74), stored per (user, module, kind).
+message RateLimit {
+  double rate = 1;
+  uint32 burst = 2;
+}
+message RateLimitOverride {
+  string module = 1;
+  // D67's Kind. KIND_JOB and KIND_UNSPECIFIED are never stored here — D74 puts
+  // system-initiated work outside this mechanism.
+  yadgar.telemetry.v1.Kind kind = 2;
+  // Always set on a stored override. Clearing an override DELETES the row
+  // rather than storing one with no limit in it, so this is never absent on
+  // the way out — the same rule yadgar.iam.v1.ResolveCredentialResponse states
+  // for the list it builds from these.
+  RateLimit limit = 3;
+}
+
 // The hot one. Everything else on this boundary is administrative.
 message ResolveCredentialRequest {
   // The HASH, computed by `iam`. The plain token never reaches the store, so it
@@ -75,6 +138,14 @@ message ResolveCredentialResponse {
   string user_id = 1;
   repeated string team_ids = 2;
   string credential_id = 3;
+
+  // D73's flag and D74's overrides, read in the SAME transaction as the
+  // credential. Two reads would be two cache lifetimes and a window in which a
+  // withdrawn admin flag or a tightened limit is not yet in force.
+  bool is_admin = 4;
+  // EMPTY means this user has no override, so the gateway's configured defaults
+  // apply unmodified. It does not mean zero, and it does not mean deny.
+  repeated RateLimitOverride rate_limit_overrides = 5;
 }
 
 // Fetch what is needed to verify a password, and nothing else.
@@ -100,6 +171,14 @@ message GetPasswordHashResponse {
   string argon2id_hash = 2;
 }
 
+// Replace a password for a user who already has one.
+//
+// UNUSED IN THE FIRST CUT. Enrolment sets the first password, and it does so
+// through RedeemEnrolment below rather than here, because the two halves must
+// share a transaction. D73 puts password rotation outside the first cut, so
+// this RPC has no caller until rotation arrives — it stays because it is
+// published and removing it would break the contract, and because rotation is
+// exactly what it is for.
 message SetPasswordRequest {
   yadgar.common.v1.Idempotency idempotency = 1;
   string user_id = 2;
@@ -107,6 +186,132 @@ message SetPasswordRequest {
   string argon2id_hash = 3;
 }
 message SetPasswordResponse {}
+
+message CreateEnrolmentRequest {
+  yadgar.common.v1.Idempotency idempotency = 1;
+  string user_id = 2;
+  // The HASH, computed by `iam`. The secret never reaches the store, so it is
+  // never in a query log, a slow-query log, or a database backup — the rule the
+  // credential token already follows.
+  bytes secret_hash = 3;
+  google.protobuf.Timestamp expires_at = 4;
+}
+message CreateEnrolmentResponse {
+  string enrolment_id = 1;
+}
+
+// What a redemption attempt actually was.
+//
+// THE SERVER DISTINGUISHES THESE AND THE CALLER MUST NOT. They arrive as a
+// field on a successful response rather than as four different errors, which is
+// the shape ResolveCredentialResponse already uses for "no live credential
+// matched" and for the same reason: "this secret was already spent" and "the
+// store is broken" are different outcomes, and only the first three are safe to
+// collapse. `iam` collapses NOT_FOUND, SPENT and EXPIRED into one
+// UNAUTHENTICATED before the answer leaves the deployment, and records which of
+// them it was.
+enum RedeemOutcome {
+  REDEEM_OUTCOME_UNSPECIFIED = 0;
+  REDEEM_OUTCOME_REDEEMED = 1;
+  REDEEM_OUTCOME_NOT_FOUND = 2;
+  REDEEM_OUTCOME_SPENT = 3;
+  REDEEM_OUTCOME_EXPIRED = 4;
+}
+
+// Spend an enrolment AND set the password, in ONE transaction (D5).
+//
+// THE TWO HALVES CANNOT BE SEPARATE CALLS. A crash between a mark-as-spent and
+// a SetPassword leaves the enrolment spent and the account with no password —
+// and D73 puts enrolment resend outside the first cut, so the person is locked
+// out of an account whose password was never set, and the way back in is an
+// admin minting a fresh enrolment (yadgar.iam.v1.IssueEnrolment) rather than
+// anything this boundary offers. Checking and spending in one statement is also
+// what stops two concurrent redemptions of one single-use secret from both
+// succeeding; a read followed by a write is that same race with a longer
+// window.
+//
+// EXPIRY IS EVALUATED HERE, against the store's own clock, inside that
+// statement. A caller-supplied time would let a wrong clock revive an expired
+// enrolment, and the deadline is already stored.
+//
+// Credential creation stays a SEPARATE call, deliberately. A crash after this
+// one leaves the person with the password they chose and no credential — and
+// NOT, as it first reads, a person who simply logs in again.
+// yadgar.iam.v1.LoginRequest requires a username, and the username reaches the
+// person in yadgar.iam.v1.RedeemEnrolmentResponse: the answer that was lost is
+// the one carrying it. What makes this boundary safe WITHIN ONE PROCESS is the
+// idempotency key below, replaying the whole outcome instead of finding the
+// secret spent. The boundary is drawn where the failure is recoverable BY A
+// RETRY LOOP THAT IS STILL RUNNING, and it reaches no further:
+// yadgar.iam.v1.RedeemEnrolment states the limit, where a client that dies
+// after this transaction commits, before it durably holds a credential, is
+// locked out and recovers by a fresh enrolment.
+message RedeemEnrolmentRequest {
+  // `iam` passes its OWN caller's key through unchanged, so a retry of one
+  // attempt reaches this transaction as the same write rather than as a second
+  // presentation of the secret. A replay returns the ORIGINAL outcome —
+  // REDEEM_OUTCOME_REDEEMED, with the same user_id, enrolment_id and
+  // external_id_ciphertext — rather than REDEEM_OUTCOME_SPENT, and reporting it
+  // as spent is what locks the person out.
+  //
+  // A REPLAY DOES NOT RE-APPLY THE PASSWORD. `argon2id_hash` below is ignored
+  // on one, so the password the first attempt set is the password that stands.
+  // That is why yadgar.iam.v1.RedeemEnrolmentRequest.idempotency refuses a key
+  // reused with a DIFFERENT password rather than passing it here: the caller
+  // would otherwise be told the change took effect while the first one stayed
+  // live. The check belongs at that boundary because the plaintext exists only
+  // there, and because a fresh Argon2id salt makes two hashes of one password
+  // differ — so this boundary cannot compare them.
+  //
+  // A KEY REUSED WITH A DIFFERENT `secret_hash` IS REFUSED, with
+  // INVALID_ARGUMENT, and THIS is the boundary that can tell: the hash is
+  // deterministic — a secret is looked up by it — so the one presented now is
+  // comparable with the one this key originally spent. A password is not: a
+  // fresh Argon2id salt makes two hashes of one password differ, which is why
+  // that axis is checked in `iam` and this one is checked here. THE COMPARISON
+  // PRECEDES THE LOOKUP of the presented secret, or the refusal itself reports
+  // whether that secret exists.
+  //
+  // THE CREDENTIAL IS NOT COVERED BY THIS KEY. See that same field for why it
+  // cannot be.
+  yadgar.common.v1.Idempotency idempotency = 1;
+  // The HASH, computed by `iam`.
+  bytes secret_hash = 2;
+  // Already hashed by `iam`. The plaintext never crosses this boundary.
+  string argon2id_hash = 3;
+}
+message RedeemEnrolmentResponse {
+  RedeemOutcome outcome = 1;
+  // Set only when outcome is REDEEM_OUTCOME_REDEEMED, so `iam` can issue the
+  // credential without a second read. Empty otherwise, and empty is not an
+  // error.
+  string user_id = 2;
+  string enrolment_id = 3;
+
+  // The redeeming user's encrypted username, read in the SAME transaction.
+  //
+  // WITHOUT IT A REPLAY CANNOT ANSWER, and that is the whole of what makes
+  // yadgar.iam.v1.RedeemEnrolment retry-safe within one process — the limit
+  // that RPC states, and the limit this field inherits. That response carries
+  // the username — a person enrolling on their first machine has no in-band way
+  // to learn it — and `iam` holds no store to have remembered it in (D4), so
+  // the only place a retry can recover it is here. Nothing else on this
+  // boundary can hand it over: no RPC returns a `User`, `GetPasswordHash`
+  // answers a blind index with a hash, and `external_id_blind_index` is one-way
+  // by construction. This field is that one lookup, narrowed to the one caller
+  // that needs it.
+  //
+  // CIPHERTEXT, NEVER THE NAME. This boundary sees no plaintext name in either
+  // direction (D72): `CreateUser` receives one already encrypted, and the key
+  // lives in a Secret `iam` holds rather than in the database. Returning a
+  // plaintext username here would make this the single RPC that breaks that
+  // rule, and would need the store to hold the key in order to break it.
+  // `iam` decrypts this exactly as it encrypted it.
+  //
+  // Set only when outcome is REDEEM_OUTCOME_REDEEMED. Empty otherwise, and
+  // empty is not an error — the same rule `user_id` above carries.
+  bytes external_id_ciphertext = 4;
+}
 
 message CreateCredentialRequest {
   yadgar.common.v1.Idempotency idempotency = 1;
@@ -130,6 +335,25 @@ message RevokeCredentialResponse {
   string user_id = 1;
 }
 
+// The read behind yadgar.iam.v1.ListCredentials, and the only RPC on this
+// boundary that returns a `Credential` — that message was declared with the
+// other storage shapes and read by nothing until this arm existed. Its caller
+// exists because a lost redemption response leaves a credential nobody holds;
+// see yadgar.iam.v1.RedeemEnrolment.
+//
+// A ROW WHOSE `revoked_at` IS SET IS OMITTED, so that field is absent on every
+// row this returns. The tombstones stay in the store — D26 keeps "which
+// credential was used" answerable — and are simply not this RPC's answer.
+message ListCredentialsRequest {
+  string user_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+message ListCredentialsResponse {
+  repeated Credential credentials = 1;
+  string next_page_token = 2;
+}
+
 message CreateUserRequest {
   yadgar.common.v1.Idempotency idempotency = 1;
 
@@ -141,10 +365,33 @@ message CreateUserRequest {
   bytes external_id_ciphertext = 4;
   bytes display_name_ciphertext = 5;
   bytes external_id_blind_index = 6;
+
+  // D73's admin flag, set at creation because the first admin has to exist
+  // before anyone can log in to promote one.
+  bool is_admin = 7;
 }
 message CreateUserResponse {
   yadgar.common.v1.Meta meta = 1;
 }
+
+message SetUserAdminRequest {
+  yadgar.common.v1.Idempotency idempotency = 1;
+  string user_id = 2;
+  bool is_admin = 3;
+}
+message SetUserAdminResponse {}
+
+message SetRateLimitOverrideRequest {
+  yadgar.common.v1.Idempotency idempotency = 1;
+  string user_id = 2;
+  string module = 3;
+  yadgar.telemetry.v1.Kind kind = 4;
+  // ABSENT DELETES the row, so the deployment's configured default governs this
+  // bucket again. A zeroed RateLimit is a different instruction — deny this
+  // bucket — and explicit presence is what keeps the two apart.
+  optional RateLimit limit = 5;
+}
+message SetRateLimitOverrideResponse {}
 
 message AddTeamMemberRequest {
   yadgar.common.v1.Idempotency idempotency = 1;
@@ -164,9 +411,14 @@ service IamDbService {
   rpc ResolveCredential(ResolveCredentialRequest) returns (ResolveCredentialResponse);
   rpc GetPasswordHash(GetPasswordHashRequest) returns (GetPasswordHashResponse);
   rpc SetPassword(SetPasswordRequest) returns (SetPasswordResponse);
+  rpc CreateEnrolment(CreateEnrolmentRequest) returns (CreateEnrolmentResponse);
+  rpc RedeemEnrolment(RedeemEnrolmentRequest) returns (RedeemEnrolmentResponse);
   rpc CreateCredential(CreateCredentialRequest) returns (CreateCredentialResponse);
   rpc RevokeCredential(RevokeCredentialRequest) returns (RevokeCredentialResponse);
+  rpc ListCredentials(ListCredentialsRequest) returns (ListCredentialsResponse);
   rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
+  rpc SetUserAdmin(SetUserAdminRequest) returns (SetUserAdminResponse);
+  rpc SetRateLimitOverride(SetRateLimitOverrideRequest) returns (SetRateLimitOverrideResponse);
   rpc AddTeamMember(AddTeamMemberRequest) returns (AddTeamMemberResponse);
   rpc RemoveTeamMember(RemoveTeamMemberRequest) returns (RemoveTeamMemberResponse);
 }

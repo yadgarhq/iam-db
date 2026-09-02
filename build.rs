@@ -35,12 +35,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(false)
-        // Both files: prost generates only for the files it is given, and
-        // iamdb.proto merely IMPORTING common.proto does not produce a module
-        // for it.
+        // ALL THREE files: prost generates only for the files it is given, and
+        // iamdb.proto merely IMPORTING a file does not produce a module for it.
+        //
+        // telemetry.proto joined the list at contract v1.6.0, and not because
+        // this service wants a second copy of `Kind`. D74 keys a rate-limit
+        // override on D67's existing bounded dimension rather than minting a
+        // second taxonomy, so `RateLimitOverride` embeds
+        // `yadgar.telemetry.v1.Kind` — and `buf breaking`'s FILE rule means that
+        // enum cannot move into common.proto. `buf export` follows the import
+        // graph and vendors it; omitting it here leaves the generated iamdb code
+        // referring to `super::super::telemetry::v1::Kind`, which resolves to
+        // nothing.
         .compile_protos(
             &[
                 "proto/yadgar/common/v1/common.proto",
+                "proto/yadgar/telemetry/v1/telemetry.proto",
                 "proto/yadgar/iamdb/v1/iamdb.proto",
             ],
             &includes[..],
