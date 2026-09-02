@@ -55,12 +55,27 @@ spec:
           env:
             - name: DB_HOST
               value: {{ .Values.database.host | quote }}
+            - name: DB_PORT
+              value: {{ .Values.database.port | quote }}
             - name: DB_NAME
               value: {{ .Values.database.name | quote }}
             - name: DB_USER
               value: {{ .Values.database.user | quote }}
+            # D4's arithmetic, both halves of it. The binary refuses to boot
+            # when maxConnections x REPLICAS exceeds the engine's ceiling less
+            # the five it reserves for an operator, so an engine with a smaller
+            # ceiling than stock MariaDB's 151 needs all three to be settable.
+            - name: DB_MAX_CONNECTIONS
+              value: {{ .Values.database.maxConnections | quote }}
+            - name: DB_ENGINE_MAX_CONNECTIONS
+              value: {{ .Values.database.engineMaxConnections | quote }}
+            # THE NUMBER THE AUTOSCALER MAY REACH, not the number running now.
+            # It is the multiplier in the headroom check above, so wiring
+            # replicaCount while KEDA scales to autoscaling.maxReplicas would
+            # check the arithmetic against a count the autoscaler exceeds. Same
+            # expression as gateway's YADGAR_MAX_REPLICAS, for the same reason.
             - name: REPLICAS
-              value: {{ .Values.replicaCount | quote }}
+              value: {{ if .Values.autoscaling.enabled }}{{ .Values.autoscaling.maxReplicas | quote }}{{ else }}{{ .Values.replicaCount | quote }}{{ end }}
           volumeMounts:
             - name: db-password
               mountPath: /var/run/secrets/iam-db
