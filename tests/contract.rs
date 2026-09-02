@@ -18,6 +18,7 @@
 
 use sqlx::Connection;
 use tonic::Request;
+use yadgar_iam_db::pb::yadgar::common::v1::SettingValue;
 use yadgar_iam_db::pb::yadgar::iamdb::v1::iam_db_service_server::IamDbService as _;
 use yadgar_iam_db::pb::yadgar::iamdb::v1::*;
 use yadgar_iam_db::{schema, service::IamDb};
@@ -1551,5 +1552,179 @@ async fn listing_credentials_omits_the_revoked_ones() {
     assert!(
         live.credentials[0].created_at.is_some(),
         "a listed credential must carry the time it was made"
+    );
+}
+
+/// ADR-0522's setting, as it is stored: the organisation's value and lock, and
+/// every team that states something else.
+///
+/// The name is the same literal `service.rs` binds, spelled out here rather than
+/// imported so a rename of the constant cannot rename the row underneath these
+/// assertions without one of them failing.
+const OWNER_READS_OWN_RECORD: &str = "owner_reads_own_record";
+
+#[tokio::test]
+async fn the_shipped_default_is_readable_with_the_lock_engaged() {
+    // ADR-0522 ships the organisation's value ON and the lock ENGAGED, so the
+    // owner-always-reads behaviour is what a fresh deployment gets and is not
+    // quietly overridable. A migration that created the tables and seeded no row
+    // would leave every deployment's value UNSPECIFIED, which an enforcing -db
+    // refuses — an outage that no test creating its own row would see.
+    let svc = fresh("iam_db_test_setting_default").await;
+    seed(&svc, &[60u8; 32], &[60u8; 32]).await;
+
+    let got = svc
+        .resolve_credential(Request::new(ResolveCredentialRequest {
+            token_hash: vec![60u8; 32],
+        }))
+        .await
+        .expect("resolve")
+        .into_inner();
+
+    let setting = got
+        .owner_reads_own_record
+        .expect("the setting travels with the identity");
+    assert_eq!(setting.org_value, SettingValue::On as i32);
+    assert!(setting.org_locked, "the shipped lock is engaged");
+    assert!(setting.team_override.is_empty());
+}
+
+#[tokio::test]
+async fn every_team_override_comes_back_including_teams_the_caller_is_not_in() {
+    // THE TEAM IS THE RECORD'S, NEVER THE CALLER'S. The failure ADR-0522 exists
+    // to fix is an owner who LEFT the team their record is shared with, so an
+    // override keyed on the teams the caller currently belongs to would evaporate
+    // in exactly the case it is for. The surrounding queries in this RPC all
+    // filter by `user_id`; this one must not, and that is what this pins.
+    //
+    // It also pins that this module RESOLVES NOTHING: the organisation is locked,
+    // which makes the override inert, and the override still comes back. The
+    // resolution happens where the reach is computed, against the team of the row
+    // being read, which neither this module nor its caller knows.
+    let svc = fresh("iam_db_test_setting_override").await;
+    seed(&svc, &[61u8; 32], &[61u8; 32]).await;
+
+    sqlx::query(
+        "INSERT INTO iam_team (id, name, created_by, updated_by) VALUES (?, ?, 'system', 'system')",
+    )
+    .bind("yadgar:team:left")
+    .bind("the team the owner left")
+    .execute(svc.pool())
+    .await
+    .expect("seed team");
+
+    sqlx::query("INSERT INTO iam_team_setting_override (name, team_id, value) VALUES (?, ?, ?)")
+        .bind(OWNER_READS_OWN_RECORD)
+        .bind("yadgar:team:left")
+        .bind(SettingValue::Off as i32)
+        .execute(svc.pool())
+        .await
+        .expect("seed override");
+
+    let got = svc
+        .resolve_credential(Request::new(ResolveCredentialRequest {
+            token_hash: vec![61u8; 32],
+        }))
+        .await
+        .expect("resolve")
+        .into_inner();
+
+    assert!(
+        got.team_ids.is_empty(),
+        "the caller is in no team, which is the whole point"
+    );
+    let setting = got
+        .owner_reads_own_record
+        .expect("the setting travels with the identity");
+    assert!(setting.org_locked, "a locked organisation makes it inert");
+    assert_eq!(
+        setting.team_override.get("yadgar:team:left"),
+        Some(&(SettingValue::Off as i32)),
+        "an override for a team the caller is not in must still be returned"
+    );
+}
+
+#[tokio::test]
+async fn an_absent_organisation_row_is_unspecified_and_never_off() {
+    // SETTING_VALUE_UNSPECIFIED IS NOT A DEFAULT AND IS NEVER A VALUE. A store
+    // with no row states no policy, and the enforcing -db refuses rather than
+    // choosing one. Answering OFF here would be this module choosing the strict
+    // policy for a deployment that never asked for it — silently, since an unset
+    // enum is falsy in every generated language.
+    //
+    // The message stays PRESENT. An absent message and a present one holding
+    // UNSPECIFIED are one case to the receiver, and both are refused alike, so
+    // sending it costs nothing and keeps one shape on the wire.
+    let svc = fresh("iam_db_test_setting_absent").await;
+    seed(&svc, &[62u8; 32], &[62u8; 32]).await;
+
+    sqlx::query("DELETE FROM iam_org_setting WHERE name = ?")
+        .bind(OWNER_READS_OWN_RECORD)
+        .execute(svc.pool())
+        .await
+        .expect("delete the organisation's row");
+
+    let got = svc
+        .resolve_credential(Request::new(ResolveCredentialRequest {
+            token_hash: vec![62u8; 32],
+        }))
+        .await
+        .expect("resolve")
+        .into_inner();
+
+    let setting = got
+        .owner_reads_own_record
+        .expect("the message is sent even when the organisation states nothing");
+    assert_eq!(
+        setting.org_value,
+        SettingValue::Unspecified as i32,
+        "no row means no policy, and never means OFF"
+    );
+    assert!(!setting.org_locked);
+}
+
+#[tokio::test]
+async fn an_unlocked_organisation_comes_back_verbatim() {
+    // THE UNLOCKED ARM, which nothing else in this file ever stores. Every other
+    // test reads the seeded `(ON, locked)` row or a deleted one, so each column
+    // was only ever observed at one value and a read that ignored the row
+    // entirely still passed: hard-coding `locked` to `true`, or `value` to
+    // SETTING_VALUE_ON, left all forty-one green. Measured, not conjectured.
+    //
+    // ADR-0522 hangs the whole team-override mechanism on the lock being CLEAR —
+    // a locked organisation makes every override inert — so the one arm the
+    // overrides exist for was the one arm never written.
+    //
+    // Both columns differ from the seed AT ONCE, which is what makes this pin
+    // the read rather than the seed.
+    let svc = fresh("iam_db_test_setting_unlocked").await;
+    seed(&svc, &[63u8; 32], &[63u8; 32]).await;
+
+    sqlx::query("UPDATE iam_org_setting SET value = ?, locked = 0 WHERE name = ?")
+        .bind(SettingValue::Off as i32)
+        .bind(OWNER_READS_OWN_RECORD)
+        .execute(svc.pool())
+        .await
+        .expect("store the unlocked arm");
+
+    let got = svc
+        .resolve_credential(Request::new(ResolveCredentialRequest {
+            token_hash: vec![63u8; 32],
+        }))
+        .await
+        .expect("resolve")
+        .into_inner();
+
+    let setting = got
+        .owner_reads_own_record
+        .expect("the setting travels with the identity");
+    assert_eq!(
+        setting.org_value,
+        SettingValue::Off as i32,
+        "the stored value comes back, never the seeded one"
+    );
+    assert!(
+        !setting.org_locked,
+        "a cleared lock comes back cleared, which is what makes an override consultable"
     );
 }

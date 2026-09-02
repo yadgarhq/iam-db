@@ -16,7 +16,7 @@ use yadgar_telemetry::grpc::status_name;
 use yadgar_telemetry::observe::{Call, Outcome};
 use yadgar_telemetry::pb::yadgar::telemetry::v1::Kind;
 
-use crate::pb::yadgar::common::v1::Meta;
+use crate::pb::yadgar::common::v1::{InheritedSetting, Meta, SettingValue};
 use crate::pb::yadgar::iamdb::v1::iam_db_service_server::IamDbService;
 use crate::pb::yadgar::iamdb::v1::*;
 /// D67's `Kind` AS THE CONTRACT DECLARES IT, aliased because `Kind` above is
@@ -35,6 +35,13 @@ const DEFAULT_PAGE_SIZE: i32 = 50;
 /// The ceiling, because `page_size` is a caller-supplied `int32`. Without it one
 /// request asks for every credential in the table and the memory to hold them.
 const MAX_PAGE_SIZE: i32 = 200;
+
+/// The name ADR-0522's setting is stored under, in both settings tables.
+///
+/// The estate's first inheritable setting. The tables are keyed by name, so a
+/// second setting whose value is a `SettingValue` needs no migration of its
+/// own; one carrying anything else still needs a table of its own.
+const OWNER_READS_OWN_RECORD: &str = "owner_reads_own_record";
 
 pub struct IamDb {
     pool: MySqlPool,
@@ -120,12 +127,13 @@ impl IamDbService for IamDb {
         // `deleted_at IS NULL` on the user matters as much: a soft-deleted person
         // whose credentials were never revoked would otherwise keep working.
         //
-        // ONE TRANSACTION for all three reads, because the contract says the
-        // admin flag and the overrides are read in the SAME transaction as the
-        // credential. Three separate pool queries would be three points in time,
-        // and the window between them is one in which a withdrawn admin flag or
-        // a tightened limit is already gone from the store and not yet in force
-        // in the answer — cached, at the caller, for a whole cache lifetime.
+        // ONE TRANSACTION for every read here, because the contract says the
+        // admin flag, the overrides and ADR-0522's setting are read in the SAME
+        // transaction as the credential. Separate pool queries would each be a
+        // different point in time, and the window between them is one in which a
+        // withdrawn admin flag or a tightened limit is already gone from the
+        // store and not yet in force in the answer — cached, at the caller, for
+        // a whole cache lifetime.
         let mut tx = self.pool.begin().await.map_err(db)?;
 
         let row = sqlx::query(
@@ -195,6 +203,55 @@ impl IamDbService for IamDb {
         .collect::<Result<_, sqlx::Error>>()
         .map_err(db)?;
 
+        // THE INPUTS, NOT THE ANSWER. The organisation's value, its lock and
+        // EVERY team's override go back unresolved, because the resolution
+        // depends on the team of the ROW being read — which neither this module
+        // nor `iam` nor the gateway knows. Resolving it here would hand down a
+        // decision made against the wrong team, and nothing about the answer
+        // would look wrong.
+        //
+        // AN ABSENT ROW IS SETTING_VALUE_UNSPECIFIED AND IS NEVER OFF. A store
+        // that states no policy must reach the enforcing `-db` as a refusal,
+        // rather than as this module quietly choosing the strict one.
+        let org = sqlx::query("SELECT value, locked FROM iam_org_setting WHERE name = ?")
+            .bind(OWNER_READS_OWN_RECORD)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db)?;
+        let (org_value, org_locked) = match org {
+            Some(row) => (
+                row.try_get::<i32, _>("value").map_err(db)?,
+                row.try_get::<bool, _>("locked").map_err(db)?,
+            ),
+            None => (SettingValue::Unspecified as i32, false),
+        };
+
+        // NOT FILTERED BY `user_id`, unlike every other query in this RPC, and
+        // the difference is deliberate: the override that matters is the one
+        // belonging to the team of the RECORD, and the owner this setting exists
+        // for has LEFT that team. Narrowing to the caller's teams would make the
+        // setting evaporate in exactly the case it is for.
+        //
+        // UNBOUNDED ON PURPOSE, on the hottest path, and the bound is SPARSITY
+        // rather than a clause: at most one row per team that states something,
+        // and a team states something only when an operator writes one. It does
+        // not grow with users, credentials or requests. A bare LIMIT would be
+        // worse than the unboundedness rather than a mitigation of it — the
+        // teams that fell off the end get a WRONG answer instead of a slow one,
+        // and nothing says which. Bounding this for real means a cache, or
+        // narrowing to the team of the row being read, and that team is not in
+        // this request.
+        let team_override =
+            sqlx::query("SELECT team_id, value FROM iam_team_setting_override WHERE name = ?")
+                .bind(OWNER_READS_OWN_RECORD)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(db)?
+                .into_iter()
+                .map(|r| Ok((r.try_get("team_id")?, r.try_get("value")?)))
+                .collect::<Result<_, sqlx::Error>>()
+                .map_err(db)?;
+
         tx.commit().await.map_err(db)?;
 
         let resp = ResolveCredentialResponse {
@@ -203,6 +260,11 @@ impl IamDbService for IamDb {
             credential_id,
             is_admin,
             rate_limit_overrides,
+            owner_reads_own_record: Some(InheritedSetting {
+                org_value,
+                org_locked,
+                team_override,
+            }),
         };
         call.finish(Outcome {
             status: "OK",

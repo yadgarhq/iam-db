@@ -27,6 +27,89 @@ enum Visibility {
   VISIBILITY_ORG = 3; // everyone in the installation
 }
 
+// A setting's value where a setting has three states rather than two.
+//
+// UNSPECIFIED IS NOT A DEFAULT AND IS NEVER A VALUE. On the organisation level
+// it means the sender did not populate the setting at all, and the receiver
+// REFUSES with INVALID_ARGUMENT rather than substituting one — see
+// InheritedSetting. In a team override map, absence is what "this team states
+// nothing" looks like, so UNSPECIFIED never appears there either: an entry
+// exists only to say ON or OFF.
+enum SettingValue {
+  SETTING_VALUE_UNSPECIFIED = 0; // never sent; refused at validation
+  SETTING_VALUE_OFF = 1;
+  SETTING_VALUE_ON = 2;
+}
+
+// A setting an organisation states and a team may be permitted to override.
+//
+// **THIS IS THE ESTATE'S FIRST INHERITABLE SETTING (ADR-0522), SO IT IS THE
+// SHAPE.** A second setting that needs an organisation level and a team level
+// reuses this message rather than inventing a second resolution. Two mechanisms
+// answering one question is the coupling this project refuses elsewhere. It is
+// deliberately NOT a settings framework: three fields and one resolution rule,
+// added when the first setting needed them.
+//
+// **THE RESOLUTION, and it is stated once, here.** Given the team a record
+// belongs to:
+//
+//     if org_locked:                       org_value
+//     else if team_override has that team: that entry
+//     else:                                org_value
+//
+// **THE LOCK IS THE LOAD-BEARING FIELD.** Without it an organisation cannot
+// state a policy a team may not escape, which is the only reason an
+// organisation level exists rather than only a team one. A locked organisation
+// IGNORES every override rather than merging with it, and an implementation
+// that merely prefers the override where one exists passes three of the four
+// combinations — the two that discriminate are a locked organisation with a
+// contradicting override, and a clear one with none.
+//
+// **RESOLVED WHERE THE REACH IS COMPUTED, NEVER AT A CALLER.** These are the
+// INPUTS to the resolution and not its answer, and that is the point: the answer
+// depends on the team of the ROW being read, which no caller upstream of the
+// query knows. A service that resolved this for someone else would be handing
+// down a decision made against the wrong team, and nothing about the answer
+// would look wrong.
+//
+// **THE TEAM IS THE RECORD'S, NEVER THE CALLER'S.** The failure this exists to
+// fix is an owner who LEFT the team their record is shared with, so keying the
+// override on the teams the caller currently belongs to would make the setting
+// evaporate in exactly the case it is for.
+message InheritedSetting {
+  // What the organisation states. There is one organisation: a deployment is an
+  // organisation (D27), so this is not keyed by an identifier.
+  //
+  // SETTING_VALUE_UNSPECIFIED HERE IS A REFUSAL, NOT A DEFAULT. A receiver THAT
+  // READS THIS SETTING answers INVALID_ARGUMENT rather than choosing a value.
+  // The hazard is not that proto3's zero MEANS off — the zero is
+  // SETTING_VALUE_UNSPECIFIED and says nothing — it is that an unset enum is
+  // falsy in every generated language, so a receiver written as `if
+  // setting.org_value` treats "the sender said nothing" as "the strict policy",
+  // silently, in a deployment that never chose it. That is the failure mode
+  // ADR-0522 names, and refusing is what makes it unwritable.
+  //
+  // A receiver that does not read this setting is unaffected; that is the
+  // pre-enforcement state, not an exemption from the refusal.
+  SettingValue org_value = 1;
+
+  // Whether a team may override the value above. When set, org_value applies
+  // and team_override is IGNORED rather than merged.
+  //
+  // ADR-0522 ships this ENGAGED for owner_reads_own_record, so the expected
+  // behaviour is not merely the default but is also not quietly overridable. A
+  // deployment that wants team-by-team variation opts into that variability.
+  bool org_locked = 2;
+
+  // Teams that state something other than the organisation's value, keyed by
+  // team id. ABSENCE IS "THIS TEAM STATES NOTHING", which is why a team with no
+  // opinion has no entry rather than an entry holding UNSPECIFIED.
+  //
+  // Sparse by construction: an override is an exception, and a locked
+  // organisation makes the whole map inert.
+  map<string, SettingValue> team_override = 3;
+}
+
 // Carried by every user-facing entity (D8, D9, D12, D26).
 message Meta {
   // URN carrying a UUID, e.g. "yadgar:memory:0192f3c1-8a4e-7c2d-9b11-5f0e7a3d84c6".
@@ -120,6 +203,48 @@ message Scope {
   // Idempotency.key, which identifies a WRITE so a retry is not applied twice.
   // Three identifiers with three lifetimes: session, request, write.
   string request_id = 5;
+
+  // Whether an owner reads their own record even when they are not a member of
+  // the team it is shared with (ADR-0522).
+  //
+  // **THE DEFECT THIS ANSWERS.** The visibility ladder's PRIVATE rung is "not
+  // TEAM and not ORG", which excludes a TEAM-visible row whoever owns it — so an
+  // owner whose record is shared with a team, and who then leaves that team,
+  // cannot read their own record. The DELETE path was written to avoid exactly
+  // this; the read path has the hole.
+  //
+  // **IT TRAVELS ON Scope BECAUSE Scope IS WHAT REACHES THE QUERY.** A -db is
+  // the last hop that turns identity into an access decision, and Scope is the
+  // only thing that arrives there unchanged from the gateway. Putting the
+  // setting on each RPC instead would let one RPC be written without it, and a
+  // handler that never consulted the setting would silently apply the wrong
+  // policy while answering successfully.
+  //
+  // **THE ROLL-OUT ORDER IS PART OF THE CONTRACT, because the refusal on
+  // InheritedSetting.org_value makes it so.** `iam` must serve this and the
+  // gateway must populate it BEFORE a -db reads it. A -db that reads an unset
+  // org_value refuses every read — an outage rather than a wrong answer, which
+  // is the better failure but is still one. Populate, deploy, then enforce.
+  //
+  // **THERE ARE EXACTLY TWO STATES FOR A -db, AND WHICH ONE IT IS IN IS DECIDED
+  // BY WHETHER IT READS THIS FIELD**, so that the two paragraphs above are not
+  // read as alternatives a running service chooses between. A -db that does not
+  // read the field is in the PRE-ENFORCEMENT state and behaves exactly as it
+  // does today — that is what makes the order above possible at all. A -db that
+  // reads it is in the ENFORCING state and the refusal binds it absolutely;
+  // substituting a default there is the silent wrong policy this whole setting
+  // exists to prevent. There is no third state in which a -db reads the field
+  // and tolerates it being unset.
+  //
+  // **AN ABSENT MESSAGE AND A PRESENT ONE HOLDING SETTING_VALUE_UNSPECIFIED ARE
+  // ONE CASE, NOT TWO, AND BOTH ARE REFUSED.** This is a message field, so
+  // proto3 gives it explicit presence and the two ARE distinguishable on the
+  // wire — which is exactly why the contract has to say they are treated alike.
+  // They mean the same thing, "the sender named no policy", and an
+  // implementation that refused only the second would accept a wholly absent
+  // setting and fall back to a default, reintroducing the failure the refusal
+  // exists to prevent. Presence is not a third value.
+  InheritedSetting owner_reads_own_record = 6;
 }
 
 // Applied to every mutating RPC (D9). The same key replayed returns the
@@ -128,6 +253,32 @@ message Scope {
 // CARRYING A DIFFERENT REQUEST IS REFUSED, with INVALID_ARGUMENT, rather than
 // replayed: replaying it would answer a request nobody made and report success.
 // Which fields count as the request is per-RPC, and D9 carries the argument.
+//
+// ONE CARVE-OUT FROM THE REPLAY RULE, and it is stated here because a caller
+// reading only the RPC it is calling would meet it as a surprise: AN RPC WHOSE
+// SUCCESSFUL OUTCOME IS A SINGLE-USE SECRET REFUSES A REPLAYED KEY, with
+// INVALID_ARGUMENT, RATHER THAN ANSWERING WITH A SPENT ONE (ADR-0519). The
+// replay rule above holds for every RPC whose outcome can be re-derived from
+// what the store kept; this covers an outcome that cannot, and the boundary is
+// whether the answer is reconstructible without persisting the secret itself.
+// A secret shown once and kept only as a hash is not, so the original cannot
+// be returned and a replay would hand back a token that authenticates nobody.
+//
+// THE MEMBERS ARE ENUMERATED RATHER THAN LEFT AS A TEST THE READER APPLIES,
+// and today the list is one: yadgar.iam.v1.IssueEnrolment. AN RPC NOT NAMED
+// HERE IS NOT A MEMBER, however well it fits the description — deciding it by
+// reading would silently reclassify RPCs that are already published, which is
+// the change this enumeration exists to prevent.
+//
+// TWO OTHER RPCs ANSWER WITH A TOKEN THE STORE KEEPS ONLY AS A HASH, and both
+// are deliberately left as they stand. yadgar.iam.v1.RedeemEnrolment already
+// puts its credential OUTSIDE the replayed key — a retry mints a fresh one
+// under a key of its own — so the outcome the key does cover is reconstructible
+// and the carve-out has nothing to say about it. yadgar.iam.v1.IssueCredential
+// is the case this rule would reach; moving it is its own decision and its own
+// contract release, and it is not made here. A NEW RPC MINTING A SINGLE-USE
+// SECRET MUST CLASSIFY ITSELF AGAINST THIS RULE, and say on which side it
+// landed, before its idempotency behaviour is written.
 message Idempotency {
   string key = 1;
 }
