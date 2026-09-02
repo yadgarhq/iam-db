@@ -15,6 +15,8 @@
 //! paths that must agree about TLS was the bug; one path is the fix, and
 //! [`probe_connect_options`] is the seam that keeps it one.
 
+use std::path::PathBuf;
+
 use sqlx::mysql::MySqlConnectOptions;
 use yadgar_store::credentials::Secret;
 use yadgar_store::pool::{parse_ssl_mode, PoolConfig, PoolError, DEFAULT_SSL_MODE};
@@ -27,6 +29,20 @@ const OBSOLETE_TLS_KEY: &str = "DB_REQUIRE_TLS";
 
 /// The key that replaced it.
 const SSL_MODE_KEY: &str = "DB_SSL_MODE";
+
+/// The key naming the authority the verifying modes check the engine against.
+///
+/// **`DB_SSL_*` rather than `DB_TLS_*`, and the difference is deliberate.** The
+/// estate spells a gRPC dial's authority `<UPSTREAM>_TLS_CA_FILE` — `iam`
+/// carries `IAM_DB_TLS_CA_FILE` for the hop INTO this module. That family is
+/// gated by a boolean `_TLS_ENABLED`. This dial has no such flag: it is gated by
+/// five-valued [`SSL_MODE_KEY`], and this file is meaningful under two of those
+/// values and inert under three. A `DB_TLS_CA_FILE` read beside a `DB_SSL_MODE`
+/// in this same function would be two words for one concept inside one pair of
+/// keys, which is the defect the estate's naming rule exists to prevent rather
+/// than an instance of it. `SSL` also names what it fills: sqlx's `ssl_ca`, on
+/// [`yadgar_store::pool::PoolConfig::ssl_ca`].
+const SSL_CA_KEY: &str = "DB_SSL_CA_FILE";
 
 fn env_or(env: &impl Fn(&str) -> Option<String>, key: &str, default: &str) -> String {
     env(key).unwrap_or_else(|| default.to_string())
@@ -54,6 +70,16 @@ pub fn pool_config(env: impl Fn(&str) -> Option<String>) -> Result<PoolConfig, B
         replicas: env_or(&env, "REPLICAS", "2").parse()?,
         engine_max_connections: env_or(&env, "DB_ENGINE_MAX_CONNECTIONS", "151").parse()?,
         ssl_mode: parse_ssl_mode(&env_or(&env, SSL_MODE_KEY, DEFAULT_SSL_MODE))?,
+        // TRIMMED AND EMPTY-FILTERED, unlike every value above, because this one
+        // is an `Option` and Helm renders an unset value as `""`. Without the
+        // filter that empty string becomes `Some(PathBuf::new())` — a path sqlx
+        // opens and cannot, so a deployment that never asked for certificate
+        // verification fails to boot. Absent and empty must mean the same thing:
+        // no authority named, which is what `None` is.
+        ssl_ca: env(SSL_CA_KEY)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from),
     })
 }
 
@@ -70,26 +96,20 @@ pub fn probe_connect_options(config: &PoolConfig, secret: &Secret) -> MySqlConne
 
 #[derive(Debug, thiserror::Error)]
 pub enum BootError {
-    /// **THE LAST SENTENCE USED TO NAME A CAPABILITY THAT DOES NOT EXIST.** It
-    /// read "verify_ca and verify_identity are why it is gone", which told an
-    /// operator reading a boot failure that certificate verification was the
-    /// reward for the migration. Nothing configures a certificate authority for
-    /// the engine's certificate: [`yadgar_store::pool::PoolConfig`] has no field
-    /// for one, `connect_options` never calls sqlx's `ssl_ca`, and no chart
-    /// mounts a bundle. Under `tls-rustls-ring` — with `webpki-roots` the only
-    /// root source in this binary's lock file — `sqlx-core` builds its trust
-    /// store from `webpki_roots::TLS_SERVER_ROOTS`, the PUBLIC web roots, which
-    /// sign no operator-issued MariaDB certificate. So both verifying modes fail
-    /// closed and the two modes that connect verify nothing.
+    /// **THIS MESSAGE HAS BEEN WRONG IN BOTH DIRECTIONS, so the rule for editing
+    /// it is: say what is reachable TODAY, and name the key that reaches it.** It
+    /// once ended "verify_ca and verify_identity are why it is gone", which
+    /// promised a verification nothing configured; that was corrected to say the
+    /// authority could not be configured at all. [`SSL_CA_KEY`] is what makes the
+    /// second statement obsolete in turn — the authority is now a value, so the
+    /// message names it rather than describing an absence.
     ///
-    /// The reason the boolean had to go survives intact and is the half that
-    /// stays: it could not tell `preferred` from `required`, and that difference
-    /// is whether a failed handshake falls back to cleartext.
+    /// The reason the boolean had to go is unchanged by any of that and is the
+    /// half that stays: it could not tell `preferred` from `required`, and that
+    /// difference is whether a failed handshake falls back to cleartext.
     ///
-    /// The modes are still ACCEPTED — `parse_ssl_mode` recognises all five and
-    /// this message must go on listing them, because a message that hid two of
-    /// the values the parser takes would be a second wrong description. What
-    /// changed is that it no longer offers them as working.
+    /// All five modes stay listed, because a message that hid two of the values
+    /// the parser takes would be its own wrong description.
     #[error(
         "DB_REQUIRE_TLS is set and this binary no longer reads it. Set DB_SSL_MODE \
          instead — one of: disabled, preferred, required, verify_ca, verify_identity \
@@ -99,10 +119,12 @@ pub enum BootError {
          DB_REQUIRE_TLS was a boolean: it could not tell 'encrypt, and connect in \
          cleartext if that fails' from 'encrypt or refuse to connect', which is \
          preferred against required, and that is why it is gone. \
-         USE required. verify_ca and verify_identity are accepted and DO NOT WORK \
-         YET: nothing here configures the certificate authority that signed the \
-         engine's certificate, so both verify against the public web roots and \
-         refuse every connection to an engine whose certificate an operator issued."
+         verify_ca and verify_identity check the engine's certificate against the \
+         certificate authority named by DB_SSL_CA_FILE. With no DB_SSL_CA_FILE set \
+         they check against the PUBLIC WEB ROOTS instead, which sign no \
+         operator-issued engine certificate — so a private-CA engine is refused \
+         and, under verify_ca, any publicly-trusted certificate for any name is \
+         accepted. Set both keys together or neither."
     )]
     ObsoleteRequireTls,
 
@@ -144,6 +166,7 @@ mod tests {
             replicas: 2,
             engine_max_connections: 151,
             ssl_mode: mode,
+            ssl_ca: None,
         }
     }
 
@@ -186,28 +209,19 @@ mod tests {
     }
 
     #[test]
-    fn the_refusal_does_not_offer_a_verification_this_binary_cannot_perform() {
-        // THE MESSAGE USED TO END "verify_ca and verify_identity are why it is
-        // gone", and that named a capability that does not exist. Nothing sets
-        // sqlx's `ssl_ca`: `PoolConfig` has no field for a certificate authority,
-        // `yadgar_store::pool::connect_options` never calls the setter, and no
-        // chart mounts one. Under `tls-rustls-ring` with webpki-roots — the only
-        // root source in this binary's lock file — `sqlx-core` builds its trust
-        // store from `webpki_roots::TLS_SERVER_ROOTS`, which is the PUBLIC web
-        // roots. An operator-issued MariaDB certificate is signed by none of
-        // them, so both verifying modes fail closed and the two modes that do
-        // connect verify nothing.
+    fn the_refusal_names_the_key_that_makes_the_verifying_modes_work() {
+        // THIS TEST REPLACES ONE THAT ASSERTED THE OPPOSITE. Its predecessor
+        // pinned the message's admission that the certificate authority "cannot
+        // be configured yet", and said in its own comment that the day it became
+        // configurable this test was what had to change deliberately rather than
+        // let the message drift back on its own. `DB_SSL_CA_FILE` is that day.
         //
-        // The reason the boolean had to go is still real and is the half that
-        // stays: `DB_REQUIRE_TLS` could not tell `preferred` from `required`, and
-        // that difference is whether a failed handshake falls back to cleartext.
-        //
-        // A PROSE CONTRACT ADMITS ONLY A PROSE ASSERTION, which is the same shape
-        // the `DB_SSL_MODE` check above already uses. What a future editor must
-        // keep is the SUBSTANCE, not the words: name the two verifying modes, and
-        // say the certificate authority they would need is not configurable. When
-        // it becomes configurable, this test is the thing that must be changed
-        // deliberately rather than the message drifting back on its own.
+        // A PROSE CONTRACT ADMITS ONLY A PROSE ASSERTION, the same shape the
+        // `DB_SSL_MODE` check above already uses. What a future editor must keep
+        // is the SUBSTANCE: name the distinction the boolean could not express,
+        // list every mode the parser takes, and — because naming the verifying
+        // modes without naming what they verify against is what made this message
+        // wrong twice — name the key that supplies the authority.
         let err = pool_config(env_of(&[("DB_REQUIRE_TLS", "true")]))
             .expect_err("a set DB_REQUIRE_TLS must refuse the boot");
         let message = err.to_string();
@@ -221,9 +235,9 @@ mod tests {
             "the refusal must still list every mode DB_SSL_MODE accepts: {message}"
         );
         assert!(
-            message.contains("certificate authority"),
-            "the refusal names verify_ca and verify_identity, so it must also say \
-             the certificate authority they need cannot be configured yet: {message}"
+            message.contains(SSL_CA_KEY),
+            "the refusal offers verify_ca and verify_identity, so it must name the \
+             key that supplies the authority they check against: {message}"
         );
     }
 
@@ -241,15 +255,13 @@ mod tests {
     }
 
     #[test]
-    fn the_verifying_modes_reach_the_configuration_even_though_they_cannot_connect() {
-        // WHAT THIS ASSERTS IS PARSING, NOT VERIFICATION, and its old name said
-        // the second. `verify_ca` and `verify_identity` travel from the
-        // environment into `PoolConfig` — that much is real and worth pinning,
-        // because a mode silently downgraded on the way through would be the
-        // fail-open this module exists to prevent. Neither mode CONNECTS today:
-        // nothing configures a certificate authority for the engine's
-        // certificate, so sqlx checks against the public web roots and refuses.
-        // See `BootError::ObsoleteRequireTls`.
+    fn the_verifying_modes_reach_the_configuration() {
+        // WHAT THIS ASSERTS IS PARSING, NOT VERIFICATION. `verify_ca` and
+        // `verify_identity` travel from the environment into `PoolConfig` — worth
+        // pinning on its own, because a mode silently downgraded on the way
+        // through would be the fail-open this module exists to prevent. The
+        // authority they check against travels separately and is pinned by
+        // `the_configured_certificate_authority_reaches_the_pool`.
         //
         // The hyphen spelling is the one a chart writes; sqlx writes the
         // underscore.
@@ -273,6 +285,48 @@ mod tests {
             matches!(err, BootError::Pool(PoolError::UnknownSslMode { .. })),
             "{err}"
         );
+    }
+
+    /// A SENTINEL: nothing in this module or in `store` could produce this
+    /// path, so a test that sees it saw it travel from the environment.
+    const SENTINEL_CA: &str = "/etc/yadgar/pangolin-7c21/engine-authority.pem";
+
+    #[test]
+    fn the_configured_certificate_authority_reaches_the_pool() {
+        // THE HALF THAT WAS MISSING. `verify_ca` and `verify_identity` check a
+        // chain, and until this key existed there was no value naming the
+        // authority to check it against — so sqlx used the public web roots,
+        // which sign no operator-issued engine certificate.
+        let config = pool_config(env_of(&[("DB_SSL_CA_FILE", SENTINEL_CA)])).expect("config");
+
+        assert_eq!(
+            config.ssl_ca.as_deref(),
+            Some(std::path::Path::new(SENTINEL_CA)),
+            "the configured authority did not reach the pool configuration"
+        );
+    }
+
+    #[test]
+    fn an_unset_or_empty_authority_is_no_authority_rather_than_an_empty_path() {
+        // UNSET is the shipped deployment and must stay `None`: `Some` here
+        // would name a file sqlx then fails to open, and a default CA path is a
+        // policy this module has no business inventing — an Azure MySQL engine
+        // whose authority IS a public root legitimately configures none.
+        assert_eq!(pool_config(env_of(&[])).expect("config").ssl_ca, None);
+
+        // EMPTY is the same statement written by a chart. Helm renders an unset
+        // value as "", so a naive read turns "no authority" into `PathBuf::new()`
+        // — a path sqlx opens and cannot, failing the boot of every deployment
+        // that never asked for verification at all.
+        for value in ["", " ", "\t", "\n"] {
+            assert_eq!(
+                pool_config(env_of(&[("DB_SSL_CA_FILE", value)]))
+                    .expect("config")
+                    .ssl_ca,
+                None,
+                "{value:?} must mean no authority, not an unopenable path"
+            );
+        }
     }
 
     #[test]

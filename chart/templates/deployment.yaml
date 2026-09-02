@@ -102,6 +102,20 @@ spec:
             # used it to ask for a transport guarantee it can no longer give.
             - name: DB_SSL_MODE
               value: {{ .Values.database.sslMode | quote }}
+            {{- if .Values.database.sslCaSecret }}
+            # THE AUTHORITY the two verifying modes check the engine against.
+            # RENDERED ONLY WHEN A SECRET IS NAMED, so a deployment on `required`
+            # — the default, which checks no certificate — sends the binary
+            # nothing and behaves exactly as before.
+            #
+            # A PATH, never a PEM (D80), and the binary treats an empty value as
+            # no authority rather than as a path it must open. That matters here:
+            # Helm renders an unset value as "", so a variable rendered
+            # unconditionally would fail the boot of every deployment that never
+            # asked for verification.
+            - name: DB_SSL_CA_FILE
+              value: /var/run/secrets/engine-ca/ca.pem
+            {{- end }}
             # D4's arithmetic, both halves of it. The binary refuses to boot
             # when maxConnections x REPLICAS exceeds the engine's ceiling less
             # the five it reserves for an operator, so an engine with a smaller
@@ -128,6 +142,16 @@ spec:
             # one until somebody restarted it.
             - name: serving-cert
               mountPath: /var/run/secrets/iam-db-tls
+              readOnly: true
+            {{- end }}
+            {{- if .Values.database.sslCaSecret }}
+            # A DIRECTORY MOUNT, never subPath — the same argument the serving
+            # certificate above makes, and it applies to an authority too. A
+            # subPath mount is a one-time copy kubelet never refreshes, so a
+            # rotated CA would never reach this pod and the pool would keep
+            # verifying against a bundle that no longer signs anything.
+            - name: engine-ca
+              mountPath: /var/run/secrets/engine-ca
               readOnly: true
             {{- end }}
           # NO readiness probe hitting a /health that returns early. The process
@@ -175,4 +199,30 @@ spec:
                 path: tls.pem
               - key: {{ required "tls.keySecretKey names the key inside tls.certSecret that holds the private key and must be set whenever tls.enabled is; see the chart's values.yaml" .Values.tls.keySecretKey | quote }}
                 path: tls-key.pem
+        {{- end }}
+        {{- if .Values.database.sslCaSecret }}
+        - name: engine-ca
+          secret:
+            secretName: {{ .Values.database.sslCaSecret }}
+            # REQUIRED, and this is the one place this chart does NOT copy the
+            # serving certificate's `optional: true`. That argument rests on the
+            # BINARY opening the file and naming it: `LISTEN_TLS_CERT_FILE` is
+            # read here, so an empty mount produces a boot refusal quoting the
+            # path. Nothing in this module opens the CA — sqlx does, at connect
+            # time, and its `CertificateInput::data` returns a bare
+            # `std::io::Error` from `std::fs::read` with NO path in it. The
+            # operator would get "error communicating with database: No such file
+            # or directory (os error 2)", which names neither the file nor the
+            # authority and points at the engine instead.
+            #
+            # So a FailedMount event, which at least names this volume and the
+            # Secret behind it, is the better of the two errors here — the
+            # opposite of the serving certificate's case, because the property
+            # that made `optional` better there does not hold.
+            # ONE KEY, and renaming it is half the point: an RDS bundle, a
+            # cert-manager Secret and a hand-assembled one all call this
+            # something different, and DB_SSL_CA_FILE names exactly one path.
+            items:
+              - key: {{ required "database.sslCaSecretKey names the key inside database.sslCaSecret that holds the CA bundle and must be set whenever sslCaSecret is; see the chart's values.yaml" .Values.database.sslCaSecretKey | quote }}
+                path: ca.pem
         {{- end }}
