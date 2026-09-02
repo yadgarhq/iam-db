@@ -84,12 +84,25 @@ database:
   # checked. One of: disabled, preferred, required, verify-ca, verify-identity.
   #
   # `required` is the shipped default: it encrypts and checks no certificate, so
-  # nothing about the reference deployment changes. `verify-ca` and
-  # `verify-identity` are the modes that check the engine is who it claims —
-  # what an adopter on RDS, Aurora, Cloud SQL or Azure MySQL wants, and what no
-  # value could ask for until now, because the binary read a BOOLEAN and the
-  # only reachable answers were "encrypt" and "do not". D80 makes that a value
-  # here rather than a recompile.
+  # nothing about the reference deployment changes. It is also the ONLY value an
+  # adopter should set today, and the paragraph below says why.
+  #
+  # `verify-ca` AND `verify-identity` ARE ACCEPTED AND DO NOT WORK YET. They are
+  # the modes that check the engine is who it claims, and they are what an adopter
+  # on RDS, Aurora, Cloud SQL or Azure MySQL wants — but nothing in this module or
+  # in `store` configures the certificate authority they would check against.
+  # `PoolConfig` carries no CA path, `connect_options` never calls sqlx's
+  # `ssl_ca`, and this chart mounts no bundle. Under `tls-rustls-ring` sqlx builds
+  # its trust store from the PUBLIC web roots, which sign no RDS, Aurora or
+  # operator-issued engine certificate, so both modes fail CLOSED: the pod does
+  # not connect at all. Setting one is a broken deployment rather than a stricter
+  # one. The missing piece is a CA path on `PoolConfig` plus a mount here; until
+  # it lands this list describes what the parser takes, not what connects.
+  #
+  # This value exists at all because the binary used to read a BOOLEAN, whose only
+  # reachable answers were "encrypt, falling back to cleartext" and "do not
+  # encrypt" — it could not express the difference between `preferred` and
+  # `required`. D80 makes that a value here rather than a recompile.
   #
   # `preferred` is sqlx's own default and is offered only so that choosing it is
   # a decision somebody wrote down: it falls back to an UNENCRYPTED connection
