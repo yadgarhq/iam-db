@@ -12,14 +12,29 @@ description = "The identity module's -db twin: the only writer of its store, ser
 # actions by SHA (D62). Bumped deliberately, never drifting underneath a build.
 yadgar-store = { git = "https://github.com/yadgarhq/store.git", rev = "4a479ddb5f775de718125d67d14fddbfea9bac12" }
 # In tonic 0.14 prost codegen moved out to tonic-prost; there is no "prost"
-# feature on tonic itself. Also no TLS feature here: the gateway terminates
-# outward TLS, and in-cluster hops are plain HTTP/2 today (D23).
+# feature on tonic itself.
+#
+# `tls-ring`, NOT `tls-aws-lc`. aws-lc-rs needs cmake and a C toolchain, and this
+# service builds for x86_64-unknown-linux-musl (D63); ring builds for musl with
+# the toolchain already in the base image. It is the provider `yadgar-dial`
+# already chose for the client side of this hop, so one serves both directions.
+#
+# The feature is what makes `ServerTlsConfig` exist; it does NOT turn TLS on.
+# `serve::builder` binds a plaintext listener unless a deployment sets
+# LISTEN_TLS_ENABLED, and every chart default leaves it unset.
 tonic = { version = "0.14", default-features = false, features = [
   "codegen",
   "router",
   "server",
   "transport",
+  "tls-ring",
 ] }
+# The SAME PEM parser tonic itself uses on the certificate and the key, so "this
+# file holds no certificate" is decided here rather than failing opaquely inside
+# the acceptor. Present in the tree already by way of tokio-rustls; naming it
+# directly costs nothing and is what lets `serve.rs` say WHICH of the two files
+# an operator has to fix.
+rustls-pki-types = { version = "1", features = ["std"] }
 tonic-prost = "0.14"
 prost = "0.14"
 prost-types = "0.14"
@@ -49,7 +64,17 @@ uuid = { version = "1", features = ["v7"] }
 tonic-prost-build = "0.14"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# `net` and `time` for the TLS rig in tests/serve_tls.rs: it binds its own
+# listeners and waits for the port rather than sleeping a guessed interval.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"] }
+# Certificates are MINTED PER TEST RUN rather than checked in: a fixture key in
+# the repository is a secret in the repository, and it expires on a date nobody
+# is watching.
+rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
+# Wraps a `TcpListener` the rig owns into the stream `serve_with_incoming` takes,
+# which is how the same builder the binary uses gets served on a port the test
+# chose. Dev-only, so the shipped tree is unchanged.
+tokio-stream = { version = "0.1", features = ["net"] }
 
 [lints.rust]
 unsafe_code = "forbid"
