@@ -22,6 +22,50 @@ resources:
   limits:
     memory: 256Mi
 
+# THE CERTIFICATE THIS SERVICE PRESENTS TO ITS CALLERS — the gRPC listener's own
+# transport, not how it reaches anything else.
+#
+# The hop it closes is the worst cleartext one in the system: every password
+# verification, every credential resolution and every encrypted personal-data
+# field (D72) arrives over it, and on a flat pod network that is readable by
+# anyone on the network. The caller's half of the same hop is `iam`'s
+# `iamDb.tls`, which shipped already and is off by default too.
+#
+# PATHS AND A FLAG, NEVER AN ISSUER-SPECIFIC RESOURCE (D80). The chart names a
+# Secret and two keys inside it, and the binary is handed two file paths. In the
+# reference deployment cert-manager writes that Secret; on EKS a Secret assembled
+# by hand produces something neither the chart nor the binary can tell apart.
+# Nothing here requires a CRD, an issuer or a mesh.
+tls:
+  # OFF, and it stays off until both halves of the hop can be turned on
+  # together. The code ships first and the cut-over is a separate, revertible
+  # change — the same discipline the attestation cut-over used.
+  #
+  # THERE IS NO SILENT MIDDLE STATE. `true` with no usable certificate fails at
+  # boot naming the file, before the capability probe runs; it never falls back
+  # to a plaintext listener. `false` with a certificate still configured is the
+  # reverted state, and iam-db logs a warning saying the listener is in cleartext
+  # so nobody has to infer it.
+  enabled: false
+  # The Secret holding the certificate this service serves AND its private key.
+  #
+  # BOTH KEYS ARE MOUNTED HERE, which is the one place in this estate where that
+  # is correct: a listener cannot present a certificate it has no key for. The
+  # mounts elsewhere that select `ca.crt` alone do so to keep somebody else's
+  # private key out of the pod; this key is this pod's own.
+  #
+  # NOT A PEM PASTED INTO THIS FILE. The certificate rotates, and a copy in git
+  # is correct only until the rotation nobody remembered to follow.
+  certSecret: iam-db-tls
+  # The key inside that Secret holding the certificate, mounted as `tls.pem`.
+  # Named rather than assumed: `tls.crt` is what cert-manager calls it, and a
+  # Secret assembled by hand for a deployment cert-manager does not run in is
+  # free to call it something else.
+  certSecretKey: tls.crt
+  # The key inside that Secret holding the private key, mounted as
+  # `tls-key.pem`. Named for the same reason.
+  keySecretKey: tls.key
+
 # D80: the platform is a deployment choice, so every number the binary needs is
 # a value here rather than a default only a fork can reach. These four were
 # compiled-in defaults until now, and three of them describe the REFERENCE

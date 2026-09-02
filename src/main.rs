@@ -6,6 +6,17 @@
 //! crash-loop rather than a pod that accepts traffic and fails queries. Under
 //! D68 the second shape is actively harmful: a pod that starts and then errors is
 //! one the HPA adds replicas around.
+//!
+//! **The listener's TRANSPORT is decided first, before the probe.** It is a
+//! deployment mistake rather than an outage — the same class as an engine that
+//! cannot satisfy D7 — so it fails the boot, and it fails it before a migration
+//! runs, so an operator who mounted the wrong Secret is told at once. Nothing
+//! here falls back to a plaintext listener when TLS was asked for: a service that
+//! did would look healthy while carrying every credential in the module across
+//! the pod network in the clear, which is exactly the failure nobody can see.
+//!
+//! TLS is OPT-IN and OFF by default, so with nothing configured this is the same
+//! plaintext listener it has always bound.
 
 use std::net::SocketAddr;
 
@@ -15,7 +26,7 @@ use yadgar_store::credentials::{CredentialSource, Secret};
 use yadgar_store::{migrate, probe};
 
 use yadgar_iam_db::pb::yadgar::iamdb::v1::iam_db_service_server::IamDbServiceServer;
-use yadgar_iam_db::{boot, schema, service::IamDb};
+use yadgar_iam_db::{boot, schema, serve, service::IamDb};
 
 /// What this module needs of its engine (D69). Addressed, not ranked — so no
 /// vector search and no full-text (D10). Requiring either would make this module
@@ -49,6 +60,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Every default, every refusal and the transport mode live in `boot`, which
     // a test can reach. This line is the whole of the configuration decision.
     let config = boot::pool_config(|key| std::env::var(key).ok())?;
+
+    // 0. THE TRANSPORT THIS SERVICE LISTENS ON, before anything else runs. A
+    //    missing certificate, an unreadable one, a file holding no certificate
+    //    at all and a key belonging to a different certificate are all refused
+    //    HERE — never downgraded to the plaintext listener, because a listener
+    //    that quietly stayed in the clear is the one failure an operator who
+    //    asked for TLS cannot see.
+    //
+    //    `.to_string()` on the way out, and not decoration: `main` returns
+    //    `Box<dyn Error>`, which Rust prints with DEBUG — so a bare `?` would
+    //    put `CertUnreadable { .. }` on the operator's terminal instead of the
+    //    sentence naming the file and saying why cleartext is not the answer.
+    let listen_tls = serve::ServerTls::from_env(serve::LISTEN).map_err(|e| e.to_string())?;
+    let mut server = serve::builder(listen_tls.as_ref()).map_err(|e| e.to_string())?;
 
     // The credential never arrives as an environment variable — it is a mounted
     // Secret the operator issued (D58), read through the seam so this module has
@@ -89,8 +114,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let addr: SocketAddr = env_or("LISTEN", "0.0.0.0:50051").parse()?;
-    tracing::info!(%addr, "iam-db listening");
-    tonic::transport::Server::builder()
+    // `tls` is recorded because "is this listener encrypted?" must be answerable
+    // from the boot log rather than inferred from which variables somebody
+    // believes they set.
+    tracing::info!(%addr, tls = listen_tls.is_some(), "iam-db listening");
+    server
         .add_service(IamDbServiceServer::new(IamDb::new(pool)))
         .serve_with_shutdown(addr, async {
             let _ = tokio::signal::ctrl_c().await;

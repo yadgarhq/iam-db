@@ -16,6 +16,7 @@
 
 pub mod boot;
 pub mod schema;
+pub mod serve;
 pub mod service;
 
 /// Generated from the vendored contract (D16, D70).
