@@ -84,20 +84,16 @@ database:
   # checked. One of: disabled, preferred, required, verify-ca, verify-identity.
   #
   # `required` is the shipped default: it encrypts and checks no certificate, so
-  # nothing about the reference deployment changes. It is also the ONLY value an
-  # adopter should set today, and the paragraph below says why.
+  # nothing about the reference deployment changes.
   #
-  # `verify-ca` AND `verify-identity` ARE ACCEPTED AND DO NOT WORK YET. They are
-  # the modes that check the engine is who it claims, and they are what an adopter
-  # on RDS, Aurora, Cloud SQL or Azure MySQL wants — but nothing in this module or
-  # in `store` configures the certificate authority they would check against.
-  # `PoolConfig` carries no CA path, `connect_options` never calls sqlx's
-  # `ssl_ca`, and this chart mounts no bundle. Under `tls-rustls-ring` sqlx builds
-  # its trust store from the PUBLIC web roots, which sign no RDS, Aurora or
-  # operator-issued engine certificate, so both modes fail CLOSED: the pod does
-  # not connect at all. Setting one is a broken deployment rather than a stricter
-  # one. The missing piece is a CA path on `PoolConfig` plus a mount here; until
-  # it lands this list describes what the parser takes, not what connects.
+  # `verify-ca` and `verify-identity` are the modes that check the engine is who
+  # it claims, and they are what an adopter on RDS, Aurora, Cloud SQL or Azure
+  # MySQL wants. THEY NEED `sslCaSecret` BELOW SET TOO. Without it sqlx checks
+  # against the PUBLIC web roots, which sign no RDS, Aurora or operator-issued
+  # engine certificate — so `verify-identity` refuses every connection, and
+  # `verify-ca` is worse than that: it skips the hostname check as well, so it
+  # accepts any publicly-trusted certificate for any name and reports success.
+  # The two values move together or neither moves.
   #
   # This value exists at all because the binary used to read a BOOLEAN, whose only
   # reachable answers were "encrypt, falling back to cleartext" and "do not
@@ -113,6 +109,36 @@ database:
   # pool — because both are built from one set of options. An unrecognised value
   # refuses the boot rather than selecting something.
   sslMode: required
+
+  # THE AUTHORITY `sslMode: verify-ca` AND `verify-identity` CHECK AGAINST, as a
+  # Secret this chart mounts and whose path the binary is handed in
+  # `DB_SSL_CA_FILE`.
+  #
+  # EMPTY IS THE SHIPPED DEPLOYMENT AND IS LEGITIMATE, not a missing value. Under
+  # `required` — the default — no certificate is checked at all, so there is
+  # nothing for an authority to do. It is also legitimate under a verifying mode
+  # on an Azure MySQL flexible server, whose engine certificate is signed by a
+  # PUBLIC root that sqlx already trusts. Empty renders no environment variable,
+  # no mount and no volume, and the binary reads it as no authority rather than
+  # as an unopenable empty path.
+  #
+  # A PATH INTO A MOUNTED SECRET, never a PEM pasted into this file (D80). A file
+  # is what a Secret, a ConfigMap and a bare VM all produce, and it is what
+  # ROTATES: a CA in git is correct only until the rotation nobody followed.
+  # Unlike `tls.certSecret` this one holds no private key — it is the public
+  # certificate of whoever signed the engine — so the reason it is a Secret is
+  # only that a Secret is what an issuer writes.
+  # SET, THE SECRET MUST EXIST: this mount is required rather than optional,
+  # unlike the serving certificate's. sqlx opens the CA and its error names no
+  # path, so a FailedMount event that names this Secret is the more useful
+  # failure than a pathless io error attributed to the engine.
+  sslCaSecret: ""
+  # The key inside that Secret holding the PEM bundle, mounted as `ca.pem`.
+  #
+  # Named rather than assumed: `ca.crt` is what a `kubernetes.io/tls` Secret
+  # written by cert-manager calls it, and a Secret assembled by hand — or an RDS
+  # bundle downloaded from AWS — is free to call it something else.
+  sslCaSecretKey: ca.crt
 
   # THE OTHER HALF OF D4's ARITHMETIC, and the reason this one is not optional.
   #
