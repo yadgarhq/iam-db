@@ -14,6 +14,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod boot;
 pub mod schema;
 pub mod service;
 

@@ -12,11 +12,10 @@ use std::net::SocketAddr;
 use sqlx::Connection;
 use yadgar_store::capability::{Capability, CapabilitySet};
 use yadgar_store::credentials::{CredentialSource, Secret};
-use yadgar_store::pool::PoolConfig;
 use yadgar_store::{migrate, probe};
 
 use yadgar_iam_db::pb::yadgar::iamdb::v1::iam_db_service_server::IamDbServiceServer;
-use yadgar_iam_db::{schema, service::IamDb};
+use yadgar_iam_db::{boot, schema, service::IamDb};
 
 /// What this module needs of its engine (D69). Addressed, not ranked — so no
 /// vector search and no full-text (D10). Requiring either would make this module
@@ -47,16 +46,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    let config = PoolConfig {
-        host: env_or("DB_HOST", "127.0.0.1"),
-        port: env_or("DB_PORT", "3306").parse()?,
-        database: env_or("DB_NAME", "iam"),
-        username: env_or("DB_USER", "iam"),
-        max_connections: env_or("DB_MAX_CONNECTIONS", "8").parse()?,
-        replicas: env_or("REPLICAS", "2").parse()?,
-        engine_max_connections: env_or("DB_ENGINE_MAX_CONNECTIONS", "151").parse()?,
-        require_tls: env_or("DB_REQUIRE_TLS", "true") == "true",
-    };
+    // Every default, every refusal and the transport mode live in `boot`, which
+    // a test can reach. This line is the whole of the configuration decision.
+    let config = boot::pool_config(|key| std::env::var(key).ok())?;
 
     // The credential never arrives as an environment variable — it is a mounted
     // Secret the operator issued (D58), read through the seam so this module has
@@ -68,15 +60,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1. PROBE, on a connection of its own and before the pool exists. Refusing
     //    here is the whole point of D7.
-    let mut conn = sqlx::MySqlConnection::connect(&format!(
-        "mysql://{}:{}@{}:{}/{}",
-        config.username,
-        secret.expose(),
-        config.host,
-        config.port,
-        config.database
-    ))
-    .await?;
+    //
+    //    Its own CONNECTION, never its own connection OPTIONS. This used to be a
+    //    `format!`-ed DSN with no `ssl-mode` in it, so the probe ran on sqlx's
+    //    `Preferred` default — which falls back to an unencrypted connection —
+    //    while the pool three lines down was on `Required`. The options come
+    //    from the same function the pool uses, so the two cannot disagree.
+    let mut conn =
+        sqlx::MySqlConnection::connect_with(&boot::probe_connect_options(&config, &secret)).await?;
     let report = probe::run(&mut conn).await?;
     report.satisfies(&required())?;
     conn.close().await?;

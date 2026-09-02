@@ -61,6 +61,17 @@ spec:
               value: {{ .Values.database.name | quote }}
             - name: DB_USER
               value: {{ .Values.database.user | quote }}
+            # ONE ssl-mode for BOTH connections the pod opens: D7's boot probe
+            # and the serving pool. They used to be described separately, and
+            # the probe's description carried no ssl-mode at all — so it ran on
+            # sqlx's `preferred` default, which falls back to an unencrypted
+            # connection, while the pool beside it required TLS.
+            #
+            # There is deliberately no DB_REQUIRE_TLS here. The binary REFUSES
+            # to boot when that key is set, rather than ignoring an operator who
+            # used it to ask for a transport guarantee it can no longer give.
+            - name: DB_SSL_MODE
+              value: {{ .Values.database.sslMode | quote }}
             # D4's arithmetic, both halves of it. The binary refuses to boot
             # when maxConnections x REPLICAS exceeds the engine's ceiling less
             # the five it reserves for an operator, so an engine with a smaller
