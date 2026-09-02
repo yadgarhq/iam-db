@@ -66,45 +66,48 @@ yanked = "deny"
 #    uses `rsa` on the CLIENT side to ENCRYPT a password with the server's
 #    public key. This process holds no RSA private key, so there is nothing for
 #    the attack to recover.
-# 2. That code path is only taken when MySQL's caching_sha2_password
-#    authentication runs over an INSECURE connection. Over TLS the password goes
-#    through the existing secure channel and the RSA exchange never happens —
-#    and D58 puts every `-db` on TLS to its engine.
+# 2. That code path is only taken when authentication runs over an INSECURE
+#    connection. Over TLS the credential goes through the channel that already
+#    exists and the RSA exchange never happens — and D58 puts every `-db` on TLS
+#    to its engine.
 #
-#    CORRECTED 2026-09-02, because point 2 was not true as written. D58 covers
-#    the POOL. D7's capability probe in `main` opens a connection of its own,
-#    before the pool exists, from a string built by `format!` with no `ssl-mode`
-#    in it — so it inherits sqlx's default, `MySqlSslMode::Preferred`, which
-#    sqlx documents as falling back to an unencrypted connection when an
-#    encrypted one cannot be established. That one connection is not covered by
-#    the sentence above, and on an engine that permits the fallback it is
-#    exactly the insecure case the sentence says does not arise.
+#    THE CLAIM IS ABOUT EVERY CONNECTION THIS BINARY OPENS, which is what makes
+#    it checkable rather than a slogan. It was once false for exactly one of
+#    them: D58 covers the serving POOL, while D7's capability probe runs on a
+#    connection of its own, before the pool exists, built by `format!` with no
+#    `ssl-mode` in it — so it inherited sqlx's `Preferred` default, which falls
+#    back to an unencrypted connection when an encrypted one cannot be
+#    established. Found by reading this file against that code, not by an
+#    incident.
+#
+#    Since `yadgar-store` 4a479ddb the probe and the pool are both built from
+#    `pool::connect_options`, so there is ONE description of a connection and
+#    one ssl-mode to check. `DB_SSL_MODE` selects it, defaults to `required`,
+#    and refuses a value it does not recognise; `DB_REQUIRE_TLS` — a boolean
+#    whose parse read every spelling but `true` as DISABLED — refuses the boot
+#    rather than being ignored.
 #
 #    Two details of the mechanism, read from sqlx-mysql 0.9.0's
 #    `src/connection/auth.rs` rather than assumed:
 #
 #    - `encrypt_rsa` opens with `if stream.is_tls { return Ok(...) }`, so
-#      "skipped over TLS" is exactly right — for a connection that IS on TLS.
+#      "skipped over TLS" is exactly right — for a connection that IS on TLS,
+#      and exactly wrong for one that fell back.
 #    - It is reached from `AuthPlugin::Sha256Password` and from
 #      caching_sha2_password's perform_full_authentication branch, so the
-#      trigger is wider than the one plugin named above.
-#
-#    Whether an unencrypted probe reaches that path therefore depends on the
-#    engine's transport policy and its authentication plugin — neither of which
-#    this file can assert for an adopter's engine, which is the whole reason the
-#    connection must not be left to a default.
-#
-#    `store` PR #11 makes the probe and the pool share one set of connection
-#    options. The unqualified claim comes back in the commit that bumps the
-#    `yadgar-store` revision to it.
+#      trigger is wider than any single plugin.
 # 3. Both -db and engine sit inside the cluster (D27), so an attacker able to
 #    time this traffic is already inside the trust boundary.
 #
 # REVISIT: when `rsa` publishes a fixed release, when sqlx drops the dependency,
-# or if any of the three points above stops holding — particularly a decision to
-# run a `-db` to its engine without TLS.
+# or if any of the three points above stops holding. Point 2 is a CONFIGURATION
+# property, not an invariant, and saying so is the honest form: setting
+# `DB_SSL_MODE` to `disabled`, or to `preferred` against an engine that will not
+# negotiate TLS, puts this path back in reach. What the code guarantees is that
+# one setting governs every connection the binary opens — not that nobody can
+# choose a mode that forfeits this exception.
 ignore = [
-    { id = "RUSTSEC-2023-0071", reason = "client-side RSA encryption only; no private key held. The serving pool is on TLS, which skips the path; the D7 boot probe is NOT yet, so the exception is qualified until store#11 lands. No fix exists upstream. See the note above." },
+    { id = "RUSTSEC-2023-0071", reason = "client-side RSA encryption only; no private key held. Every connection this binary opens — the serving pool and D7's boot probe alike — is built from one set of options whose ssl-mode defaults to `required`, and TLS skips the path. No fix exists upstream. See the note above." },
 ]
 
 [sources]

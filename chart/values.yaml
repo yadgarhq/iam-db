@@ -36,6 +36,27 @@ database:
   user: iam
   passwordSecret: iam-db-password
 
+  # HOW TLS IS NEGOTIATED to the engine, and how far the engine's identity is
+  # checked. One of: disabled, preferred, required, verify-ca, verify-identity.
+  #
+  # `required` is the shipped default: it encrypts and checks no certificate, so
+  # nothing about the reference deployment changes. `verify-ca` and
+  # `verify-identity` are the modes that check the engine is who it claims —
+  # what an adopter on RDS, Aurora, Cloud SQL or Azure MySQL wants, and what no
+  # value could ask for until now, because the binary read a BOOLEAN and the
+  # only reachable answers were "encrypt" and "do not". D80 makes that a value
+  # here rather than a recompile.
+  #
+  # `preferred` is sqlx's own default and is offered only so that choosing it is
+  # a decision somebody wrote down: it falls back to an UNENCRYPTED connection
+  # when the engine will not negotiate TLS, silently, and this module's deny.toml
+  # accepts RUSTSEC-2023-0071 on the strength of TLS being in force.
+  #
+  # It governs BOTH connections the pod opens — D7's boot probe and the serving
+  # pool — because both are built from one set of options. An unrecognised value
+  # refuses the boot rather than selecting something.
+  sslMode: required
+
   # THE OTHER HALF OF D4's ARITHMETIC, and the reason this one is not optional.
   #
   # `store`'s `check_engine_headroom` refuses boot when

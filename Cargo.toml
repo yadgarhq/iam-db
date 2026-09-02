@@ -10,7 +10,7 @@ description = "The identity module's -db twin: the only writer of its store, ser
 # Pinned by REVISION, not by tag or branch. store has no tags yet, and a branch
 # is a moving target — the same reasoning that pins images by digest (D61) and
 # actions by SHA (D62). Bumped deliberately, never drifting underneath a build.
-yadgar-store = { git = "https://github.com/yadgarhq/store.git", rev = "ebce45465d58c5033fb7ef48b338c78bf56426ac" }
+yadgar-store = { git = "https://github.com/yadgarhq/store.git", rev = "4a479ddb5f775de718125d67d14fddbfea9bac12" }
 # In tonic 0.14 prost codegen moved out to tonic-prost; there is no "prost"
 # feature on tonic itself. Also no TLS feature here: the gateway terminates
 # outward TLS, and in-cluster hops are plain HTTP/2 today (D23).
