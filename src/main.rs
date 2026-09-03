@@ -91,8 +91,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    `Preferred` default — which falls back to an unencrypted connection —
     //    while the pool three lines down was on `Required`. The options come
     //    from the same function the pool uses, so the two cannot disagree.
-    let mut conn =
-        sqlx::MySqlConnection::connect_with(&boot::probe_connect_options(&config, &secret)).await?;
+    //
+    //    `.to_string()` for the same reason the listener's refusals carry it:
+    //    building these options REFUSES `verify_ca`, and that refusal is a
+    //    paragraph naming the mode to use instead. A bare `?` would Debug-print
+    //    `SslModeCannotVerify { .. }` into the crash loop and throw the sentence
+    //    away.
+    let options = boot::probe_connect_options(&config, &secret).map_err(|e| e.to_string())?;
+    let mut conn = sqlx::MySqlConnection::connect_with(&options).await?;
     let report = probe::run(&mut conn).await?;
     report.satisfies(&required())?;
     conn.close().await?;
