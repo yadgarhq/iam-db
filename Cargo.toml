@@ -7,10 +7,13 @@ license = "Apache-2.0"
 description = "The identity module's -db twin: the only writer of its store, serving IamDbService over gRPC."
 
 [dependencies]
-# Pinned by REVISION, not by tag or branch. store has no tags yet, and a branch
-# is a moving target — the same reasoning that pins images by digest (D61) and
-# actions by SHA (D62). Bumped deliberately, never drifting underneath a build.
-yadgar-store = { git = "https://github.com/yadgarhq/store.git", rev = "6a6800236607285d2fc3c4f84c08a90cfea7da62" }
+# Pinned by RELEASE TAG, not by branch. store now publishes versions, and a
+# published tag never moves in this organisation — a correction is a new tag —
+# so `v0.1.0` names exactly one commit for as long as it exists, and Cargo.lock
+# records the revision it resolved to. A branch is the moving target this
+# refuses, the same reasoning that pins images by digest (D61) and actions by
+# SHA (D62). Bumped deliberately, never drifting underneath a build.
+yadgar-store = { git = "https://github.com/yadgarhq/store.git", tag = "v0.1.0" }
 # In tonic 0.14 prost codegen moved out to tonic-prost; there is no "prost"
 # feature on tonic itself.
 #
@@ -38,8 +41,10 @@ rustls-pki-types = { version = "1", features = ["std"] }
 tonic-prost = "0.14"
 prost = "0.14"
 prost-types = "0.14"
-# The shared instrumentation seam (D67), pinned by revision like every in-org crate.
-yadgar-telemetry = { git = "https://github.com/yadgarhq/telemetry.git", rev = "1273e45e641c6af5187af1203dfb153d4369b5bc", features = ["grpc"] }
+# The shared instrumentation seam (D67), pinned by release tag like every in-org
+# crate. This repository sat one commit behind every other consumer until now —
+# a bare revision in five files has nothing that notices one falling behind.
+yadgar-telemetry = { git = "https://github.com/yadgarhq/telemetry.git", tag = "v0.1.0", features = ["grpc"] }
 sqlx = { version = "0.9", default-features = false, features = [
   "runtime-tokio",
   "tls-rustls-ring",
