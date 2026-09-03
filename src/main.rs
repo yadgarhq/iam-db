@@ -118,12 +118,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // from the boot log rather than inferred from which variables somebody
     // believes they set.
     tracing::info!(%addr, tls = listen_tls.is_some(), "iam-db listening");
+
+    // ARMED BEFORE THE SERVER IS SPAWNED, and that ordering is the fix rather
+    // than an accident of where the line sits. `serve::shutdown` installs both
+    // signal handlers when it is CALLED — a SIGTERM arriving between here and
+    // the first poll of the future would otherwise take the process's default
+    // disposition and kill it outright.
+    let shutdown = serve::shutdown().map_err(|e| {
+        format!(
+            "the SIGTERM and SIGINT handlers could not be installed: {e}. Refusing to start: a \
+             server that cannot hear SIGTERM cannot drain, and Kubernetes ends every pod with one"
+        )
+    })?;
+
     server
         .add_service(IamDbServiceServer::new(IamDb::new(pool)))
-        .serve_with_shutdown(addr, async {
-            let _ = tokio::signal::ctrl_c().await;
-            tracing::info!("shutting down");
-        })
+        .serve_with_shutdown(addr, shutdown)
         .await?;
 
     Ok(())
