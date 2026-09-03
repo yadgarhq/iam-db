@@ -9,11 +9,17 @@ description = "The identity module's -db twin: the only writer of its store, ser
 [dependencies]
 # Pinned by RELEASE TAG, not by branch. store now publishes versions, and a
 # published tag never moves in this organisation — a correction is a new tag —
-# so `v0.1.0` names exactly one commit for as long as it exists, and Cargo.lock
+# so `v0.2.0` names exactly one commit for as long as it exists, and Cargo.lock
 # records the revision it resolved to. A branch is the moving target this
 # refuses, the same reasoning that pins images by digest (D61) and actions by
 # SHA (D62). Bumped deliberately, never drifting underneath a build.
-yadgar-store = { git = "https://github.com/yadgarhq/store.git", tag = "v0.1.0" }
+#
+# `v0.2.0` REFUSES `verify_ca` AT BOOT — a minor bump pre-1.0 because it removes
+# a value the configuration used to take. The mode named a check sqlx does not
+# perform: it accepted any publicly-trusted certificate for any name. Nothing in
+# this estate runs it, so the refusal changes no deployment; `verify_identity`
+# is the mode that binds the connection to the engine it names.
+yadgar-store = { git = "https://github.com/yadgarhq/store.git", tag = "v0.2.0" }
 # In tonic 0.14 prost codegen moved out to tonic-prost; there is no "prost"
 # feature on tonic itself.
 #

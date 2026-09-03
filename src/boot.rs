@@ -90,8 +90,22 @@ pub fn pool_config(env: impl Fn(&str) -> Option<String>) -> Result<PoolConfig, B
 /// function adds no behaviour; it exists so that the probe's description of a
 /// connection and the pool's cannot drift apart again, and so that a test can
 /// say which one the probe got.
-pub fn probe_connect_options(config: &PoolConfig, secret: &Secret) -> MySqlConnectOptions {
-    yadgar_store::pool::connect_options(config, secret)
+///
+/// **IT RETURNS A `Result` BECAUSE `store` REFUSES A MODE HERE, and forwarding
+/// that refusal unchanged is the whole of what this adds.** `verify_ca` names a
+/// check sqlx does not perform — the trust store is seeded with the public web
+/// roots before the configured authority is appended, and every mode but
+/// `verify_identity` skips the hostname check — so it accepts any
+/// publicly-trusted certificate for any name. `store` places the refusal where
+/// the probe and the pool meet, which is why the probe cannot route around it by
+/// building its own options. No variant is added for it: [`BootError::Pool`] is
+/// `#[error(transparent)]` over `PoolError` and already carries the sentence an
+/// operator reads.
+pub fn probe_connect_options(
+    config: &PoolConfig,
+    secret: &Secret,
+) -> Result<MySqlConnectOptions, BootError> {
+    Ok(yadgar_store::pool::connect_options(config, secret)?)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -173,7 +187,8 @@ mod tests {
     #[test]
     fn the_probe_connects_with_the_configured_mode_not_a_mode_of_its_own() {
         let config = config_with(MySqlSslMode::VerifyIdentity);
-        let options = probe_connect_options(&config, &Secret::new("fixture".to_string()));
+        let options =
+            probe_connect_options(&config, &Secret::new("fixture".to_string())).expect("options");
 
         // The whole defect was a probe that described its connection itself. Had
         // it kept doing so — hardcoding Required, or falling back to sqlx's
@@ -263,6 +278,13 @@ mod tests {
         // authority they check against travels separately and is pinned by
         // `the_configured_certificate_authority_reaches_the_pool`.
         //
+        // THE PARSE IS STILL THE WHOLE OF WHAT THIS ASSERTS FOR `verify_ca`,
+        // and that is deliberate rather than left over. `store` now refuses the
+        // mode when a connection is built, not when a value is read — so a
+        // configuration carrying it is still assembled without complaint, and
+        // rewriting this into a refusal would assert something `pool_config`
+        // does not do. The refusal has its own test below.
+        //
         // The hyphen spelling is the one a chart writes; sqlx writes the
         // underscore.
         let config = pool_config(env_of(&[("DB_SSL_MODE", "verify-identity")])).expect("config");
@@ -270,6 +292,43 @@ mod tests {
 
         let config = pool_config(env_of(&[("DB_SSL_MODE", "VERIFY_CA")])).expect("config");
         assert!(matches!(config.ssl_mode, MySqlSslMode::VerifyCa));
+    }
+
+    #[test]
+    fn verify_ca_is_refused_when_the_connection_options_are_built() {
+        // `verify_ca` NAMES A CHECK NOTHING PERFORMS, which is why `store`
+        // refuses it outright rather than documenting it. Measured in sqlx 0.9:
+        // `sqlx-core`'s `net/tls/tls_rustls.rs` seeds the trust store with the
+        // public web roots BEFORE appending the configured `ssl_ca`, so naming
+        // an authority WIDENS trust and never restricts it; `sqlx-mysql`'s
+        // `connection/tls.rs` then routes every mode but `VerifyIdentity`
+        // through `NoHostnameTlsVerifier`, which maps a name mismatch to a
+        // verified assertion. The pair accepts ANY publicly-trusted certificate
+        // for ANY name, with a CA file or without one.
+        //
+        // THE PROBE IS THE CALLER THIS PINS, and that is the point. The probe
+        // opens its own connection before the pool exists, so a refusal that
+        // lived only in `connect` would let the probe connect first — under the
+        // very verifier being refused. `store` puts the check where both callers
+        // meet, and this asserts the probe inherits it rather than routing
+        // around it.
+        let config = config_with(MySqlSslMode::VerifyCa);
+        let err = probe_connect_options(&config, &Secret::new("fixture".to_string()))
+            .expect_err("verify_ca must be refused before any connection is opened");
+
+        assert!(
+            matches!(err, BootError::Pool(PoolError::SslModeCannotVerify { .. })),
+            "{err}"
+        );
+
+        // An operator reads this in a crash loop, so it has to name the mode
+        // that WORKS. A refusal that only says no leaves them guessing between
+        // three remaining values, two of which verify nothing either.
+        let message = err.to_string();
+        assert!(
+            message.contains("verify_identity"),
+            "the refusal must name the mode that does bind the engine's identity: {message}"
+        );
     }
 
     #[test]

@@ -81,19 +81,31 @@ database:
   passwordSecret: iam-db-password
 
   # HOW TLS IS NEGOTIATED to the engine, and how far the engine's identity is
-  # checked. One of: disabled, preferred, required, verify-ca, verify-identity.
+  # checked. One of: disabled, preferred, required, verify-identity.
   #
   # `required` is the shipped default: it encrypts and checks no certificate, so
   # nothing about the reference deployment changes.
   #
-  # `verify-ca` and `verify-identity` are the modes that check the engine is who
-  # it claims, and they are what an adopter on RDS, Aurora, Cloud SQL or Azure
-  # MySQL wants. THEY NEED `sslCaSecret` BELOW SET TOO. Without it sqlx checks
+  # `verify-identity` is THE ONLY MODE THAT CHECKS THE ENGINE IS WHO IT CLAIMS,
+  # and it is what an adopter on RDS, Aurora, Cloud SQL or Azure MySQL wants. IT
+  # NEEDS `sslCaSecret` BELOW SET TOO, unless the engine's certificate is signed
+  # by a public root — an Azure MySQL flexible server is. Without it sqlx checks
   # against the PUBLIC web roots, which sign no RDS, Aurora or operator-issued
-  # engine certificate — so `verify-identity` refuses every connection, and
-  # `verify-ca` is worse than that: it skips the hostname check as well, so it
-  # accepts any publicly-trusted certificate for any name and reports success.
-  # The two values move together or neither moves.
+  # engine certificate, so the connection is refused. The two values move
+  # together or neither moves.
+  #
+  # `verify-ca` IS GONE AND SETTING IT NOW CRASH-LOOPS THE POD. It was listed
+  # here and it named a check nothing performed. Measured in sqlx 0.9: the trust
+  # store is seeded with the public web roots BEFORE the configured authority is
+  # appended, so naming a CA widens trust and never restricts it; and every mode
+  # but `verify-identity` routes through a verifier that maps a hostname
+  # mismatch to a verified assertion. Together those accept any publicly-trusted
+  # certificate for ANY name — a stranger holding a certificate for their own
+  # domain passed as the engine, and the mode reported success. `store` refuses
+  # it at boot rather than offering it, so a deployment carrying this value
+  # fails to start with a message naming `verify-identity`. Nothing in this
+  # estate runs it; the value is removed here so the chart stops offering what
+  # the binary now refuses.
   #
   # This value exists at all because the binary used to read a BOOLEAN, whose only
   # reachable answers were "encrypt, falling back to cleartext" and "do not
@@ -110,13 +122,12 @@ database:
   # refuses the boot rather than selecting something.
   sslMode: required
 
-  # THE AUTHORITY `sslMode: verify-ca` AND `verify-identity` CHECK AGAINST, as a
-  # Secret this chart mounts and whose path the binary is handed in
-  # `DB_SSL_CA_FILE`.
+  # THE AUTHORITY `sslMode: verify-identity` CHECKS AGAINST, as a Secret this
+  # chart mounts and whose path the binary is handed in `DB_SSL_CA_FILE`.
   #
   # EMPTY IS THE SHIPPED DEPLOYMENT AND IS LEGITIMATE, not a missing value. Under
   # `required` — the default — no certificate is checked at all, so there is
-  # nothing for an authority to do. It is also legitimate under a verifying mode
+  # nothing for an authority to do. It is also legitimate under `verify-identity`
   # on an Azure MySQL flexible server, whose engine certificate is signed by a
   # PUBLIC root that sqlx already trusts. Empty renders no environment variable,
   # no mount and no volume, and the binary reads it as no authority rather than
