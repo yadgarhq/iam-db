@@ -51,13 +51,29 @@ prost-types = "0.14"
 # crate. This repository sat one commit behind every other consumer until now —
 # a bare revision in five files has nothing that notices one falling behind.
 yadgar-telemetry = { git = "https://github.com/yadgarhq/telemetry.git", tag = "v0.1.0", features = ["grpc"] }
+# WHICH SIGNALS END THIS PROCESS, decided once for the estate rather than once
+# per repository (ADR-0526's pin, D19's rule). `shutdown` stood in five copies
+# before this crate existed and was wrong in every one of them for the same
+# reason — SIGINT alone, which Kubernetes never sends.
+#
+# `shutdown` and nothing else is used here. The crate also carries ADR-0523's
+# rotation watcher and the `DRAIN_BUDGET`/`drain_within` pair that bounds a
+# self-initiated drain, and neither applies to this service: nothing here ends
+# the serving future on its own, so the only drain that ever happens is the one
+# `terminationGracePeriodSeconds` already bounds. Adopting the budget without
+# the watcher would be a number bounding nothing.
+yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle.git", tag = "v0.1.0" }
 sqlx = { version = "0.9", default-features = false, features = [
   "runtime-tokio",
   "tls-rustls-ring",
   "mysql",
   "macros",
 ] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+# NO `signal` FEATURE. It was here for `serve::shutdown`, which is now
+# `yadgar_lifecycle::shutdown` — and that crate declares the feature it needs.
+# Cargo features are additive, so the built tree is unchanged; what is removed
+# is a manifest line claiming this crate handles signals itself.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

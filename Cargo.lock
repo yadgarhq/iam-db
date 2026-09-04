@@ -2676,8 +2676,23 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "yadgar-lifecycle",
  "yadgar-store",
  "yadgar-telemetry",
+]
+
+[[package]]
+name = "yadgar-lifecycle"
+version = "0.1.0"
+source = "git+https://github.com/yadgarhq/lifecycle.git?tag=v0.1.0#2bec1bc70f004551046fe42850b6e44c9c64da71"
+dependencies = [
+ "metrics",
+ "rustls-pki-types",
+ "sha2 0.10.9",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "x509-parser",
 ]
 
 [[package]]

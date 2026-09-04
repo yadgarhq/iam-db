@@ -23,8 +23,8 @@
 //! SIGTERM's default disposition never reaches either assertion — it is gone.
 //!
 //! **NO POOL IS INVOLVED**, the same as `tests/serve_tls.rs` and for the same
-//! reason: `serve::shutdown` and `serve::builder` decide a lifecycle and a
-//! transport, nothing more.
+//! reason: `yadgar_lifecycle::shutdown` and `serve::builder` decide a lifecycle
+//! and a transport, nothing more.
 //!
 //! **ONE TEST IN ITS OWN BINARY, deliberately.** A signal is delivered to a
 //! PROCESS, not to a thread, and `cargo test` runs the tests within one file
@@ -32,8 +32,14 @@
 //! SIGTERM. Cargo compiles each `tests/*.rs` to its own binary, so the isolation
 //! this needs is the file itself.
 //!
-//! Mirrored from `task-db/tests/shutdown.rs`, which fixed this first for a
-//! `-db` service with no self-exit path of its own.
+//! **THE SIGNAL HANDLING IS NOW `yadgar-lifecycle`'S, AND THIS TEST IS STILL
+//! THIS SERVICE'S.** What the crate owns is which signals are listened for and
+//! when the handlers install; what is asserted here is that THIS service's
+//! listener, built by `serve::builder`, actually drains on one. A crate test
+//! cannot make that claim — it knows nothing about tonic, this router, or this
+//! port — so lifting `shutdown` does not make this redundant. It is also what
+//! kills the mutant: a `yadgar_lifecycle::shutdown` that registered SIGINT
+//! alone fails this file, in both `-db` repositories.
 
 use std::net::SocketAddr;
 use std::process::Command;
@@ -87,12 +93,22 @@ async fn a_sigterm_drains_the_server_instead_of_killing_the_process() {
         .expect("a free loopback port");
     let port = listener.local_addr().unwrap().port();
 
-    // BEFORE the signal, and that ordering is the property under test as much as
-    // the signal itself is. `serve::shutdown` installs both handlers when it is
-    // CALLED; an `async fn` would install them on first poll instead, and a
-    // SIGTERM arriving in that window would kill this process rather than drain
-    // it. The `kill` below lands in exactly that window.
-    let shutdown = serve::shutdown().expect("the signal handlers install");
+    // BEFORE the signal, mirroring `main`. `yadgar_lifecycle::shutdown` installs
+    // both handlers when it is CALLED rather than on first poll, which is what
+    // closes the window between binding the listener and the executor reaching
+    // the shutdown future.
+    //
+    // **THIS FILE DOES NOT MEASURE THAT WINDOW, and the comment it replaces
+    // claimed it did.** Measured 2026-09-04 with a mutant that moved both
+    // registrations inside the returned future: it survives here, and it
+    // survives `yadgar-lifecycle`'s own `tests/shutdown.rs` too. The `accepts`
+    // wait below is why — a port that accepts is a server task that has already
+    // been polled, so the handlers are armed by the time `kill` runs whichever
+    // way the crate spells it. Discriminating the two needs a rig that raises
+    // SIGTERM before the executor ever reaches the serving task, and no such rig
+    // exists in this estate. Recorded rather than papered over; it belongs in
+    // the crate, next to the function whose signature is the claim.
+    let shutdown = yadgar_lifecycle::shutdown().expect("the signal handlers install");
 
     // `Routes::default()` answers every method with `Unimplemented`. What is
     // under test is the LIFECYCLE of the server, not any handler in it, and a

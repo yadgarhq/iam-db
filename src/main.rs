@@ -126,11 +126,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(%addr, tls = listen_tls.is_some(), "iam-db listening");
 
     // ARMED BEFORE THE SERVER IS SPAWNED, and that ordering is the fix rather
-    // than an accident of where the line sits. `serve::shutdown` installs both
-    // signal handlers when it is CALLED — a SIGTERM arriving between here and
-    // the first poll of the future would otherwise take the process's default
-    // disposition and kill it outright.
-    let shutdown = serve::shutdown().map_err(|e| {
+    // than an accident of where the line sits. `yadgar_lifecycle::shutdown` is a
+    // `fn` returning a future rather than an `async fn`, so both signal handlers
+    // install when it is CALLED — a SIGTERM arriving between here and the first
+    // poll of the future would otherwise take the process's default disposition
+    // and kill it outright.
+    //
+    // FROM THE SHARED CRATE, not from this repository. Which signals end a
+    // process is one decision for the estate (D19, ADR-0526); it was five copies
+    // and wrong in all five.
+    let shutdown = yadgar_lifecycle::shutdown().map_err(|e| {
         format!(
             "the SIGTERM and SIGINT handlers could not be installed: {e}. Refusing to start: a \
              server that cannot hear SIGTERM cannot drain, and Kubernetes ends every pod with one"
