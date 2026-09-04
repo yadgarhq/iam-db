@@ -24,11 +24,43 @@ spec:
     - type: prometheus
       metadata:
         serverAddress: {{ .Values.autoscaling.prometheusAddress | quote }}
-        # Per-replica rate: the sum over the deployment divided by the pods
-        # serving it. Scaling on the SUM would add replicas as traffic grows even
-        # when each pod is idle.
+        # Per-replica rate of SERVED calls: the sum over the deployment divided
+        # by the pods serving it. Scaling on the SUM would add replicas as
+        # traffic grows even when each pod is idle.
+        #
+        # `outcome="OK"` IS THE LOAD-BEARING PART OF THIS SELECTOR, and its
+        # absence was ledger 586. `yadgar_calls_total` is incremented on the
+        # FAILURE path too — `telemetry::observe::Call::run` classifies the error
+        # and emits the same series with a different `outcome`, and `Call`'s
+        # `Drop` emits one more as `UNRECORDED`. Filtering on `service` alone
+        # therefore made a pod answering UNAVAILABLE to every request read
+        # identically to a healthy one, and the autoscaler added replicas around
+        # a pod that could not serve. INVARIANTS states the property this
+        # restores: "a pod that starts and then fails queries is one the
+        # autoscaler adds replicas around" (D69, D68).
+        #
+        # A CLOSED SET OF ONE VALUE, NEVER A LIST OF FAILURES TO EXCLUDE. The
+        # label set is open — `telemetry::grpc::status_name` maps fifteen gRPC
+        # codes, `Drop` adds `UNRECORDED`, and gateway emits `FORBIDDEN`, which is
+        # in neither. An exclusion list falls silently back into this defect the
+        # day a value nobody listed appears; matching the one value that means
+        # "served" cannot. Five charts carry this selector, so it also has to be
+        # a thing five separately-edited files can stay in agreement about —
+        # the reasoning `telemetry::grpc::status_name` exists for.
+        #
+        # SHEDDING UNDER OVERLOAD IS NOT COUNTED, AND THAT IS THE INTENT rather
+        # than a gap. By the time a saturated pod returns DEADLINE_EXCEEDED its
+        # OK rate is already far above the threshold below and the HPA is pinned
+        # at maxReplicaCount, so the shed load triggers no scale-up the served
+        # rate has not triggered already.
+        #
+        # FOR A `-db` SERVICE D68 ALREADY SETTLED THIS: "the pool is the real
+        # limit (D58); scaling past it moves the queue, it does not shorten it".
+        # A call that timed out waiting on the connection pool is therefore
+        # exactly a call this numerator must not count — counting it would add
+        # replicas that queue against the same MariaDB.
         query: >-
-          sum(rate(yadgar_calls_total{service="{{ .Chart.Name }}"}[2m]))
+          sum(rate(yadgar_calls_total{service="{{ .Chart.Name }}", outcome="OK"}[2m]))
           / clamp_min(count(up{app="{{ .Chart.Name }}"}), 1)
         threshold: {{ .Values.autoscaling.threshold | quote }}
 {{- end }}
