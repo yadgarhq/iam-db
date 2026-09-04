@@ -2684,15 +2684,10 @@ dependencies = [
 [[package]]
 name = "yadgar-lifecycle"
 version = "0.1.0"
-source = "git+https://github.com/yadgarhq/lifecycle.git?tag=v0.1.0#2bec1bc70f004551046fe42850b6e44c9c64da71"
+source = "git+https://github.com/yadgarhq/lifecycle.git?tag=v0.1.2#f5c2805b391e2693c61a0bdbf3d959bd82297e8b"
 dependencies = [
- "metrics",
- "rustls-pki-types",
- "sha2 0.10.9",
- "thiserror",
  "tokio",
  "tracing",
- "x509-parser",
 ]
 
 [[package]]

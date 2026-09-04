@@ -62,7 +62,14 @@ yadgar-telemetry = { git = "https://github.com/yadgarhq/telemetry.git", tag = "v
 # the serving future on its own, so the only drain that ever happens is the one
 # `terminationGracePeriodSeconds` already bounds. Adopting the budget without
 # the watcher would be a number bounding nothing.
-yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle.git", tag = "v0.1.0" }
+# `default-features = false` DROPS THE `rotate` FEATURE, and with it the whole
+# certificate-parsing tree — `x509-parser` over `asn1-rs`, `der-parser`,
+# `oid-registry` and `nom` — plus `sha2` and the `metrics` facade. This service
+# calls `shutdown` and nothing else, so it paid for all of it and used none of
+# it. THE FLAG AND THE PIN HAD TO MOVE TOGETHER: v0.1.0 declares no features at
+# all, so `default-features = false` against that tag is a silent no-op that
+# compiles, passes and removes nothing.
+yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle.git", tag = "v0.1.2", default-features = false }
 sqlx = { version = "0.9", default-features = false, features = [
   "runtime-tokio",
   "tls-rustls-ring",
