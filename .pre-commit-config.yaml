@@ -22,12 +22,18 @@ repos:
   # at first install and never re-resolves it, so a moving tag would silently
   # freeze each machine at whatever it meant the day it first ran.
   - repo: https://github.com/yadgarhq/actions
-    rev: v1.5.0
+    rev: v1.12.2
     hooks:
       - id: gitleaks
       - id: prettier
         exclude: ^(chart/templates/|proto/)
       - id: hadolint
+      # Every repository here carries workflows, and until this hook was
+      # published nothing linted them. It REFUSES rather than passes when
+      # actionlint's shellcheck rule class is not running: actionlint silently
+      # disables that whole class when the binary is absent, and "Passed, having
+      # checked nothing" is the defect the guard closes.
+      - id: actionlint
       - id: cargo-fmt
       - id: cargo-clippy
       - id: cargo-deny
