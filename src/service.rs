@@ -611,10 +611,26 @@ impl IamDbService for IamDb {
 
         call.finish(Outcome {
             status: "OK",
-            // MEASURED, not asserted. The literal `1` this replaces was wrong on
-            // every repeat — and it was wrong on every silently dropped row too,
-            // which is how a write that stored nothing still emitted a record
-            // saying it had stored one.
+            // FROM THE DRIVER RATHER THAN A LITERAL, AND IT IS THE SAME NUMBER
+            // TODAY. `sqlx-mysql` hardcodes `Capabilities::FOUND_ROWS` into the
+            // client capability set (`connection/stream.rs`), masks it against
+            // what the server advertises, and exposes no `MySqlConnectOptions`
+            // knob to turn it off — so every statement this service runs reports
+            // MATCHED rows rather than CHANGED ones. Measured through a real pool
+            // on this exact statement: 1 on a fresh membership, and 1 on every
+            // repeat. The literal `1` this replaces was correct in each case the
+            // handler can still reach.
+            //
+            // WHAT IT BUYS IS THAT THE NUMBER FOLLOWS THE STATEMENT. If the
+            // statement changes, or the driver's capability set does, the record
+            // moves with it instead of staying a constant somebody has to
+            // remember to revisit.
+            //
+            // WHAT IT DOES NOT BUY IS TELLING A FRESH MEMBERSHIP FROM A REPEAT,
+            // and under FOUND_ROWS no count from this statement can. The one case
+            // where the constant genuinely lied — a row the foreign keys dropped
+            // while the handler answered OK — is unreachable now that those
+            // violations are refused above rather than ignored.
             rows: done.rows_affected() as u32,
             ..Default::default()
         });
