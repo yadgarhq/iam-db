@@ -186,3 +186,29 @@ autoscaling:
   # Calls per second per replica before adding one.
   threshold: "10"
   prometheusAddress: http://prometheus-server.observability.svc.cluster.local
+
+# ADR-0523's ROTATION WATCHER: how often this pod re-hashes the files it read at
+# boot, and how long it waits before exiting on a change.
+#
+# THE WATCHER RUNS ON EVERY INSTALL, not only a TLS one. The watch set holds the
+# serving certificate and its key when `tls.enabled` is true, and it ALWAYS holds
+# the database password and the engine CA when one is named — files this process
+# reads once and then keeps using for the life of the pod. ADR-0523's rule is
+# about provenance rather than payload.
+tlsRotation:
+  # How often the files are re-hashed. Reading a handful of small files a minute
+  # costs nothing, and the deadline this protects is 30 days wide.
+  #
+  # `0` IS REFUSED at boot rather than read as "off": sleeping for no time at all
+  # is a hot loop. An empty watch set is what leaves the watcher idle.
+  pollSeconds: 60
+  # THE LONGEST A POD WAITS BEFORE EXITING, drawn per pod inside that range.
+  #
+  # Both replicas see the refreshed file inside the same kubelet sync window, so
+  # an unsplayed exit can drop both at once — and the PodDisruptionBudget does
+  # NOT govern a self-exit, it constrains eviction. This is the only control
+  # there is. Five minutes against 30 days of slack is free.
+  #
+  # `0` exits immediately, which is what a single-replica or a development
+  # deployment wants.
+  splayMaxSeconds: 300

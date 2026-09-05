@@ -54,27 +54,32 @@
 //! moved is WHERE the handlers are installed, never WHEN: the crate's
 //! `shutdown` is a `fn` returning a future, exactly as this one was.
 //!
-//! **This service takes `shutdown` and NOTHING ELSE from that crate, which is
-//! the judgement this section already carried.** `yadgar-lifecycle` also holds
-//! `DRAIN_BUDGET`/`drain_within`, which bound a drain no signal began. `iam`
-//! needs them because `iam::rotate` can end the serving future on its own; this
-//! service has no such watcher — `grep -rn rotate src/` returns nothing — so
-//! the only drain that ever happens is the one
-//! `terminationGracePeriodSeconds` already bounds, and [`builder`]'s server is
-//! wired to `shutdown` directly. `task-db` reached the identical conclusion for
-//! the identical reason.
+//! **THIS SERVICE NOW TAKES ALL THREE UNITS, AND THE DATE THIS SECTION SET IS
+//! WHY.** It used to take `shutdown` and nothing else, on the argument that
+//! nothing here ended the serving future on its own, so `DRAIN_BUDGET` and
+//! `drain_within` would have bounded a drain no signal began. That argument was
+//! sound about the drain and it carried its own expiry — ADR-0523 requires an
+//! exit-on-rotation watcher in every process that reads security material once
+//! at boot, and this one does: it reads its serving certificate and its key
+//! right here, when the listener is built.
 //!
-//! **That reasoning has a known expiry date, so read it as dated rather than
-//! settled.** ADR-0523 requires an exit-on-rotation watcher in every process
-//! that reads security material once at boot, and this one does — it reads its
-//! serving certificate and key when the listener is built. When that watcher
-//! lands here it brings a self-initiated drain with it, and the budget comes
-//! back with it: tokio never unregisters a libc signal handler, so once a
-//! non-signal arm wins the `select!` a later SIGTERM is swallowed and only
-//! SIGKILL remains. Whoever adds the watcher adds `yadgar_lifecycle::rotate`
-//! and `drain_within` in the same change; the three are one decision, not
-//! three. Adopting the crate now is what makes that one edit rather than a
-//! second lift.
+//! **THE EXPIRY WAS 2026-12-01T19:35:07Z**, which is when `iam-db-tls` runs out.
+//! cert-manager rewrites the Secret at renewal and kubelet swaps the mount, and
+//! a process that read the leaf once goes on presenting the OLD one until
+//! something restarts it. Until this change only an ordinary release rescued it,
+//! by accident.
+//!
+//! So the watcher is here, and it brought the budget with it in the same change,
+//! exactly as this section said it must: tokio never unregisters a libc signal
+//! handler, so once a non-signal arm wins the `select!` a later SIGTERM is
+//! swallowed and only SIGKILL remains. `main` selects on
+//! `yadgar_lifecycle::shutdown` and `rotate::watch`, and `drain_within` bounds
+//! whichever wins. The three are one decision and they landed as one.
+//!
+//! **WHICH FILES ARE WATCHED IS [`crate::rotate`]'s**, not this module's — the
+//! listener's certificate and key are two of the three, and the database
+//! password and the engine's CA are watched on the same ADR-0523 ground.
+//! `tests/assembly.rs` is what a member deleted from that list dies against.
 //!
 //! # What is deliberately NOT here
 //!

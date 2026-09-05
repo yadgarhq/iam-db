@@ -41,6 +41,106 @@ enum SettingValue {
   SETTING_VALUE_ON = 2;
 }
 
+// Which level of an InheritedSetting a write addresses.
+//
+// TWO LEVELS AND NO MORE. ADR-0522 has an organisation and a team; a third
+// level appearing between them is that decision's own revisit trigger rather
+// than a value quietly added here.
+//
+// IT IS DECLARED BESIDE SettingValue RATHER THAN IN A SERVICE FILE, AND THE
+// REASON IS DIRECTIONAL LAYERING rather than any lint rule — the same
+// distinction yadgar/iamdb/v1's header draws for RateLimit. Both boundaries
+// that carry a write need this enum, and the storage boundary sits below the
+// logic one (D4), so the store cannot import it from the API it serves. That
+// the two request messages are separate is a lint consequence and not the
+// reason; it would not by itself put the enum here.
+//
+// **THE WRITE'S VALIDATION, and it is stated once, here.** InheritedSetting
+// states its resolution once for a reason that applies with equal force to the
+// write: two normative copies in two files must stay in step for ever, and the
+// copy that drifts is the one a reader happens to open. A request that writes
+// ONE LEVEL of an InheritedSetting — SetInheritedSettingRequest on either
+// boundary — carries a scope, a team id, a name, a value, a lock and a clear
+// flag. **EVERY ONE OF THESE IS `INVALID_ARGUMENT`**, refusing being this
+// estate's answer wherever a supplied value would otherwise be silently
+// discarded:
+//
+//   - `scope` is SETTING_SCOPE_UNSPECIFIED.
+//   - `scope` IS NOT ONE OF THE MEMBERS THIS ENUM DECLARES. proto3 enums are
+//     unrecognised number arrives intact rather than collapsing to the zero,
+//     OPEN, and the paragraph above anticipates a third level being proposed. A
+//     `switch` whose `default:` falls through writes the ORGANISATION's policy
+//     for a request that named neither level, which is the widest write there
+//     is answering a request nobody made.
+//   - `scope` is TEAM and `team_id` is absent, or present and empty. Nothing
+//     names the row to write.
+//   - `scope` is ORG and `team_id` is present. There is ONE organisation (D27),
+//     so a team id here is a caller that meant TEAM; ignoring it would write
+//     the organisation's policy while the caller believed it wrote one team's.
+//   - `scope` is TEAM and `locked` is PRESENT, whichever value it holds. The
+//     lock is meaningful at organisation scope only.
+//   - `scope` is ORG and `locked` is ABSENT. Every default is wrong: false is
+//     the unsafe direction, true locks a deployment that never asked, and
+//     keeping the stored value stops the verb from stating a wanted result.
+//   - `value` is SETTING_VALUE_UNSPECIFIED, sent EXPLICITLY, at either scope.
+//   - `value` is ABSENT and `clear` is unset, at either scope.
+//   - `clear` is set and `value` is PRESENT. Two contradicting instructions,
+//     and neither is the obvious one to discard.
+//   - `clear` is set and `scope` is ORG. The organisation always holds a value
+//     — the resolution's first step refuses an unset one — so there is nothing
+//     there to clear.
+//   - `name` is not the one member of the setting vocabulary.
+//
+// **THE ONLY WAY TO DELETE ANYTHING is `scope` TEAM, `clear` SET and `value`
+// ABSENT, so deletion requires an affirmative non-default byte.** That is the
+// whole of what `clear` is for. Without it the wire DEFAULT — a request that
+// simply omits `value` — is the DESTRUCTIVE action, which inverts a principle
+// this contract states twice elsewhere: org_locked's zero is called the unsafe
+// direction, and an absent `value` at organisation scope is refused precisely
+// so absence cannot destroy. At team scope absence would have deleted. `clear`
+// is the ONE field in the request whose falsy zero is the SAFE direction, which
+// is why it is a bare bool rather than `optional`.
+//
+// IT NARROWS, BUT DOES NOT CLOSE, A READ-BY-WRITE PATH, and the difference is
+// worth stating precisely because an earlier draft of this comment claimed the
+// closure. The response carries the setting WHOLE — both levels and every
+// team's override, unbounded in the team count. So an admin who wants to READ
+// the configuration can still issue a write to get it, and clearing an override
+// that is not there succeeds and changes nothing, which makes team scope with
+// `clear` set and no `value` a zero-mutation read for the price of one byte and
+// an idempotency key.
+//
+// What the guard buys is that no read arm is reachable by OMISSION — a caller
+// who sends neither `value` nor `clear` is refused rather than answered. The
+// remaining path costs an affirmative `clear: true`, which is the same byte
+// that makes deletion deliberate.
+//
+// THE RESPONSE'S SHAPE IS WHY THE PATH EXISTS, and it is not closed here on
+// purpose. Emptying the response, or answering NOT_FOUND to a no-op clear,
+// would each cost the state-setter property this RPC is built on: it states a
+// wanted result, and stating a result that already holds must succeed or a
+// retry of a lost-but-successful call reads as a failure. The honest fix is an
+// administrative read verb, which does not exist yet and is filed rather than
+// improvised.
+//
+// yadgar.iamdb.v1's SetRateLimitOverrideRequest.limit SHIPS ABSENT-DELETES WITH
+// NO SUCH GUARD, AND THAT WAS WEIGHED RATHER THAN MISSED. A guard on one verb
+// and not its neighbour is a second convention on one service, which is a real
+// cost and the kind this estate usually refuses to pay. It loses on BLAST
+// RADIUS. A lost rate-limit override costs throughput and the loss is visible
+// in the next metric; a lost owner-read override silently WIDENS who may read a
+// record, and the RPC's own comment calls that a wider authority than
+// SetUserAdmin. D80 ranks these two failures for a portability property — a
+// component that stops working is a bug, and one that keeps working and stops
+// protecting is worse — and while D80 governs platform dependence rather than
+// this, the ordering is the same one and it is why the guard is worth the
+// inconsistency.
+enum SettingScope {
+  SETTING_SCOPE_UNSPECIFIED = 0; // never sent; refused at validation
+  SETTING_SCOPE_ORG = 1;
+  SETTING_SCOPE_TEAM = 2;
+}
+
 // A setting an organisation states and a team may be permitted to override.
 //
 // **THIS IS THE ESTATE'S FIRST INHERITABLE SETTING (ADR-0522), SO IT IS THE
@@ -53,9 +153,58 @@ enum SettingValue {
 // **THE RESOLUTION, and it is stated once, here.** Given the team a record
 // belongs to:
 //
-//     if org_locked:                       org_value
-//     else if team_override has that team: that entry
+//     if absent or org_value == SETTING_VALUE_UNSPECIFIED:
+//                                          INVALID_ARGUMENT
+//     else if org_locked:                  org_value
+//     else if team_override has that team:
+//         if that entry == SETTING_VALUE_UNSPECIFIED:
+//                                          INVALID_ARGUMENT
+//         else:                            that entry
 //     else:                                org_value
+//
+// **BOTH BRANCHES THAT PRODUCE A VALUE VALIDATE IT, and the team branch is not
+// exempt because a zero-holding entry is declared impossible.** SettingValue's
+// comment says UNSPECIFIED never appears in the map and team_override's says
+// absence is how a team states nothing — and the map is still `map<string,
+// SettingValue>`, so a zero-holding entry is REPRESENTABLE and round-trips
+// intact. A migration that materialises a row per team, a store that backfills
+// the map from a join, or any writer that predates the write path's refusal
+// produces one. An enforcing -db would then resolve to UNSPECIFIED and apply
+// the strict policy silently, which is the same defect as the organisation
+// branch's and would be left open in the same edit that closes it.
+//
+// "THE WRITE PATH REFUSES IT" IS NOT THE ANSWER HERE, and the reason is that
+// the identical argument was available for org_value and rejected: a -db
+// implementing this algorithm verbatim is the thing being made correct, and it
+// cannot see the write path. A resolution that trusts its input is a resolution
+// whose correctness lives somewhere else.
+//
+// **THE REFUSAL IS THE FIRST STEP OF THE RESOLUTION, NOT A CHECK BESIDE IT.**
+// An order that branches on the lock first REACHES AN ANSWER WITHOUT EVER
+// INSPECTING org_value: with the lock clear and an override present for that
+// team, the override is returned and the organisation's value is never read. So
+// the refusal `Scope.owner_reads_own_record` calls absolute is UNREACHABLE in
+// exactly the deployment that needs it — a store that encodes an absent
+// organisation row as (UNSPECIFIED, false), plus any team holding an override.
+// An enforcing -db answers that team's value and refuses nothing, which is the
+// permissive half of a policy the deployment never stated.
+//
+// **THE ORDER CARRIES THE WEIGHT BECAUSE org_locked CANNOT SAY "UNKNOWN".** It
+// is a bool, so the field an implementation branches on FIRST always reads as a
+// definite answer and a missing row is indistinguishable from a stated "clear".
+// org_value is the only field here that can say "nothing was stated", so it is
+// the only one that can carry the refusal — and it carries nothing unless it is
+// consulted before anything else.
+//
+// **THE FIRST BRANCH TESTS THE MESSAGE, NOT ONLY THE FIELD.** Reading org_value
+// off an absent message yields the zero in Go and in the C++ family and lands
+// on the refusal by accident; a language with explicit message presence —
+// prost's `Option<InheritedSetting>` — must unwrap before it can read the field
+// at all, and a verbatim implementation would have no ruled behaviour at that
+// step. Absent and present-holding-UNSPECIFIED are ONE case, as
+// `Scope.owner_reads_own_record` states, and putting that INSIDE the algorithm
+// is what makes an implementation correct in every language rather than only in
+// the ones where it is accidentally correct.
 //
 // **THE LOCK IS THE LOAD-BEARING FIELD.** Without it an organisation cannot
 // state a policy a team may not escape, which is the only reason an
@@ -99,6 +248,15 @@ message InheritedSetting {
   // ADR-0522 ships this ENGAGED for owner_reads_own_record, so the expected
   // behaviour is not merely the default but is also not quietly overridable. A
   // deployment that wants team-by-team variation opts into that variability.
+  //
+  // A SENDER POPULATES THIS DELIBERATELY WHENEVER IT POPULATES org_value.
+  // Being a bool, this field has no "unknown", and its zero is the UNSAFE
+  // direction — a sender that fills in the value and leaves the lock alone has
+  // stated "clear" without meaning to, and the resolution above cannot tell
+  // that apart from a deployment that chose it. The refusal on org_value is
+  // what covers a sender that populated NOTHING; nothing covers a sender that
+  // populated half. `SetInheritedSetting` closes the write end by requiring the
+  // lock at organisation scope rather than defaulting it.
   bool org_locked = 2;
 
   // Teams that state something other than the organisation's value, keyed by
@@ -245,6 +403,163 @@ message Scope {
   // setting and fall back to a default, reintroducing the failure the refusal
   // exists to prevent. Presence is not a third value.
   InheritedSetting owner_reads_own_record = 6;
+}
+
+// WHO THE GATEWAY BELIEVED WAS CALLING AN ADMINISTRATIVE RPC, CARRIED FOR THE
+// AUDIT RECORD AND FOR NOTHING ELSE.
+//
+// **A RECEIVER MUST NOT USE THIS AS AN AUTHORISATION INPUT.** It MUST NOT
+// decide whether a request is permitted, MUST NOT widen or narrow a reach,
+// MUST NOT select or filter A ROW OF THE ENTITY THE REQUEST ACTS UPON, and
+// MUST NOT stand in for `Scope.user_id`. ITS ONE SANCTIONED USE IS
+// ATTRIBUTION: writing it into an audit record so a later reader knows who the
+// gateway believed was calling. A receiver that authorises on it has built an
+// authentication mechanism out of a field that anything able to reach that
+// receiver can set to anything.
+//
+// **READING AN AUDIT RECORD BACK BY ITS RECORDED ATTRIBUTION IS SANCTIONED,
+// AND THE ROW CLAUSE IS NARROWED SO THAT IT SAYS SO.** Unnarrowed, that clause
+// forbade the one thing that makes an attribution usable. An incident review
+// asks what `u-42` did, and a store obeying the wide reading answers with every
+// attested act while silently omitting every administrative one — no error, no
+// gap marker, an answer that looks complete. D25 refuses an audit log with
+// silent holes precisely because it will be trusted, and that hole would be
+// reached by following this contract rather than by breaking it.
+//
+// **THE TWO CASES ARE TOLD APART BY DIRECTION, NOT BY WHO IS ASKING.** On a
+// REQUEST the value is a live assertion about an operation that has not
+// happened yet, and every clause above binds — save the carve-out stated here,
+// which is the one exception there is. In an AUDIT RECORD it is a recorded
+// artifact of an act already committed, on a different message travelling the
+// other way, and matching a stored column against a value a query supplied
+// decides nothing about anybody's reach.
+//
+// **A QUERY FIELD NAMING AN ACTOR TO SEARCH RECORDED ATTRIBUTIONS FOR IS THE
+// CARVE-OUT'S INSTRUMENT, AND THE ROW CLAUSE DOES NOT BIND IT, HOWEVER IT IS
+// TYPED.** Said rather than left to be worked out, because the field carrying
+// this query does not exist yet and will arrive on a REQUEST: an audit query is
+// a request, and the records it selects are the entity it acts upon, so the row
+// clause read without this sentence would forbid the very query the paragraph
+// above sanctions. Its implementor would then meet the same three losing
+// options one level down, which is the trap this narrowing exists to close.
+//
+// **THE CARVE-OUT IS A SELECTION OVER RECORDS AND IS NEVER AN AUTHORISATION.**
+// Whoever runs that query was authorised to read the audit store by something
+// else entirely, and this field takes no part in that decision. A caller who
+// names an actor learns which rows carry that unverifiable attribution, which
+// is exactly as good as the attribution and no better. A row matching an actor
+// is NOT evidence that the named person acted.
+//
+// **NO FIELD CARRIES THAT QUERY TODAY, AND ONE EXISTING FIELD MUST NOT BE
+// MISTAKEN FOR IT.** `yadgar.audit.v1.QueryAuditRequest.actor_user_id` filters
+// the ATTESTED column and only that one. It MUST NOT be mapped onto both
+// columns: that would re-collapse the very distinction the split field exists
+// to create, and a reader could no longer tell which of the two an answer came
+// from. A filter of its own is additive and is not added here.
+//
+// **IT IS NEVER PART OF AN IDEMPOTENCY PAYLOAD COMPARISON, ON ANY RPC THAT
+// CARRIES IT, TODAY OR LATER.** D9 refuses the same key carrying a DIFFERENT
+// request, and which fields count as the request is enumerated per RPC. This
+// field counts on NONE of those enumerations, and the ones that call themselves
+// complete say so explicitly rather than leaving a reader to work it out.
+// Including it would refuse, with INVALID_ARGUMENT, a retry of an IDENTICAL
+// operation that happened to be stamped with a different actor — a second
+// administrator picking up a change the first one lost, or a gateway that
+// resolved the credential to another id. The field would then decide whether a
+// request SUCCEEDS, which is a behavioural input, and the four MUST NOTs above
+// exist precisely so that it has none. INERT BY CONSTRUCTION IS THE PROPERTY:
+// this field changes what is RECORDED and never what HAPPENS.
+//
+// **THE FIRST ACTOR'S IS THE ATTRIBUTION OF RECORD, AND A REPLAY RECORDS NO
+// SECOND ONE.** The exclusion above is what makes a retry under a used key a
+// replay: the original outcome is returned and no write happens, so there is no
+// transaction for D25's outbox row to be written in and no new audit event to
+// carry the second actor. Administrator A promotes a user and the response is
+// lost; administrator B retries the same key stamped with their own id. The
+// store holds ONE event, naming A, and B's administrative attempt is recorded
+// NOWHERE. A READER OF AN ATTRIBUTION IS READING WHO THE GATEWAY BELIEVED MADE
+// THE ACT, NEVER THE SET OF PEOPLE WHO ASKED FOR IT.
+//
+// **D9's OWN TEST IS WHETHER A REPLAY WOULD SILENTLY DISCARD THE DIFFERENCE,
+// AND READ LITERALLY THIS FIELD FAILS IT.** The difference is discarded and the
+// discarding is silent. The exclusion stands anyway, and it stands on which
+// harm each answer buys rather than on a claim that the test is passed. D9's
+// test was written for a difference that changes the OPERATION — a second
+// password under a used key, where the first stays live and the caller believes
+// the second took effect — and there a refusal is the only answer that does not
+// lie. This difference changes only the RECORD. Refusing it would let an
+// audit-only field decide whether a request SUCCEEDS, so an identical retry by
+// a second administrator picking up a change the first one lost is answered
+// with INVALID_ARGUMENT while nothing about the operation differs.
+//
+// **THE CHOICE IS ONE LOST ATTRIBUTION AGAINST A REFUSED CORRECT OPERATION,
+// AND THE CONTRACT TAKES THE FIRST.** It is a cost rather than the absence of
+// one, and it is written here so that an incident review holding a single actor
+// on a replayed key knows the hole is by construction and not a gateway that
+// forgot to stamp.
+//
+// **THE TYPE IS NAMED FOR THE WARNING BECAUSE THE COMMENT DOES NOT TRAVEL.**
+// This paragraph is read once, by whoever wires the field. The field is read
+// for ever, at every use site, in generated code where no comment appears. A
+// bare `actor` or `actor_user_id` reads as a verified identity at those sites,
+// and `actor_claim` reads WORSE rather than better — "claim" is the OIDC and
+// JWT word for an assertion that IS verifiable, precisely because a signature
+// travels with it. Nothing travels with this. `req.unverified_actor.user_id`
+// on the right-hand side of an access decision looks wrong on sight, and that
+// is the whole of what the name is for.
+//
+// **UNVERIFIED MEANS UNVERIFIABLE BY THE RECEIVER, NOT UNCHECKED BY THE
+// GATEWAY.** The gateway is the one place identity is attested (ADR-0488) and
+// it stamps this from the credential it resolved, so the value is exactly as
+// good as that hop. What no receiver can do is CHECK it: an administrative RPC
+// on `iam` or `iam-db` carries no credential of any kind — deliberately, since
+// a second authentication mechanism inside `iam` would be a second place for
+// it to be wrong, holding the same secret twice — so anything that can reach
+// those services can send any actor it likes. The name states the property at
+// the seat where the field is READ, and it errs towards under-trust on
+// purpose. A reader who trusts it too little declines an attribution they
+// could have leaned on; a reader who trusts it too much authorises on a string
+// a caller wrote. D80 ranks that pair for a different property and the
+// ordering is the same one: a thing that stops working is a bug, and a thing
+// that keeps working and stops protecting is worse.
+//
+// **ABSENT MEANS NO ACTOR WAS STAMPED. A PRESENT MESSAGE HOLDING AN EMPTY
+// `user_id` IS THE SAME CASE AND IS RECORDED THE SAME WAY — AS UNATTRIBUTED.**
+// It is NEVER recorded as an actor whose id is the empty string. ADR-0512 is
+// the precedent and this estate has already paid for it once:
+// `ResolveCredential` answers "no live credential" with an empty `user_id`, a
+// consumer read that straight into a `Scope`, and every bypasser then shared
+// one identity. An audit store that writes "" as an actor makes every
+// unattributed administrative act in the deployment look like the same actor,
+// which is that same collapse pointed at the audit trail instead of at the
+// authorisation path.
+//
+// **IT AUTHORISES NOTHING NEW AND CLOSES NO PART OF THE AUTHORISATION STORY.**
+// `yadgar.iam.v1.SetInheritedSetting` states the gap in as many words: no
+// administrative RPC on either identity boundary carries an attested identity,
+// so neither service can VERIFY that the caller is an administrator nor RECORD
+// which one acted. This field closes the RECORDING half, for every
+// administrative RPC at once, and leaves the verifying half exactly where it
+// was — at the gateway, on D73's admin flag.
+//
+// **A MESSAGE STAMPED PER REQUEST, RATHER THAN A FIELD ON SOMETHING ALREADY
+// TRAVELLING.** It is NOT folded into `Scope`: that is the ATTESTED identity
+// and says so — "attested by the gateway ... Never supplied by the caller
+// itself" — and it reaches every `-db` in the estate, where an unverifiable
+// value sitting in the message a service already authorises against is the
+// exact confusion this type exists to prevent. It is not folded into
+// `Idempotency` either: that key identifies a WRITE and this identifies a
+// PERSON, they have different lifetimes, and one message carrying two concepts
+// is the coupling this contract refuses elsewhere.
+//
+// **NO `agent` FIELD, UNLIKE `yadgar.audit.v1.WriteEvent`.** D72 puts
+// administrative minting in GitOps or a CLI and never in an agent operation,
+// so there is no agent behind these calls to record.
+message UnverifiedActor {
+  // The gateway's `user_id` for the caller. Never a name, never a token and
+  // never a credential id: this is written to an audit store, and D72 keeps
+  // personal data out of everything but the encrypted columns.
+  string user_id = 1;
 }
 
 // Applied to every mutating RPC (D9). The same key replayed returns the

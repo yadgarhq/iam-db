@@ -18,7 +18,9 @@
 
 use sqlx::Connection;
 use tonic::Request;
-use yadgar_iam_db::pb::yadgar::common::v1::SettingValue;
+use yadgar_iam_db::pb::yadgar::common::v1::{
+    Idempotency, SettingScope, SettingValue, UnverifiedActor,
+};
 use yadgar_iam_db::pb::yadgar::iamdb::v1::iam_db_service_server::IamDbService as _;
 use yadgar_iam_db::pb::yadgar::iamdb::v1::*;
 use yadgar_iam_db::{schema, service::IamDb};
@@ -1727,4 +1729,903 @@ async fn an_unlocked_organisation_comes_back_verbatim() {
         !setting.org_locked,
         "a cleared lock comes back cleared, which is what makes an override consultable"
     );
+}
+
+// ---------------------------------------------------------------------------
+// SetInheritedSetting — the WRITE half of ADR-0522's setting.
+//
+// **THE READ HALF ABOVE SHIPPED WITHOUT ONE.** ADR-0524 opens on exactly that:
+// the organisation's value, the inheritance lock and every team override were
+// changeable only by direct SQL, so half of ADR-0522's ruling could not be met.
+// Everything below this line is the verb that closes it.
+//
+// **WHAT THESE ASSERT IS DELIBERATELY THE REFUSALS AND THE WITHDRAWAL.** Writing
+// a value and reading it back is the easy case and passes on a naive
+// implementation. The cases that matter are the ones where a supplied byte would
+// otherwise be silently discarded, and the one where an OMITTED byte would
+// destroy configuration — ADR-0524's whole subject.
+//
+// **EVERY ASSERTION ABOUT ABSENCE IS ON PRESENCE, NEVER ON A VALUE.** prost makes
+// every field of `InheritedSetting::default()` equal the field of an absent
+// message, so `assert_eq!(setting.org_value, UNSPECIFIED)` goes green whether or
+// not the code tells the two apart. The clear-versus-absent tests below assert
+// `Option::is_some`/`is_none`, `HashMap::contains_key` and a `SELECT COUNT(*)`
+// against the row itself — three things a collapsed distinction cannot satisfy.
+// ---------------------------------------------------------------------------
+
+/// A team row, which no RPC mints (D72 puts team creation outside the first cut).
+async fn seed_team(svc: &IamDb, id: &str) {
+    sqlx::query(
+        "INSERT INTO iam_team (id, name, created_by, updated_by) VALUES (?, ?, 'system', 'system')",
+    )
+    .bind(id)
+    // The name is UNIQUE, so it is the id rather than a literal: two teams in
+    // one test would otherwise collide on the constraint rather than on anything
+    // the test is about.
+    .bind(id)
+    .execute(svc.pool())
+    .await
+    .expect("seed team");
+}
+
+/// How many override rows this team holds. The SQL rather than the response,
+/// because the response is what a collapsed implementation could still get right.
+async fn overrides_for(svc: &IamDb, team_id: &str) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM iam_team_setting_override WHERE name = ? AND team_id = ?",
+    )
+    .bind(OWNER_READS_OWN_RECORD)
+    .bind(team_id)
+    .fetch_one(svc.pool())
+    .await
+    .expect("count overrides")
+}
+
+/// A request that is valid at organisation scope, for a test to spoil one field
+/// of. Never used unmodified: a helper that IS the happy path hides which field
+/// each refusal is about.
+fn org_request() -> SetInheritedSettingRequest {
+    SetInheritedSettingRequest {
+        scope: SettingScope::Org as i32,
+        name: OWNER_READS_OWN_RECORD.into(),
+        value: Some(SettingValue::Off as i32),
+        locked: Some(false),
+        ..Default::default()
+    }
+}
+
+/// The same, at team scope.
+fn team_request(team_id: &str) -> SetInheritedSettingRequest {
+    SetInheritedSettingRequest {
+        scope: SettingScope::Team as i32,
+        team_id: Some(team_id.into()),
+        name: OWNER_READS_OWN_RECORD.into(),
+        value: Some(SettingValue::Off as i32),
+        ..Default::default()
+    }
+}
+
+async fn refused(svc: &IamDb, req: SetInheritedSettingRequest) -> tonic::Status {
+    svc.set_inherited_setting(Request::new(req))
+        .await
+        .expect_err("this request must be refused")
+}
+
+#[tokio::test]
+async fn the_organisations_value_and_lock_are_both_written() {
+    // BOTH COLUMNS AT ONCE AND AWAY FROM THE SEED. Migration 12 ships
+    // `(ON, locked)`, so a handler that wrote only the value — or only the lock —
+    // would still be read back as correct against a request that asked for either
+    // one of them alone. `(OFF, unlocked)` differs in both.
+    let svc = fresh("iam_db_test_set_org").await;
+
+    let got = svc
+        .set_inherited_setting(Request::new(org_request()))
+        .await
+        .expect("write the organisation's level")
+        .into_inner();
+
+    let setting = got.setting.expect("the answer carries the setting whole");
+    assert_eq!(setting.org_value, SettingValue::Off as i32);
+    assert!(!setting.org_locked);
+
+    // The ROW, not the echo. D48 is why the response is not proof of the write.
+    let row: (i32, bool) =
+        sqlx::query_as("SELECT value, locked FROM iam_org_setting WHERE name = ?")
+            .bind(OWNER_READS_OWN_RECORD)
+            .fetch_one(svc.pool())
+            .await
+            .expect("read the row back");
+    assert_eq!(row, (SettingValue::Off as i32, false));
+
+    // AND BACK, because a lock that can only be cleared is not a lock. The verb
+    // states a wanted RESULT, so the reverse write must land the same way.
+    let back = svc
+        .set_inherited_setting(Request::new(SetInheritedSettingRequest {
+            value: Some(SettingValue::On as i32),
+            locked: Some(true),
+            ..org_request()
+        }))
+        .await
+        .expect("state the other value")
+        .into_inner()
+        .setting
+        .expect("setting");
+    assert_eq!(back.org_value, SettingValue::On as i32);
+    assert!(back.org_locked);
+}
+
+#[tokio::test]
+async fn a_team_override_is_written_and_comes_back_in_the_answer() {
+    let svc = fresh("iam_db_test_set_team").await;
+    seed_team(&svc, "yadgar:team:a").await;
+
+    let setting = svc
+        .set_inherited_setting(Request::new(team_request("yadgar:team:a")))
+        .await
+        .expect("write one team's override")
+        .into_inner()
+        .setting
+        .expect("setting");
+
+    assert_eq!(
+        setting.team_override.get("yadgar:team:a"),
+        Some(&(SettingValue::Off as i32))
+    );
+    assert_eq!(overrides_for(&svc, "yadgar:team:a").await, 1);
+    // STILL THE INPUTS, NEVER THE ANSWER: the seeded organisation is locked, so
+    // this override is inert — and it is stored and returned anyway.
+    assert!(setting.org_locked);
+    assert_eq!(setting.org_value, SettingValue::On as i32);
+}
+
+#[tokio::test]
+async fn clearing_a_team_override_deletes_the_row_rather_than_storing_a_value() {
+    // ADR-0524's WITHDRAWAL, and the assertion is on PRESENCE at three levels:
+    // the row is gone from the table, the key is gone from the map, and the map
+    // is empty. A handler that stored SETTING_VALUE_UNSPECIFIED instead of
+    // deleting would satisfy none of them, and one that returned a default-built
+    // message would fail the count.
+    let svc = fresh("iam_db_test_clear_team").await;
+    seed_team(&svc, "yadgar:team:a").await;
+
+    svc.set_inherited_setting(Request::new(team_request("yadgar:team:a")))
+        .await
+        .expect("state an override to withdraw");
+    assert_eq!(overrides_for(&svc, "yadgar:team:a").await, 1);
+
+    let setting = svc
+        .set_inherited_setting(Request::new(SetInheritedSettingRequest {
+            value: None,
+            clear: true,
+            ..team_request("yadgar:team:a")
+        }))
+        .await
+        .expect("withdraw the override")
+        .into_inner()
+        .setting
+        .expect("setting");
+
+    assert_eq!(
+        overrides_for(&svc, "yadgar:team:a").await,
+        0,
+        "clearing removes the row; storing UNSPECIFIED would leave one"
+    );
+    assert!(
+        !setting.team_override.contains_key("yadgar:team:a"),
+        "a withdrawn override is ABSENT from the map, never present holding a zero"
+    );
+    assert!(setting.team_override.is_empty());
+}
+
+#[tokio::test]
+async fn an_absent_value_without_clear_is_refused_rather_than_read_as_a_deletion() {
+    // **THE ONE ADR-0524 EXISTS FOR.** With `value` optional and nothing else,
+    // the request that simply OMITS the value is the DESTRUCTIVE one — so the
+    // most likely accident destroys configuration. This asserts the refusal AND
+    // that the row survived it, because a refusal reported after the delete would
+    // pass an assertion on the status code alone.
+    let svc = fresh("iam_db_test_absent_value").await;
+    seed_team(&svc, "yadgar:team:a").await;
+    svc.set_inherited_setting(Request::new(team_request("yadgar:team:a")))
+        .await
+        .expect("state an override");
+
+    for scope in [SettingScope::Org, SettingScope::Team] {
+        let req = match scope {
+            SettingScope::Team => SetInheritedSettingRequest {
+                value: None,
+                ..team_request("yadgar:team:a")
+            },
+            _ => SetInheritedSettingRequest {
+                value: None,
+                ..org_request()
+            },
+        };
+        assert_eq!(
+            refused(&svc, req).await.code(),
+            tonic::Code::InvalidArgument,
+            "an omitted value states nothing at all, at {scope:?} scope"
+        );
+    }
+
+    assert_eq!(
+        overrides_for(&svc, "yadgar:team:a").await,
+        1,
+        "the refused request destroyed nothing"
+    );
+}
+
+#[tokio::test]
+async fn an_explicitly_unspecified_value_is_a_refusal_and_never_a_withdrawal() {
+    // SENT EXPLICITLY, THE ZERO IS STILL A REFUSAL. It is what a caller that
+    // populated nothing sends, and reading it as "remove this team's override"
+    // would let an unpopulated field destroy configuration silently.
+    //
+    // THIS IS THE OTHER HALF OF THE MUTATION ABOVE. `value.unwrap_or_default()`
+    // collapses `None` and `Some(UNSPECIFIED)` into one case, which kills that
+    // test and this one together — so they are written as two, against the two
+    // shapes the collapse merges.
+    let svc = fresh("iam_db_test_explicit_zero").await;
+    seed_team(&svc, "yadgar:team:a").await;
+    svc.set_inherited_setting(Request::new(team_request("yadgar:team:a")))
+        .await
+        .expect("state an override");
+
+    let req = SetInheritedSettingRequest {
+        value: Some(SettingValue::Unspecified as i32),
+        ..team_request("yadgar:team:a")
+    };
+    assert_eq!(
+        refused(&svc, req).await.code(),
+        tonic::Code::InvalidArgument
+    );
+    assert_eq!(
+        overrides_for(&svc, "yadgar:team:a").await,
+        1,
+        "an explicit zero is refused, and refusing it destroys nothing"
+    );
+}
+
+#[tokio::test]
+async fn clearing_an_override_that_is_not_there_succeeds_and_changes_nothing() {
+    // A STATE-SETTER THAT REFUSED TO STATE A RESULT ALREADY HELD would make the
+    // retry of a lost-but-successful clear read as a failure (ADR-0524).
+    let svc = fresh("iam_db_test_clear_absent").await;
+    seed_team(&svc, "yadgar:team:a").await;
+
+    let setting = svc
+        .set_inherited_setting(Request::new(SetInheritedSettingRequest {
+            value: None,
+            clear: true,
+            ..team_request("yadgar:team:a")
+        }))
+        .await
+        .expect("clearing nothing is not an error")
+        .into_inner()
+        .setting
+        .expect("setting");
+
+    assert_eq!(overrides_for(&svc, "yadgar:team:a").await, 0);
+    assert!(setting.team_override.is_empty());
+}
+
+#[tokio::test]
+async fn clear_and_a_value_together_are_refused() {
+    // Two contradicting instructions, and neither is the obvious one to discard.
+    let svc = fresh("iam_db_test_clear_and_value").await;
+    seed_team(&svc, "yadgar:team:a").await;
+
+    let req = SetInheritedSettingRequest {
+        clear: true,
+        ..team_request("yadgar:team:a")
+    };
+    assert_eq!(
+        refused(&svc, req).await.code(),
+        tonic::Code::InvalidArgument
+    );
+}
+
+#[tokio::test]
+async fn the_organisations_value_cannot_be_cleared() {
+    // There is no state in which the organisation holds no value — the
+    // resolution's FIRST step refuses an unset org_value — so "clear the
+    // organisation's value" names a state this setting does not have.
+    let svc = fresh("iam_db_test_clear_org").await;
+
+    let req = SetInheritedSettingRequest {
+        value: None,
+        clear: true,
+        ..org_request()
+    };
+    assert_eq!(
+        refused(&svc, req).await.code(),
+        tonic::Code::InvalidArgument
+    );
+
+    let value: i32 = sqlx::query_scalar("SELECT value FROM iam_org_setting WHERE name = ?")
+        .bind(OWNER_READS_OWN_RECORD)
+        .fetch_one(svc.pool())
+        .await
+        .expect("the seeded row is still there");
+    assert_eq!(value, SettingValue::On as i32);
+}
+
+#[tokio::test]
+async fn a_scope_that_names_no_level_is_refused_rather_than_defaulted() {
+    // proto3 enums are OPEN, so an unrecognised number arrives intact rather than
+    // collapsing to the zero. A `match` whose fallthrough wrote the ORGANISATION's
+    // policy would answer a request that named neither level with the widest
+    // write there is.
+    let svc = fresh("iam_db_test_scope").await;
+
+    for scope in [SettingScope::Unspecified as i32, 7] {
+        let req = SetInheritedSettingRequest {
+            scope,
+            ..org_request()
+        };
+        assert_eq!(
+            refused(&svc, req).await.code(),
+            tonic::Code::InvalidArgument,
+            "scope {scope} names no level this contract declares"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_team_id_is_required_at_team_scope_and_refused_at_organisation_scope() {
+    // ABSENT and PRESENT-AND-EMPTY are two cases at team scope, and this boundary
+    // has to refuse the second: an empty key in the override map is a row no
+    // record's team will ever match.
+    //
+    // At ORG scope a team id is a caller that meant TEAM (D27: one organisation),
+    // and ignoring it would write the organisation's policy while the caller
+    // believed they wrote one team's.
+    let svc = fresh("iam_db_test_team_id").await;
+
+    for team_id in [None, Some(String::new())] {
+        let req = SetInheritedSettingRequest {
+            team_id,
+            ..team_request("unused")
+        };
+        assert_eq!(
+            refused(&svc, req).await.code(),
+            tonic::Code::InvalidArgument
+        );
+    }
+
+    let req = SetInheritedSettingRequest {
+        team_id: Some("yadgar:team:a".into()),
+        ..org_request()
+    };
+    assert_eq!(
+        refused(&svc, req).await.code(),
+        tonic::Code::InvalidArgument
+    );
+}
+
+#[tokio::test]
+async fn the_lock_is_required_at_organisation_scope_and_refused_at_team_scope() {
+    // AT TEAM SCOPE, BOTH VALUES. A bare bool could only ever refuse `true`,
+    // because `false` is indistinguishable from unset — and a team sending
+    // `locked: false` would have its instruction silently discarded, which is
+    // precisely the case the refusal exists for.
+    let svc = fresh("iam_db_test_lock").await;
+    seed_team(&svc, "yadgar:team:a").await;
+
+    let req = SetInheritedSettingRequest {
+        locked: None,
+        ..org_request()
+    };
+    assert_eq!(
+        refused(&svc, req).await.code(),
+        tonic::Code::InvalidArgument,
+        "an unstated lock is the permissive half of a policy nobody chose"
+    );
+
+    for locked in [Some(true), Some(false)] {
+        let req = SetInheritedSettingRequest {
+            locked,
+            ..team_request("yadgar:team:a")
+        };
+        assert_eq!(
+            refused(&svc, req).await.code(),
+            tonic::Code::InvalidArgument,
+            "a team cannot state whether teams may override, not even by saying false"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_name_outside_the_vocabulary_is_refused_rather_than_stored() {
+    // A store that accepted free text would accrete settings nothing reads, and a
+    // typo would be persisted as a new setting instead of being refused at the
+    // call that made it.
+    let svc = fresh("iam_db_test_name").await;
+
+    for name in ["", "owner_reads_own_recrod", "some_other_setting"] {
+        let req = SetInheritedSettingRequest {
+            name: name.into(),
+            ..org_request()
+        };
+        assert_eq!(
+            refused(&svc, req).await.code(),
+            tonic::Code::InvalidArgument
+        );
+    }
+
+    let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM iam_org_setting")
+        .fetch_one(svc.pool())
+        .await
+        .expect("count");
+    assert_eq!(stored, 1, "only the seeded row exists; nothing accreted");
+}
+
+#[tokio::test]
+async fn the_answer_carries_the_other_level_and_every_other_teams_override() {
+    // NOT THE ECHO D48 REFUSES. The caller sent ONE level; what comes back is the
+    // other level and every OTHER team's override, which the caller did not send
+    // and has no other way to read on this boundary.
+    let svc = fresh("iam_db_test_whole_answer").await;
+    seed_team(&svc, "yadgar:team:a").await;
+    seed_team(&svc, "yadgar:team:b").await;
+
+    svc.set_inherited_setting(Request::new(team_request("yadgar:team:a")))
+        .await
+        .expect("team a");
+
+    let setting = svc
+        .set_inherited_setting(Request::new(SetInheritedSettingRequest {
+            value: Some(SettingValue::On as i32),
+            ..team_request("yadgar:team:b")
+        }))
+        .await
+        .expect("team b")
+        .into_inner()
+        .setting
+        .expect("setting");
+
+    assert_eq!(
+        setting.team_override.get("yadgar:team:a"),
+        Some(&(SettingValue::Off as i32)),
+        "a team the caller did not name comes back too"
+    );
+    assert_eq!(
+        setting.team_override.get("yadgar:team:b"),
+        Some(&(SettingValue::On as i32))
+    );
+    assert_eq!(setting.org_value, SettingValue::On as i32);
+    assert!(setting.org_locked, "the OTHER level travels back as well");
+}
+
+#[tokio::test]
+async fn the_write_is_visible_to_the_read_the_credential_path_makes() {
+    // ONE SETTING, TWO ARMS. A write that landed in a table `ResolveCredential`
+    // does not read would pass every assertion above and change nothing anybody
+    // sees.
+    let svc = fresh("iam_db_test_write_then_resolve").await;
+    seed(&svc, &[70u8; 32], &[70u8; 32]).await;
+    seed_team(&svc, "yadgar:team:a").await;
+
+    svc.set_inherited_setting(Request::new(SetInheritedSettingRequest {
+        value: Some(SettingValue::Off as i32),
+        locked: Some(false),
+        ..org_request()
+    }))
+    .await
+    .expect("organisation");
+    svc.set_inherited_setting(Request::new(team_request("yadgar:team:a")))
+        .await
+        .expect("team");
+
+    let got = svc
+        .resolve_credential(Request::new(ResolveCredentialRequest {
+            token_hash: vec![70u8; 32],
+        }))
+        .await
+        .expect("resolve")
+        .into_inner()
+        .owner_reads_own_record
+        .expect("the setting travels with the identity");
+
+    assert_eq!(got.org_value, SettingValue::Off as i32);
+    assert!(!got.org_locked);
+    assert_eq!(
+        got.team_override.get("yadgar:team:a"),
+        Some(&(SettingValue::Off as i32))
+    );
+}
+
+#[tokio::test]
+async fn an_unverified_actor_changes_what_is_recorded_and_never_what_happens() {
+    // ADR-0534. The field is INERT BY CONSTRUCTION: it is self-asserted, this
+    // boundary cannot verify it, and it MUST NOT be an authorisation input.
+    //
+    // The property a test can hold is that it decides NOTHING — the same request
+    // stamped with an actor, with an empty actor, and with none at all reaches the
+    // same state and the same answer. A handler that read it into a WHERE clause,
+    // or refused a request lacking it, dies here.
+    let svc = fresh("iam_db_test_actor").await;
+    seed_team(&svc, "yadgar:team:a").await;
+
+    let mut answers = Vec::new();
+    for actor in [
+        None,
+        Some(UnverifiedActor::default()),
+        Some(UnverifiedActor {
+            user_id: "yadgar:user:nobody-real".into(),
+        }),
+    ] {
+        answers.push(
+            svc.set_inherited_setting(Request::new(SetInheritedSettingRequest {
+                unverified_actor: actor,
+                ..team_request("yadgar:team:a")
+            }))
+            .await
+            .expect("an actor decides nothing, including whether this succeeds")
+            .into_inner()
+            .setting
+            .expect("setting"),
+        );
+    }
+
+    assert!(
+        answers.windows(2).all(|w| w[0] == w[1]),
+        "who the gateway believed was calling must not change the answer"
+    );
+    assert_eq!(overrides_for(&svc, "yadgar:team:a").await, 1);
+}
+
+#[tokio::test]
+async fn an_override_for_a_team_that_does_not_exist_is_not_found_rather_than_unavailable() {
+    // THE FOREIGN KEY IS NOT THE ERROR MESSAGE. Left to fire, `iam_team_setting_override`'s
+    // constraint renders through `db()` as UNAVAILABLE — a retryable status for a
+    // request that can never succeed, which is the same defect
+    // `SetRateLimitOverride` fixes with `live_user`.
+    let svc = fresh("iam_db_test_unknown_team").await;
+
+    let refusal = refused(&svc, team_request("yadgar:team:never-created")).await;
+    assert_eq!(refusal.code(), tonic::Code::NotFound);
+
+    // A CLEAR IS NOT REFUSED THE SAME WAY, and the asymmetry is the point: a
+    // clear names a row to REMOVE rather than a team to write to, so there is no
+    // foreign key to satisfy — and migration 11 leaves the override a
+    // soft-deleted team strands to be cleared by exactly this call.
+    svc.set_inherited_setting(Request::new(SetInheritedSettingRequest {
+        value: None,
+        clear: true,
+        ..team_request("yadgar:team:never-created")
+    }))
+    .await
+    .expect("clearing an override for a team that is gone is not an error");
+}
+
+// ---------------------------------------------------------------------------
+// D9's key on SetInheritedSetting, in both halves.
+//
+// **THE SECOND HALF IS THE ONE THAT NEEDED A LEDGER.** The verb ASSIGNS a level
+// rather than toggling it, so an identical retry converges on the same state
+// with or without a key — which is why `SetUserAdmin` and `SetRateLimitOverride`
+// need no ledger at all. What that shape cannot do is refuse a repeated key
+// carrying a DIFFERENT request, and D9 as amended says a differing payload is a
+// refusal rather than a replay: replaying it hands the first request's outcome
+// to a caller who sent a second, and reports success.
+//
+// The membership of the comparison is the contract's, not this file's: `scope`,
+// `team_id`, `name`, `value`, `locked` and `clear` — and NOT `unverified_actor`,
+// which is inert by construction (ADR-0534).
+// ---------------------------------------------------------------------------
+
+fn keyed(key: &str, req: SetInheritedSettingRequest) -> SetInheritedSettingRequest {
+    SetInheritedSettingRequest {
+        idempotency: Some(Idempotency { key: key.into() }),
+        ..req
+    }
+}
+
+async fn org_value(svc: &IamDb) -> i32 {
+    sqlx::query_scalar("SELECT value FROM iam_org_setting WHERE name = ?")
+        .bind(OWNER_READS_OWN_RECORD)
+        .fetch_one(svc.pool())
+        .await
+        .expect("read the organisation's value")
+}
+
+#[tokio::test]
+async fn a_replayed_key_re_derives_the_setting_and_writes_nothing() {
+    // **THE REPLAY MUST NOT RE-APPLY THE WRITE.** A state-setter re-run reaches
+    // the same state only if nothing else changed the level in between — and if
+    // something did, re-running would UNDO a legitimate change and report
+    // success. The lever here is a direct SQL change made between the two
+    // deliveries: a handler that ignored the ledger and simply wrote again would
+    // put OFF back.
+    let svc = fresh("iam_db_test_setting_replay").await;
+
+    svc.set_inherited_setting(Request::new(keyed("k-replay", org_request())))
+        .await
+        .expect("the first delivery");
+    assert_eq!(org_value(&svc).await, SettingValue::Off as i32);
+
+    sqlx::query("UPDATE iam_org_setting SET value = ? WHERE name = ?")
+        .bind(SettingValue::On as i32)
+        .bind(OWNER_READS_OWN_RECORD)
+        .execute(svc.pool())
+        .await
+        .expect("somebody else changes the level");
+
+    let setting = svc
+        .set_inherited_setting(Request::new(keyed("k-replay", org_request())))
+        .await
+        .expect("a replayed key is not an error")
+        .into_inner()
+        .setting
+        .expect("setting");
+
+    assert_eq!(
+        org_value(&svc).await,
+        SettingValue::On as i32,
+        "the replay wrote nothing; re-running the assignment would have put OFF back"
+    );
+    assert_eq!(
+        setting.org_value,
+        SettingValue::On as i32,
+        "the outcome is RE-DERIVED rather than replayed from a stored copy"
+    );
+}
+
+#[tokio::test]
+async fn a_key_reused_with_a_different_request_is_refused_rather_than_replayed() {
+    // D9 AS AMENDED. Replaying it would hand the first request's outcome to a
+    // caller who sent a second: the operation actually asked for is silently
+    // discarded and the answer reports success. The caller cannot tell.
+    //
+    // Each case differs from the first delivery in exactly ONE field of the
+    // contract's enumeration, so a comparison that dropped that field passes
+    // every other case and fails this one.
+    let svc = fresh("iam_db_test_setting_differs").await;
+    seed_team(&svc, "yadgar:team:a").await;
+    seed_team(&svc, "yadgar:team:b").await;
+
+    svc.set_inherited_setting(Request::new(keyed("k-diff", team_request("yadgar:team:a"))))
+        .await
+        .expect("the first delivery");
+
+    let differing = [
+        (
+            "value",
+            SetInheritedSettingRequest {
+                value: Some(SettingValue::On as i32),
+                ..team_request("yadgar:team:a")
+            },
+        ),
+        (
+            "team_id",
+            SetInheritedSettingRequest {
+                ..team_request("yadgar:team:b")
+            },
+        ),
+        (
+            "scope and locked",
+            SetInheritedSettingRequest { ..org_request() },
+        ),
+        (
+            // PRESENCE, NOT VALUE. A withdrawal states no value at all; a
+            // comparison that read an absent value as the zero would call this
+            // the same request as one setting the override to UNSPECIFIED — a
+            // value the contract refuses outright.
+            "clear and an absent value",
+            SetInheritedSettingRequest {
+                value: None,
+                clear: true,
+                ..team_request("yadgar:team:a")
+            },
+        ),
+    ];
+
+    for (what, req) in differing {
+        let refusal = svc
+            .set_inherited_setting(Request::new(keyed("k-diff", req)))
+            .await
+            .expect_err(&format!(
+                "a key reused with a different {what} must be refused"
+            ));
+        assert_eq!(refusal.code(), tonic::Code::InvalidArgument, "{what}");
+    }
+
+    assert_eq!(
+        overrides_for(&svc, "yadgar:team:a").await,
+        1,
+        "the first delivery's override still stands"
+    );
+    assert_eq!(
+        overrides_for(&svc, "yadgar:team:b").await,
+        0,
+        "and a refused delivery wrote nothing of its own"
+    );
+}
+
+#[tokio::test]
+async fn an_unverified_actor_is_never_part_of_the_payload_comparison() {
+    // **ADR-0534's `INERT BY CONSTRUCTION`, AT THE ONE PLACE IT COULD STOP BEING
+    // TRUE.** Including the actor in the comparison would refuse, with
+    // INVALID_ARGUMENT, an IDENTICAL operation stamped by a different person —
+    // a second administrator picking up a change the first one lost. The field
+    // would then decide whether a request SUCCEEDS, which is a behavioural input
+    // the four MUST NOTs exist to deny it.
+    let svc = fresh("iam_db_test_setting_actor_key").await;
+    seed_team(&svc, "yadgar:team:a").await;
+
+    svc.set_inherited_setting(Request::new(keyed(
+        "k-actor",
+        SetInheritedSettingRequest {
+            unverified_actor: Some(UnverifiedActor {
+                user_id: "yadgar:user:first".into(),
+            }),
+            ..team_request("yadgar:team:a")
+        },
+    )))
+    .await
+    .expect("the first administrator");
+
+    svc.set_inherited_setting(Request::new(keyed(
+        "k-actor",
+        SetInheritedSettingRequest {
+            unverified_actor: Some(UnverifiedActor {
+                user_id: "yadgar:user:second".into(),
+            }),
+            ..team_request("yadgar:team:a")
+        },
+    )))
+    .await
+    .expect("a second administrator retrying the SAME operation must not be refused");
+}
+
+#[tokio::test]
+async fn an_empty_key_is_no_idempotency_at_all_for_a_setting_write() {
+    // The empty string is not a key. Recording a ledger row on it would make two
+    // unrelated writes collide on one row, and the second — differing, as
+    // unrelated writes do — would be REFUSED under a key neither caller chose.
+    let svc = fresh("iam_db_test_setting_empty_key").await;
+    seed_team(&svc, "yadgar:team:a").await;
+
+    svc.set_inherited_setting(Request::new(team_request("yadgar:team:a")))
+        .await
+        .expect("the first unkeyed write");
+    svc.set_inherited_setting(Request::new(SetInheritedSettingRequest {
+        value: Some(SettingValue::On as i32),
+        ..team_request("yadgar:team:a")
+    }))
+    .await
+    .expect("an unkeyed write must never be read as a replay of an unrelated one");
+
+    let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM iam_inherited_setting_write")
+        .fetch_one(svc.pool())
+        .await
+        .expect("count");
+    assert_eq!(stored, 0, "no ledger row is keyed on the empty string");
+}
+
+#[tokio::test]
+async fn a_refused_request_records_no_claim() {
+    // A ledger row written for a request that was REFUSED would spend the key: a
+    // caller correcting the mistake and retrying under the same key would then be
+    // told their corrected request differs from one that never happened.
+    let svc = fresh("iam_db_test_setting_refusal_key").await;
+
+    let bad = SetInheritedSettingRequest {
+        locked: None,
+        ..org_request()
+    };
+    assert_eq!(
+        refused(&svc, keyed("k-refused", bad)).await.code(),
+        tonic::Code::InvalidArgument
+    );
+
+    let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM iam_inherited_setting_write")
+        .fetch_one(svc.pool())
+        .await
+        .expect("count");
+    assert_eq!(
+        stored, 0,
+        "a refusal leaves no ledger row, no row and no key spent"
+    );
+
+    svc.set_inherited_setting(Request::new(keyed("k-refused", org_request())))
+        .await
+        .expect("the corrected request may reuse the key it never spent");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_simultaneous_deliveries_of_one_setting_key_agree() {
+    // THE CASE A SEQUENTIAL TEST CANNOT REACH. A retrying load balancer delivers
+    // a write more than once, and the two deliveries can be IN FLIGHT AT THE SAME
+    // TIME rather than one after the other.
+    //
+    // MUTATION THIS CATCHES: recording the claim with a plain
+    // `INSERT … ON DUPLICATE KEY UPDATE`, or dropping the re-check on the
+    // duplicate branch. Both deliveries then pass the first ledger read — neither
+    // has written yet — and the loser's DIFFERING payload is applied and recorded
+    // over the winner's. Every other test in this file is sequential and stays
+    // green.
+    //
+    // NOT FIXABLE BY LOCKING THE LEDGER FIRST (ADR-0513): an InnoDB gap lock on
+    // an absent row does not exclude another transaction's gap lock on the same
+    // gap, and it DOES block the other's INSERT — so it turns the race into a
+    // deadlock. The serialisation point is the INSERT itself, which takes a real
+    // record lock.
+    let svc = std::sync::Arc::new(fresh("iam_db_test_setting_race").await);
+    seed_team(&svc, "yadgar:team:a").await;
+
+    for round in 0..8 {
+        let key = format!("k-race-{round}");
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+
+        // TWO DIFFERENT PAYLOADS UNDER ONE KEY, which is the shape that has an
+        // answer a race can get wrong. Exactly one must win; the other must be
+        // refused rather than silently applied over the winner.
+        let mut handles = Vec::new();
+        for value in [SettingValue::Off, SettingValue::On] {
+            let svc = svc.clone();
+            let barrier = barrier.clone();
+            let key = key.clone();
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                svc.set_inherited_setting(Request::new(keyed(
+                    &key,
+                    SetInheritedSettingRequest {
+                        value: Some(value as i32),
+                        ..team_request("yadgar:team:a")
+                    },
+                )))
+                .await
+                .map(|r| r.into_inner())
+            }));
+        }
+
+        let mut outcomes = Vec::new();
+        for h in handles {
+            outcomes.push(h.await.expect("no handler may panic"));
+        }
+
+        let winners = outcomes.iter().filter(|o| o.is_ok()).count();
+        assert_eq!(
+            winners, 1,
+            "round {round}: exactly one delivery may win; the other carried a different \
+             payload under the same key and must be refused"
+        );
+        for refusal in outcomes.iter().filter_map(|o| o.as_ref().err()) {
+            assert_eq!(
+                refusal.code(),
+                tonic::Code::InvalidArgument,
+                "round {round}"
+            );
+        }
+
+        // AND THE STORE AGREES WITH THE WINNER. One ledger row, one override, and
+        // the override holds what the ledger says was asked for — a loser that
+        // wrote and then failed to record would break this even with the counts
+        // right.
+        let recorded: (i32, bool) = sqlx::query_as(
+            "SELECT value, clear_requested FROM iam_inherited_setting_write
+              WHERE idempotency_key = ?",
+        )
+        .bind(&key)
+        .fetch_one(svc.pool())
+        .await
+        .expect("exactly one claim is recorded under this key");
+        assert!(!recorded.1);
+
+        let stored: i32 = sqlx::query_scalar(
+            "SELECT value FROM iam_team_setting_override WHERE name = ? AND team_id = ?",
+        )
+        .bind(OWNER_READS_OWN_RECORD)
+        .bind("yadgar:team:a")
+        .fetch_one(svc.pool())
+        .await
+        .expect("the override");
+        assert_eq!(
+            stored, recorded.0,
+            "round {round}: the stored override must be the one the recorded claim asked for"
+        );
+    }
 }

@@ -189,6 +189,16 @@ message GetPasswordHashResponse {
 // this RPC has no caller until rotation arrives — it stays because it is
 // published and removing it would break the contract, and because rotation is
 // exactly what it is for.
+//
+// NO `unverified_actor`, AND THIS IS THE ONE WRITING ARM WHERE THE EXCLUSION IS
+// ARGUABLE. It is a write, it carries `Idempotency`, it has no `Scope`, and an
+// administrator resetting somebody else's password is administrative on any
+// reading — the same four facts that put the field on every other arm below.
+// It is left out because THE RPC HAS NO CALLER: rotation is outside the first
+// cut, so there is no `yadgar.iam.v1` mirror and no decided request shape, and
+// a field added now would fix an attribution on a verb nobody has designed.
+// Adding it when rotation arrives is additive and costs nothing. Recorded so
+// the next reader does not re-derive the question and reach a different answer.
 message SetPasswordRequest {
   yadgar.common.v1.Idempotency idempotency = 1;
   string user_id = 2;
@@ -209,10 +219,12 @@ message SetPasswordResponse {}
 message CreateEnrolmentRequest {
   // WHICH FIELDS COUNT AS THE PAYLOAD, stated per RPC as
   // yadgar.common.v1.Idempotency requires rather than left to a reader:
-  // `user_id`, `secret_hash` AND `expires_at` — every field of this request
-  // except `idempotency` itself, which carries the key the comparison is keyed
-  // on. A repeated key carrying a different one of those is REFUSED with
-  // INVALID_ARGUMENT by that org-wide rule.
+  // `user_id`, `secret_hash` AND `expires_at` — every field of this request but
+  // two. `idempotency` itself carries the key the comparison is keyed on, and
+  // `unverified_actor` is EXCLUDED because it is inert by construction: see
+  // yadgar.common.v1.UnverifiedActor, which states that exclusion once for every
+  // RPC that carries the field. A repeated key carrying a different one of the
+  // three named above is REFUSED with INVALID_ARGUMENT by that org-wide rule.
   //
   // `secret_hash` IS THE FIELD THAT MAKES THE REFUSAL BITE, and it is why this
   // enumeration is load-bearing rather than tidy. A caller reading the payload
@@ -234,6 +246,11 @@ message CreateEnrolmentRequest {
   // credential token already follows.
   bytes secret_hash = 3;
   google.protobuf.Timestamp expires_at = 4;
+
+  // WHO THE GATEWAY BELIEVED WAS CALLING, FOR THE AUDIT RECORD ONLY. This
+  // service cannot verify it and MUST NOT authorise on it. The rule is stated
+  // once, on yadgar.common.v1.UnverifiedActor, rather than restated here.
+  yadgar.common.v1.UnverifiedActor unverified_actor = 5;
 }
 message CreateEnrolmentResponse {
   string enrolment_id = 1;
@@ -358,6 +375,11 @@ message CreateCredentialRequest {
   bytes token_hash = 3;
   string label = 4;
   optional google.protobuf.Timestamp expires_at = 5;
+
+  // WHO THE GATEWAY BELIEVED WAS CALLING, FOR THE AUDIT RECORD ONLY. This
+  // service cannot verify it and MUST NOT authorise on it. The rule is stated
+  // once, on yadgar.common.v1.UnverifiedActor, rather than restated here.
+  yadgar.common.v1.UnverifiedActor unverified_actor = 6;
 }
 message CreateCredentialResponse {
   string credential_id = 1;
@@ -366,6 +388,11 @@ message CreateCredentialResponse {
 message RevokeCredentialRequest {
   yadgar.common.v1.Idempotency idempotency = 1;
   string credential_id = 2;
+
+  // WHO THE GATEWAY BELIEVED WAS CALLING, FOR THE AUDIT RECORD ONLY. This
+  // service cannot verify it and MUST NOT authorise on it. The rule is stated
+  // once, on yadgar.common.v1.UnverifiedActor, rather than restated here.
+  yadgar.common.v1.UnverifiedActor unverified_actor = 3;
 }
 message RevokeCredentialResponse {
   // Who it belonged to, so the caller can publish the invalidation event (D72)
@@ -408,6 +435,11 @@ message CreateUserRequest {
   // D73's admin flag, set at creation because the first admin has to exist
   // before anyone can log in to promote one.
   bool is_admin = 7;
+
+  // WHO THE GATEWAY BELIEVED WAS CALLING, FOR THE AUDIT RECORD ONLY. This
+  // service cannot verify it and MUST NOT authorise on it. The rule is stated
+  // once, on yadgar.common.v1.UnverifiedActor, rather than restated here.
+  yadgar.common.v1.UnverifiedActor unverified_actor = 8;
 }
 message CreateUserResponse {
   yadgar.common.v1.Meta meta = 1;
@@ -417,6 +449,11 @@ message SetUserAdminRequest {
   yadgar.common.v1.Idempotency idempotency = 1;
   string user_id = 2;
   bool is_admin = 3;
+
+  // WHO THE GATEWAY BELIEVED WAS CALLING, FOR THE AUDIT RECORD ONLY. This
+  // service cannot verify it and MUST NOT authorise on it. The rule is stated
+  // once, on yadgar.common.v1.UnverifiedActor, rather than restated here.
+  yadgar.common.v1.UnverifiedActor unverified_actor = 4;
 }
 message SetUserAdminResponse {}
 
@@ -429,13 +466,247 @@ message SetRateLimitOverrideRequest {
   // bucket again. A zeroed RateLimit is a different instruction — deny this
   // bucket — and explicit presence is what keeps the two apart.
   optional RateLimit limit = 5;
+
+  // WHO THE GATEWAY BELIEVED WAS CALLING, FOR THE AUDIT RECORD ONLY. This
+  // service cannot verify it and MUST NOT authorise on it. The rule is stated
+  // once, on yadgar.common.v1.UnverifiedActor, rather than restated here.
+  yadgar.common.v1.UnverifiedActor unverified_actor = 6;
 }
 message SetRateLimitOverrideResponse {}
+
+// Write ONE LEVEL of an inheritable setting (ADR-0522). The same verb
+// CLEARS a team's override, by setting `clear` and sending no `value` — an
+// absent value ALONE is refused, so a deletion always costs a deliberate byte.
+// The storage boundary owns the rows, so this is where the write lands.
+//
+// ONE RPC WITH THE LEVEL IN THE REQUEST, rather than an organisation verb and a
+// team verb: one authorisation site, one audit point, and the next inheritable
+// setting reuses this arm unchanged. That is the same argument
+// `yadgar.common.v1.InheritedSetting` makes for being one message rather than
+// the first plank of a settings framework.
+//
+// **THIS WRITES THE INPUTS AND NEVER THE ANSWER.** Nothing here resolves the
+// setting. Resolution depends on the team of the ROW being read and is
+// performed where the reach is computed — see
+// `yadgar.common.v1.InheritedSetting`, which states it once, and note that its
+// FIRST step is the refusal on an unset organisation value.
+//
+// **WHO MAY CALL IT — an administrator, and nobody else.** This setting governs
+// who may read which records, so whoever changes it changes what everyone sees:
+// a wider authority than SetUserAdmin, which changes what one person may do.
+// THE CHECK IS AT THE GATEWAY, on D73's admin flag, exactly as for every other
+// administrative RPC reaching this boundary. Only `iam` calls this service, so
+// nothing here re-derives that decision.
+//
+// **D73's BOOTSTRAP TOKEN DOES NOT REACH THIS VERB.** It reaches CreateUser and
+// SetUserAdmin and nothing else, which is how "it can do exactly one thing" is
+// enforced. Extending the bootstrap path here would let a token that exists to
+// create the FIRST admin rewrite the read policy for the whole deployment
+// before an admin exists to notice.
+//
+// **THE GAP, STATED RATHER THAN LEFT TO BE FOUND — AND HALF OF IT IS NOW
+// CLOSED.** This request carries no attested identity, in common with every
+// administrative RPC on this boundary, so neither `iam` nor this service can
+// VERIFY that the caller is an administrator. That half is unchanged: the
+// authorisation site exists and is the gateway, on D73's admin flag. A second
+// authentication mechanism invented here would be a second place for it to be
+// wrong.
+//
+// THE RECORDING HALF IS SERVED BY `unverified_actor` BELOW. The audit point
+// attributes, and what it attributes is a self-asserted id this boundary cannot
+// check — A RECORD RATHER THAN AN ATTESTATION, and never evidence that the
+// named person acted. `yadgar.common.v1.UnverifiedActor` states what may be
+// done with it.
+//
+// **VALIDATION IS STATED ONCE, ON `yadgar.common.v1.SettingScope`**, and is
+// binding here rather than summarised — every clause of it is
+// `INVALID_ARGUMENT`. It is not restated in this file on purpose: two normative
+// copies in two files must stay in step for ever, and the copy that drifts is
+// the one a reader happens to open. The short of it, so a reader knows whether
+// they need to go and look: the scope must be a member this contract names,
+// the team id must be present exactly at team scope and absent at
+// organisation scope, the lock is required at organisation scope and refused at
+// team scope, the name must be the one member of the vocabulary, and DELETING
+// AN OVERRIDE TAKES `clear` — an absent `value` on its own is refused rather
+// than read as a deletion.
+//
+// **THE WRITE IS ALL-OR-NOTHING.** One RPC is one transaction (D5), so a
+// request that fails any of those checks changes nothing — a partially applied
+// setting would leave a policy nobody stated, which is the shape this whole
+// setting exists to make unwritable.
+message SetInheritedSettingRequest {
+  // D9's key, under the ORDINARY replay rule: the same key replayed returns the
+  // original outcome, and the same key carrying a DIFFERENT request is refused
+  // with INVALID_ARGUMENT. The request, for that comparison, is `scope`,
+  // `team_id`, `name`, `value`, `locked` and `clear` — every field of this
+  // message but two. `idempotency` carries the key the comparison is keyed on.
+  // `unverified_actor` is EXCLUDED because it is inert by construction: a
+  // second administrator picking up a change the first one lost would otherwise
+  // be told their identical request differs. yadgar.common.v1.UnverifiedActor
+  // states that exclusion once, for every RPC that carries the field.
+  //
+  // NOT A MEMBER OF ADR-0519's SINGLE-USE-SECRET CARVE-OUT. The outcome here is
+  // the stored setting, which the store keeps and can re-derive on demand, so
+  // there is nothing spent to hand back and the carve-out has nothing to say.
+  //
+  // STATED VOLUNTARILY RATHER THAN BECAUSE THIS RPC OWED IT.
+  // `yadgar.common.v1.Idempotency` obliges an RPC MINTING A SINGLE-USE SECRET
+  // to classify itself, and fixes membership as an ENUMERATION rather than a
+  // test a reader applies — this RPC mints nothing, so neither the obligation
+  // nor the enumeration reaches it. Saying so anyway costs a sentence and
+  // spares the next reader the same check.
+  //
+  // THE CLAIM SERIALISES ON THE WORK ROW at READ COMMITTED, and never on a
+  // `SELECT … FOR UPDATE` of an absent ledger key (ADR-0513). On MariaDB that
+  // lock does not mutually exclude, so two concurrent deliveries of one key
+  // both pass the ledger check and both do the work.
+  //
+  // THE VERB IS A STATE-SETTER BESIDES. It says what the level should BE rather
+  // than how to change it, so a repeat under a FRESH key converges on the same
+  // state — the same property SetUserAdminRequest.is_admin earns its shape
+  // from. The key covers the ledger's guarantee; the shape is what keeps a
+  // retry harmless when the key is lost.
+  yadgar.common.v1.Idempotency idempotency = 1;
+
+  // Which level this writes.
+  yadgar.common.v1.SettingScope scope = 2;
+
+  // REQUIRED when `scope` is TEAM, ABSENT otherwise.
+  //
+  // Explicit presence rather than a bare string, so "no team was named" and "a
+  // team was named and its id is empty" are two cases at the boundary that has
+  // to refuse the second. This is the map key in
+  // `yadgar.common.v1.InheritedSetting.team_override`, and an empty key there
+  // is a row no record's team will ever match.
+  optional string team_id = 3;
+
+  // Which setting.
+  //
+  // THE VOCABULARY IS CLOSED AND HOLDS EXACTLY ONE MEMBER TODAY,
+  // "owner_reads_own_record". ANY OTHER VALUE IS REFUSED RATHER THAN STORED: a
+  // store that accepted free text would accrete settings nothing reads, and a
+  // typo would be persisted as a new setting instead of being refused at the
+  // call that made it. Adding a member is a change to this comment and a
+  // contract release — never a data change.
+  //
+  // A NAME RATHER THAN AN ENUM because the value is the setting's identity
+  // across the estate and already appears as a field name on
+  // `yadgar.common.v1.Scope`. The closed set is enforced by the refusal above,
+  // which is a check either shape needs.
+  string name = 4;
+
+  // ON or OFF. ABSENT ONLY EVER ACCOMPANIES `clear` — on its own it is refused,
+  // at either scope, so an omitted value can never be read as a deletion.
+  //
+  // `optional` SO "REMOVE THIS" AND "STATE THIS" ARE DIFFERENT MESSAGES rather
+  // than the same zero. SetRateLimitOverrideRequest.limit above is the
+  // precedent, AND IT CARRIES LESS THAN AN APPEAL TO IT SUGGESTS: that field is
+  // a MESSAGE, where presence is native to proto3 and the `optional` keyword is
+  // a no-op restating what was already true. This one is an ENUM, where
+  // presence is a SYNTHETIC oneof the compiler generates, and a scalar's
+  // absence is a thing the wire format has to be asked for rather than a thing
+  // it naturally has. So the precedent underwrites the FIELD MODIFIER — it is
+  // the shape this estate reaches for when a value can be withdrawn — and it
+  // does not by itself make absence a safe default here. The `clear` field
+  // below is what makes it safe.
+  //
+  // **SETTING_VALUE_UNSPECIFIED, SENT EXPLICITLY, IS STILL A REFUSAL AND NEVER
+  // A CLEAR** — at either scope. The zero is what a caller that populated
+  // nothing sends. Reading it as "remove this team's override" would let an
+  // unpopulated field destroy configuration silently, which is ADR-0522's own
+  // failure mode pointed at a write instead of at a read, and it would falsify
+  // `yadgar.common.v1.SettingValue`'s own declaration — "never sent; refused at
+  // validation" — in the one place the enum is written directly. PRESENCE is
+  // what separates "I said nothing" from "I said clear it", and it is the only
+  // thing that can: one zero cannot carry both meanings.
+  //
+  // THE ORGANISATION'S VALUE CANNOT BE CLEARED AT ALL, by absence or by `clear`.
+  // There is no state in which the organisation holds no value — the
+  // resolution's FIRST step refuses an unset org_value — so "clear the
+  // organisation's value" names a state this setting does not have. A
+  // deployment changes it by stating the other value.
+  //
+  // CLEARING AN OVERRIDE THAT IS NOT THERE SUCCEEDS AND CHANGES NOTHING, rather
+  // than answering NOT_FOUND. The verb states a wanted RESULT rather than a
+  // change, and the wanted result is already the state — a refusal here would
+  // make the retry of a lost-but-successful clear look like a failure.
+  optional yadgar.common.v1.SettingValue value = 5;
+
+  // Whether a team may override the organisation's value. MEANINGFUL AT
+  // ORGANISATION SCOPE ONLY: required there, refused at team scope.
+  //
+  // `optional` SO THE REFUSAL AT TEAM SCOPE CAN BE EXACT. A bare bool could
+  // only ever refuse a team request carrying `true`, because `false` is
+  // indistinguishable from unset — and a team sending `locked: false` would
+  // have its instruction silently discarded, which is precisely the case the
+  // refusal exists for.
+  //
+  // ABSENT AT ORGANISATION SCOPE IS REFUSED RATHER THAN DEFAULTED, because
+  // every default is wrong here. `false` is the unsafe direction and is the
+  // hole the resolution's validation-first order closes at the read end; `true`
+  // locks a deployment that never asked; and reading the stored lock and
+  // keeping it would stop this verb from stating the wanted result, which is
+  // the property that makes it idempotent by construction.
+  optional bool locked = 6;
+
+  // AFFIRMATIVE CONSENT TO DELETE. Set it, with `value` absent and `scope`
+  // TEAM, to remove that team's override so the organisation's value governs
+  // the team again. Every other combination WITH `clear` SET is refused — see
+  // `yadgar.common.v1.SettingScope`.
+  //
+  // **IT EXISTS BECAUSE THE WIRE DEFAULT WOULD OTHERWISE BE THE DESTRUCTIVE
+  // ACTION.** With `value` optional and nothing else, a request that simply
+  // OMITS the value deletes an override, so the most likely accident — a
+  // generated client that leaves an unset optional alone, a field dropped in a
+  // hand-built message — destroys configuration. That inverts what this
+  // contract states twice elsewhere: org_locked's zero is named the unsafe
+  // direction, and an absent `value` at organisation scope is refused precisely
+  // so absence cannot destroy. Deletion now costs a non-default byte.
+  //
+  // A BARE `bool`, DELIBERATELY, and it is the ONE field here that should be
+  // one. Everywhere else in this message the falsy zero is the unsafe
+  // direction, which is why `value`, `locked` and `team_id` all carry presence.
+  // Here false means "delete nothing", so the zero IS the safe state and
+  // presence would add a third case that means the same as the first.
+  //
+  // IT NARROWS A READ-BY-WRITE PATH RATHER THAN CLOSING IT. No read arm is
+  // reachable by OMISSION any more — a caller sending neither `value` nor
+  // `clear` is refused. But the response carries the setting whole, and a no-op
+  // clear succeeds, so team scope with `clear` set and no `value` is still a
+  // zero-mutation read. That is the response's shape, not this field's, and it
+  // is left open deliberately: see SettingScope in yadgar.common.v1.
+  bool clear = 7;
+
+  // WHO THE GATEWAY BELIEVED WAS CALLING, FOR THE AUDIT RECORD ONLY. This
+  // service cannot verify it and MUST NOT authorise on it. The rule is stated
+  // once, on yadgar.common.v1.UnverifiedActor, rather than restated here.
+  yadgar.common.v1.UnverifiedActor unverified_actor = 8;
+}
+
+// The setting as it now stands, WHOLE — both levels and every team's override.
+//
+// NOT THE ECHO D48 REFUSES. The caller sent ONE level; what comes back is the
+// other level and every OTHER team's override, which the caller did not send
+// and has no other way to read on this boundary — `ResolveCredential` carries
+// the setting on the credential path and there is no administrative read.
+// `yadgar.common.v1.InheritedSetting` carries no `Meta` either, being a setting
+// rather than an entity, so `Meta` is not the available answer.
+//
+// STILL THE INPUTS, NEVER THE ANSWER. Resolution happens where the reach is
+// computed, against the team of the row being read.
+message SetInheritedSettingResponse {
+  yadgar.common.v1.InheritedSetting setting = 1;
+}
 
 message AddTeamMemberRequest {
   yadgar.common.v1.Idempotency idempotency = 1;
   string team_id = 2;
   string user_id = 3;
+
+  // WHO THE GATEWAY BELIEVED WAS CALLING, FOR THE AUDIT RECORD ONLY. This
+  // service cannot verify it and MUST NOT authorise on it. The rule is stated
+  // once, on yadgar.common.v1.UnverifiedActor, rather than restated here.
+  yadgar.common.v1.UnverifiedActor unverified_actor = 4;
 }
 message AddTeamMemberResponse {}
 
@@ -443,6 +714,11 @@ message RemoveTeamMemberRequest {
   yadgar.common.v1.Idempotency idempotency = 1;
   string team_id = 2;
   string user_id = 3;
+
+  // WHO THE GATEWAY BELIEVED WAS CALLING, FOR THE AUDIT RECORD ONLY. This
+  // service cannot verify it and MUST NOT authorise on it. The rule is stated
+  // once, on yadgar.common.v1.UnverifiedActor, rather than restated here.
+  yadgar.common.v1.UnverifiedActor unverified_actor = 4;
 }
 message RemoveTeamMemberResponse {}
 
@@ -460,4 +736,5 @@ service IamDbService {
   rpc SetRateLimitOverride(SetRateLimitOverrideRequest) returns (SetRateLimitOverrideResponse);
   rpc AddTeamMember(AddTeamMemberRequest) returns (AddTeamMemberResponse);
   rpc RemoveTeamMember(RemoveTeamMemberRequest) returns (RemoveTeamMemberResponse);
+  rpc SetInheritedSetting(SetInheritedSettingRequest) returns (SetInheritedSettingResponse);
 }
