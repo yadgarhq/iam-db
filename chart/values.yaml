@@ -195,6 +195,12 @@ autoscaling:
 # the database password and the engine CA when one is named — files this process
 # reads once and then keeps using for the life of the pod. ADR-0523's rule is
 # about provenance rather than payload.
+#
+# THE TWO VALUES BELOW ARE NO LONGER READ BY THIS BINARY (step 2a,
+# MIGRATION_NOTES.md). It now reads its schedule from the mounted configuration
+# document instead. They are rendered so that a rollout landing this chart
+# before this binary's digest still resolves a schedule on the old one, and
+# step 2b deletes them once that digest has landed.
 tlsRotation:
   # How often the files are re-hashed. Reading a handful of small files a minute
   # costs nothing, and the deadline this protects is 30 days wide.
