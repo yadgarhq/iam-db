@@ -236,7 +236,74 @@ spec:
             tcpSocket:
               port: grpc
             initialDelaySeconds: 2
-            periodSeconds: 5
+            # WITHDRAWAL IS `failureThreshold` x `periodSeconds`, AND BOTH ARE
+            # WRITTEN HERE (ledger 606). Only `periodSeconds` was ever spelled;
+            # `failureThreshold` was kubelet's inherited 3, so the 15s this pod
+            # stayed in the Service after it stopped listening was a number
+            # nobody chose and `git grep failureThreshold` could not find. 2 x 2
+            # makes it 4s, and makes it findable.
+            #
+            # THE CASE THIS COSTS IS NARROW, and naming it is what keeps the
+            # numbers honest. A pod being ROLLED does not pay it: the
+            # EndpointSlice controller drops a pod carrying a `deletionTimestamp`
+            # from the ready set at deletion, with no probe involved. A CRASHED
+            # container does not pay it either: kubelet reports a container that
+            # is not running as not ready on the next status sync, ahead of the
+            # prober. What pays it is a process that is ALIVE and has stopped
+            # listening, which is the self-initiated rotation drain of ADR-0523
+            # exactly: `rotate` ends the serve, the listener closes, and the
+            # process stays up for up to `DRAIN_BUDGET` with no
+            # `deletionTimestamp` for either fast path to see. In that window
+            # this probe is the ONLY thing that withdraws this pod.
+            #
+            # `timeoutSeconds` IS SPELLED BECAUSE `periodSeconds` DEPENDS ON IT.
+            # A prober worker ticks once per period and a probe may run for the
+            # whole timeout, so the product above is the real window only while
+            # the timeout is the smaller number. Raising `timeoutSeconds` past
+            # `periodSeconds` stretches the withdrawal silently, and that is the
+            # defect this stanza exists to stop repeating.
+            #
+            # WHY NOT TIGHTER, AND WHY NOT LOOSER. `failureThreshold: 1` lets one
+            # dropped SYN withdraw a healthy pod, and against `replicaCount: 2`
+            # that is half this service for the length of a transient. Note it
+            # would be a WITHDRAWAL, not an eviction: a PodDisruptionBudget
+            # governs the Eviction API and cannot act on a readiness-driven
+            # EndpointSlice change, so it is no backstop here.
+            #
+            # KEEPING 3 WAS THE REAL ALTERNATIVE and it is not free either. At
+            # `periodSeconds: 2` a threshold of 3 gives 6s — nine of the eleven
+            # seconds cut, while keeping the whole inherited transient budget.
+            # Dropping to 2 spends a third of that budget for the last 2s. It is
+            # taken because no chart here sets `affinity`, `topologySpread` or a
+            # `strategy`, so both replicas can co-locate and any node-local fault
+            # is already a whole-service fault; what 3 buys back is roughly 3s of
+            # recovery tail after the fault clears, against 11s off every
+            # rotation drain. `periodSeconds: 1`
+            # buys the same 4s at threshold 4, but it puts the period ON the
+            # timeout, so the arithmetic stops holding the moment a probe has to
+            # wait rather than being refused. There is no boot cost either way:
+            # failing readiness never kills a pod, and under D69 the port is not
+            # open until probe-and-migrate have finished, so failing repeatedly
+            # before that is the intended state rather than a regression. That
+            # clause is true HERE and only here — this service owns an engine.
+            # `gateway`, `iam` and `task` own none and say so in their own crate
+            # docs; their charts state the sub-second reason instead.
+            #
+            # WHAT THIS DOES NOT FIX: a wedged process that keeps its socket open
+            # answers a `tcpSocket` probe at every threshold. The root fix for
+            # the drain window is the process reporting not-ready BEFORE it
+            # closes the listener; this is chart-side mitigation for a
+            # binary-side gap, and it is filed as such.
+            #
+            # THIS SERVICE IS HEADLESS, so the withdrawal reaches callers through
+            # DNS and `yadgar-dial`'s re-resolution loop, whose `RERESOLVE` is
+            # 5s. That tick is added to the window above, which is the reason the
+            # probe half of it should not also be 15s: the two together were the
+            # dominant term, and 4s + one tick leaves the loop as the dominant
+            # one. Retuning `RERESOLVE` is a `dial` change and is not this one.
+            timeoutSeconds: 1
+            periodSeconds: 2
+            failureThreshold: 2
           resources: {{- toYaml .Values.resources | nindent 12 }}
           securityContext:
             allowPrivilegeEscalation: false
