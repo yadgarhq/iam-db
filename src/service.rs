@@ -9,6 +9,49 @@
 //! on every path, because every other one serves data belonging to somebody. This
 //! one runs *before* there is a caller identity — resolving a credential is how
 //! identity comes to exist. Its access control is that only `iam` can reach it.
+//!
+//! # What happens to `Idempotency`, per RPC
+//!
+//! **STATED HERE BECAUSE THE SILENCE IS ITSELF THE DEFECT.** ELEVEN request
+//! messages on this contract carry `yadgar.common.v1.Idempotency` and this module
+//! reads `r.idempotency` on TWO of them. A reader who greps for that field finds
+//! nine handlers that accept a key and never mention it, and cannot tell an
+//! omission from a mechanism. The nine are not one answer nine times:
+//!
+//! - **TWO honour the key with a ledger.** `RedeemEnrolment`, on
+//!   `iam_enrolment_redemption`, and `SetInheritedSetting`, on
+//!   `iam_inherited_setting_write`. Those two tables hold the only columns in
+//!   this schema a caller's key reaches.
+//! - **SIX deliver D9's replay property BY SHAPE, without reading the key.**
+//!   `SetPassword` and `SetRateLimitOverride` upsert, `SetUserAdmin` assigns,
+//!   `RevokeCredential` tombstones under `revoked_at IS NULL`, `AddTeamMember`
+//!   inserts onto a composite primary key, `RemoveTeamMember` deletes. A repeat
+//!   reaches the same state and hands back the same answer, which is what D9's
+//!   core rule asks of a replay; each handler argues its own case where it
+//!   stands. What none of the six can do is D9's AMENDED half — refuse a repeated
+//!   key carrying a DIFFERENT payload — because that needs the prior REQUEST and
+//!   no table here keeps one. That gap is not this module's: it is O21, which
+//!   books it org-wide across 45 of the 47 RPCs in the estate that carry the
+//!   message.
+//! - **THREE DISCARD THE KEY AND PUT NOTHING IN ITS PLACE.** `CreateUser`,
+//!   `CreateEnrolment` and `CreateCredential` mint a row per call, so a retry is
+//!   not a replay and the shape argument above does not reach them. Each carries
+//!   the measured consequence at its own handler.
+//!
+//! **NOTHING IS REFUSED, AND THAT IS A DECISION RATHER THAN THE OVERSIGHT
+//! CONTINUING.** `INVALID_ARGUMENT` on a key this module cannot honour is the
+//! loud alternative to the silence, and it would break the callers that send one:
+//! `iam` forwards a key onto FIVE of these hops today — `CreateUser`,
+//! `CreateEnrolment`, `AddTeamMember`, `RemoveTeamMember` and `RevokeCredential`.
+//! The last three are in the shape group, so refusing them would reject writes
+//! that are already replay-safe; refusing the first two would take user and
+//! enrolment creation down in order to report a defect neither caller can fix.
+//!
+//! **THE LEDGER IS THE FIX, AND IT CANNOT LAND IN THIS REPOSITORY ALONE.** `iam`
+//! bounds a caller's key at the width of the two ledger columns above, and states
+//! that whoever gives one of the five discarded keys a ledger must extend that
+//! bound to the RPC IN THE SAME CHANGE. That constant is in another repository,
+//! so the ledger and the bound have to arrive together, across both.
 
 use sqlx::{MySqlPool, Row};
 use tonic::{Request, Response, Status};
@@ -364,6 +407,30 @@ impl IamDbService for IamDb {
             tel(rid, &r.user_id),
         );
 
+        // `idempotency` IS DISCARDED HERE, AND A RETRY IS NOT A REPLAY. Measured
+        // against mariadb:11.8.8: a second call carrying the SAME `token_hash`
+        // hits `uq_iam_credential_token` and renders through `db()` as
+        // UNAVAILABLE — a retryable status for a request that can never succeed —
+        // while one carrying a FRESH hash mints a SECOND credential. `iam` sends
+        // no key on this hop at all (ADR-0519), so there is nothing here to read;
+        // the module header carries what has to land, and where.
+        //
+        // THE WRITE THE LIVENESS SWEEP MISSED, and the argument is CreateEnrolment's
+        // verbatim rather than a new one. The FOREIGN KEY proves the user row
+        // EXISTS; it does not prove the person is live. `ResolveCredential` joins
+        // `deleted_at IS NULL`, so a credential minted for a soft-deleted account
+        // is accepted, reported OK WITH AN ID the caller then hands to somebody,
+        // and authenticates nobody for the whole of its lifetime.
+        //
+        // NOT DELIBERATE, and the two candidate reasons for leaving it out both
+        // fail. There is no not-yet-live window to protect: `iam_user.deleted_at`
+        // is `NULL DEFAULT NULL`, so a person is live from the INSERT that creates
+        // them. And the one caller that mints a credential right after another
+        // write — `RedeemEnrolment`, then `IssueCredential` — already spends the
+        // enrolment under `user_id IN (SELECT id FROM iam_user WHERE deleted_at IS
+        // NULL)`, so liveness is established one call earlier on that path too.
+        live_user(&self.pool, &r.user_id).await?;
+
         let id = format!("yadgar:credential:{}", uuid::Uuid::now_v7());
         sqlx::query(
             // FROM_UNIXTIME, because the contract carries epoch SECONDS and the
@@ -447,6 +514,13 @@ impl IamDbService for IamDb {
         let r = req.into_inner();
         let call = Call::start(SERVICE, "CreateUser", Kind::Write, tel(rid, ""));
 
+        // `idempotency` IS DISCARDED HERE, AND A RETRY IS NOT A REPLAY. The
+        // UNIQUE below turns a redelivered CreateUser into ALREADY_EXISTS, so a
+        // caller whose first response was lost never learns the `meta.id` that
+        // attempt returned — and this boundary has no verb that would find it,
+        // because `external_id_blind_index` is one-way and `GetPasswordHash`
+        // answers only for a user who already has a password row. `iam` forwards
+        // a key on this hop today. See the module header.
         let id = format!("yadgar:user:{}", uuid::Uuid::now_v7());
         sqlx::query(
             // is_admin is set AT CREATION rather than by a follow-up
@@ -497,11 +571,38 @@ impl IamDbService for IamDb {
         let r = req.into_inner();
         let call = Call::start(SERVICE, "AddTeamMember", Kind::Write, tel(rid, &r.user_id));
 
+        // `INSERT IGNORE` SWALLOWED BOTH FOREIGN KEYS, WHICH IS WHY THIS RPC
+        // REPORTED SUCCESS FOR A ROW THAT NEVER LANDED. IGNORE downgrades a
+        // foreign-key violation to a WARNING: an unknown team or an unknown
+        // person inserted nothing, raised nothing, and the handler answered OK.
+        // An operator was told the membership was granted, no read will ever
+        // return it, and nothing was recorded anywhere to contradict either.
+        //
+        // The IGNORE was there for the DUPLICATE alone. `ON DUPLICATE KEY UPDATE`
+        // keeps that idempotence and swallows nothing else, and the assignment is
+        // a no-op on purpose: a repeat must not move `added_by` or `added_at`,
+        // which record when the person actually joined rather than when somebody
+        // last asked.
+        //
+        // CHECKED RATHER THAN LEFT TO FIRE, the way SetInheritedSetting's team arm
+        // and SetRateLimitOverride's user already are. An unrecognised id rendered
+        // through `db()` is UNAVAILABLE — a retryable status for a request that
+        // can never succeed, so a client retries a mistake forever.
+        //
+        // `live_team` and `live_user` rather than "the row is there", because a
+        // FOREIGN KEY answers the second question and this boundary needs the
+        // first: `ResolveCredential` joins `deleted_at IS NULL`, so a team granted
+        // to a removed person is a membership no read returns. That is the same
+        // class the three writes above already refuse.
+        live_team(&self.pool, &r.team_id).await?;
+        live_user(&self.pool, &r.user_id).await?;
+
         // Idempotent (D9) by the composite primary key rather than by checking
         // first, which would be a race between the check and the insert.
-        sqlx::query(
-            "INSERT IGNORE INTO iam_team_member (team_id, user_id, added_by)
-             VALUES (?, ?, 'system')",
+        let done = sqlx::query(
+            "INSERT INTO iam_team_member (team_id, user_id, added_by)
+             VALUES (?, ?, 'system')
+             ON DUPLICATE KEY UPDATE team_id = team_id",
         )
         .bind(&r.team_id)
         .bind(&r.user_id)
@@ -511,7 +612,11 @@ impl IamDbService for IamDb {
 
         call.finish(Outcome {
             status: "OK",
-            rows: 1,
+            // MEASURED, not asserted. The literal `1` this replaces was wrong on
+            // every repeat — and it was wrong on every silently dropped row too,
+            // which is how a write that stored nothing still emitted a record
+            // saying it had stored one.
+            rows: done.rows_affected() as u32,
             ..Default::default()
         });
         Ok(Response::new(AddTeamMemberResponse {}))
@@ -561,6 +666,17 @@ impl IamDbService for IamDb {
             tel(rid, &r.user_id),
         );
 
+        // `idempotency` IS DISCARDED HERE, AND THIS RPC'S OWN CONTRACT SAYS IT
+        // MUST NOT BE. `yadgar.iamdb.v1.CreateEnrolmentRequest` enumerates the
+        // payload the key is compared on — `user_id`, `secret_hash` and
+        // `expires_at` — and states that ADR-0519's refusal of a replayed key is
+        // enforced HERE rather than in `iam`, because `iam` holds no store to
+        // recognise a key it has seen. `iam` mints a fresh secret on every
+        // attempt, so a redelivery arrives with a DIFFERING `secret_hash` and
+        // this handler mints a SECOND enrolment where the contract requires
+        // INVALID_ARGUMENT. See the module header for why the ledger that closes
+        // this cannot land in this repository alone.
+        //
         // Explicit, because the alternative is worse than a rejection. The
         // column is NOT NULL, so FROM_UNIXTIME(NULL) makes the engine refuse
         // under STRICT_TRANS_TABLES — and `db()` renders every engine error as

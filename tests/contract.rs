@@ -304,6 +304,81 @@ async fn removing_a_member_removes_the_team_from_the_identity() {
     );
 }
 
+/// Seed one team row, which the foreign key requires and no RPC mints (D72).
+async fn team(svc: &IamDb, id: &str) {
+    sqlx::query(
+        "INSERT INTO iam_team (id, name, created_by, updated_by) VALUES (?, ?, 'system', 'system')",
+    )
+    .bind(id)
+    .bind("platform")
+    .execute(svc.pool())
+    .await
+    .expect("seed team");
+}
+
+#[tokio::test]
+async fn adding_a_member_to_a_team_that_does_not_exist_is_refused() {
+    // MUTATION THIS CATCHES: `INSERT IGNORE`. IGNORE downgrades a FOREIGN KEY
+    // violation to a WARNING, so an unknown team inserted nothing, raised
+    // nothing, and this RPC answered OK. An operator was told the membership
+    // landed; no read will ever return it, and no error was recorded anywhere.
+    //
+    // Every other team test seeds the team first, which is why thirteen of them
+    // stayed green over a write that silently discarded its row.
+    let svc = fresh("iam_db_test_member_unknown_team").await;
+    let (user_id, _cred) = seed(&svc, &[57u8; 32], &[57u8; 32]).await;
+
+    let err = svc
+        .add_team_member(Request::new(AddTeamMemberRequest {
+            team_id: "yadgar:team:never-existed".into(),
+            user_id: user_id.clone(),
+            ..Default::default()
+        }))
+        .await
+        .expect_err("a membership in a team that does not exist must not report success");
+    assert_eq!(err.code(), tonic::Code::NotFound);
+
+    assert_eq!(
+        count(
+            &svc,
+            "SELECT COUNT(*) FROM iam_team_member WHERE user_id = ?",
+            &user_id,
+        )
+        .await,
+        0,
+        "the refusal must not have written a row either"
+    );
+}
+
+#[tokio::test]
+async fn adding_a_member_who_does_not_exist_is_refused() {
+    // The other half of the same swallowed constraint: `INSERT IGNORE` dropped
+    // the user foreign key exactly as it dropped the team one.
+    let svc = fresh("iam_db_test_member_unknown_user").await;
+    team(&svc, "yadgar:team:t5").await;
+
+    let err = svc
+        .add_team_member(Request::new(AddTeamMemberRequest {
+            team_id: "yadgar:team:t5".into(),
+            user_id: "yadgar:user:never-existed".into(),
+            ..Default::default()
+        }))
+        .await
+        .expect_err("a membership for a person who does not exist must not report success");
+    assert_eq!(err.code(), tonic::Code::NotFound);
+
+    assert_eq!(
+        count(
+            &svc,
+            "SELECT COUNT(*) FROM iam_team_member WHERE team_id = ?",
+            "yadgar:team:t5",
+        )
+        .await,
+        0,
+        "the refusal must not have written a row either"
+    );
+}
+
 #[tokio::test]
 async fn two_users_cannot_share_a_username() {
     // The UNIQUE on the blind index is the only thing preventing it, and a
@@ -1271,9 +1346,38 @@ async fn administrative_writes_refuse_a_person_who_is_not_live() {
     // CreateEnrolment was the worst of the three: the enrolment was accepted,
     // reported OK, and then permanently NOT_FOUND on redeem — because the
     // redemption path DOES check.
+    //
+    // CreateCredential and AddTeamMember ARRIVED LATE TO THIS TEST, and that is
+    // the point of keeping the class in one place rather than in five files. The
+    // sweep that added the three above walked the writes that take a `user_id`
+    // and stopped one short of both: a credential minted for a removed person is
+    // handed back with an id and resolves for nobody, and a team granted to one
+    // is a membership `ResolveCredential`'s `deleted_at IS NULL` never returns.
     let svc = fresh("iam_db_test_live_writes").await;
     let (user_id, _cred) = seed(&svc, &[55u8; 32], &[55u8; 32]).await;
+    team(&svc, "yadgar:team:t6").await;
     soft_delete(&svc, &user_id).await;
+
+    let err = svc
+        .create_credential(Request::new(CreateCredentialRequest {
+            user_id: user_id.clone(),
+            token_hash: vec![54u8; 32],
+            label: "laptop".into(),
+            ..Default::default()
+        }))
+        .await
+        .expect_err("a credential for a removed person is one that authenticates nobody");
+    assert_eq!(err.code(), tonic::Code::NotFound);
+
+    let err = svc
+        .add_team_member(Request::new(AddTeamMemberRequest {
+            team_id: "yadgar:team:t6".into(),
+            user_id: user_id.clone(),
+            ..Default::default()
+        }))
+        .await
+        .expect_err("a team granted to a removed person is one no read returns");
+    assert_eq!(err.code(), tonic::Code::NotFound);
 
     let err = svc
         .create_enrolment(Request::new(CreateEnrolmentRequest {
