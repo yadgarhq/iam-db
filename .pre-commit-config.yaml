@@ -33,3 +33,21 @@ repos:
       - id: cargo-deny
       - id: observe-coverage
       - id: helm-lint
+
+  # ADR-0569's gate, and REPO-LOCAL deliberately rather than shared from
+  # yadgarhq/actions. That repository has no Cargo.toml, so `ci / test` skips
+  # there and a shared hook's first real execution would be post-merge in a
+  # consumer repo — unverified-on-PR is the wrong property for the one hook whose
+  # whole job is refusing a bad merge.
+  #
+  # always_run with pass_filenames: false, because the property is about the
+  # WHOLE tree: a commit touching only the chart must still fail if `fn env_or`
+  # is sitting in src/, and a filename-scoped hook would pass it.
+  - repo: local
+    hooks:
+      - id: no-compiled-in-defaults
+        name: ADR-0569 — no compiled-in configuration default
+        entry: scripts/no_compiled_in_defaults.sh
+        language: script
+        always_run: true
+        pass_filenames: false

@@ -67,6 +67,37 @@ spec:
             - name: grpc
               containerPort: 50051
           env:
+            # THE THREE KNOBS ADR-0569 MOVED OUT OF THE BINARY. Each held a
+            # compiled-in default until this chart rendered it, and each literal
+            # below is BYTE-IDENTICAL to the default it replaced — which is the
+            # whole of what makes the rollout safe. The chart reaches the cluster
+            # at merge and the image's digest is pinned minutes later by a
+            # separate pipeline, so between the two the new chart runs against
+            # the old binary; identical values make that window a no-op.
+            #
+            # HARDCODED, NOT LIFTED INTO values.yaml, and deliberately. A
+            # values-driven value can be overridden to something the old binary
+            # never used, and the byte-identity argument above would stop
+            # holding. They become values the day an operator needs to move one.
+            #
+            # THE PORT IS WRITTEN TWICE IN THIS FILE: here, and as
+            # `containerPort: 50051` above. Move one and the Service's `grpc`
+            # target port finds nothing listening.
+            - name: LISTEN
+              value: "0.0.0.0:50051"
+            # The metrics exporter's address. It has no containerPort: nothing
+            # scrapes it through the Service, and the PodMonitor that will scrape
+            # it addresses the pod directly.
+            - name: METRICS_LISTEN
+              value: "0.0.0.0:9090"
+            # THE FILE THE DATABASE PASSWORD IS READ FROM, and its directory is
+            # the `db-password` mountPath in `volumeMounts` below —
+            # `/var/run/secrets/iam-db`. ONE PATH, WRITTEN TWICE IN ONE FILE,
+            # which is the point of rendering it here: it used to be written once
+            # here and once inside the binary, where nothing made the two move
+            # together. Change either and change both.
+            - name: DB_PASSWORD_FILE
+              value: /var/run/secrets/iam-db/password
             {{- if .Values.tls.enabled }}
             # RENDERED ONLY WHEN TLS IS ASKED FOR, so a deployment that has not
             # cut over sends the binary nothing at all and binds the plaintext
