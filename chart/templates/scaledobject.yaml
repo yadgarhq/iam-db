@@ -41,12 +41,12 @@ spec:
         #
         # A CLOSED SET OF ONE VALUE, NEVER A LIST OF FAILURES TO EXCLUDE. The
         # label set is open — `telemetry::grpc::status_name` maps fifteen gRPC
-        # codes, `Drop` adds `UNRECORDED`, and gateway emits `FORBIDDEN`, which is
-        # in neither. An exclusion list falls silently back into this defect the
-        # day a value nobody listed appears; matching the one value that means
-        # "served" cannot. Five charts carry this selector, so it also has to be
-        # a thing five separately-edited files can stay in agreement about —
-        # the reasoning `telemetry::grpc::status_name` exists for.
+        # codes and `Drop` adds `UNRECORDED`, which is in neither. An exclusion
+        # list falls silently back into this defect the day a value nobody
+        # listed appears; matching the one value that means "served" cannot.
+        # Five charts carry this selector, so it also has to be a thing five
+        # separately-edited files can stay in agreement about — the reasoning
+        # `telemetry::grpc::status_name` exists for.
         #
         # SHEDDING UNDER OVERLOAD IS NOT COUNTED, AND THAT IS THE INTENT rather
         # than a gap. By the time a saturated pod returns DEADLINE_EXCEEDED its
