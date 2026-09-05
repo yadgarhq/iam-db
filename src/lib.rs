@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 pub mod boot;
+pub mod rotate;
 pub mod schema;
 pub mod serve;
 pub mod service;

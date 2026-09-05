@@ -34,6 +34,7 @@ pub fn migrations() -> Result<MigrationSet, MigrationError> {
         org_setting(),
         team_setting_override(),
         seed_owner_reads_own_record(),
+        inherited_setting_write(),
     ])
 }
 
@@ -460,6 +461,65 @@ fn seed_owner_reads_own_record() -> Migration {
         // a migration's SQL is executed as one statement.
         sql: "INSERT INTO iam_org_setting (name, value, locked)
                   VALUES ('owner_reads_own_record', 2, 1)"
+            .into(),
+    }
+}
+
+fn inherited_setting_write() -> Migration {
+    Migration {
+        version: 13,
+        name: "create_inherited_setting_write".into(),
+        // THE SECOND IDEMPOTENCY LEDGER IN THIS SCHEMA, and the first was
+        // written believing there would be no second — `iam_enrolment_redemption`
+        // says every other RPC here "gets by without one" because each is
+        // naturally repeatable. `SetInheritedSetting` is naturally repeatable
+        // too: it ASSIGNS a level rather than toggling it, so replaying the key
+        // and re-running the write reach the same state. That is why this table
+        // stores no outcome.
+        //
+        // IT EXISTS FOR THE OTHER HALF OF D9, THE AMENDED HALF. A repeated key
+        // carrying a DIFFERENT request is a REFUSAL rather than a replay, and
+        // `yadgar.iamdb.v1.SetInheritedSettingRequest` enumerates exactly which
+        // fields that comparison is over: `scope`, `team_id`, `name`, `value`,
+        // `locked` and `clear`. Without somewhere to remember them, the second of
+        // two writes under one key silently overwrites the first — an operator
+        // retrying a lost call with a corrected value would have the correction
+        // applied and no way to know which of the two took effect.
+        //
+        // O21 records that no `*-db` store persists a request fingerprint. This
+        // does, for one RPC, and it does it as COLUMNS rather than as a digest.
+        // A digest would need a hash function, and this crate deliberately has
+        // none: D72 keeps argon2, hmac and sha2 out of the process that must not
+        // be able to compute them. Six columns need no primitive and are
+        // readable by whoever is looking at a refusal.
+        //
+        // **THREE COLUMNS ARE NULLABLE, AND THAT IS THE WHOLE OF ADR-0524
+        // WRITTEN INTO A TABLE.** `team_id`, `value` and `locked` carry PRESENCE
+        // on the wire, and a comparison that could not tell "absent" from "sent
+        // as the zero" would let a request withdrawing an override compare equal
+        // to one setting it OFF. NOT NULL with a sentinel would collapse exactly
+        // the distinction the RPC is built on. `clear` is NOT NULL because it is
+        // a bare bool on the wire, for the reason ADR-0524 gives: its falsy zero
+        // is the safe direction.
+        //
+        // NO FOREIGN KEY ON `team_id`, unlike iam_team_setting_override. This is
+        // an audit of what was ASKED FOR; a cascade would delete the record of a
+        // request when the team it named went away, and the ledger would then
+        // stop refusing a key whose payload it had forgotten.
+        //
+        // The PRIMARY KEY is the whole mechanism: the INSERT that records a
+        // claim takes a real record lock rather than a gap lock, so the loser of
+        // a race blocks on it and reads the winner's row (ADR-0513).
+        sql: "CREATE TABLE iam_inherited_setting_write (
+                  idempotency_key  VARCHAR(255) NOT NULL PRIMARY KEY,
+                  scope            INT          NOT NULL,
+                  team_id          VARCHAR(96)  NULL DEFAULT NULL,
+                  name             VARCHAR(64)  NOT NULL,
+                  value            INT          NULL DEFAULT NULL,
+                  locked           TINYINT(1)   NULL DEFAULT NULL,
+                  clear_requested  TINYINT(1)   NOT NULL,
+                  written_at       TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
+              ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
             .into(),
     }
 }

@@ -16,7 +16,7 @@ use yadgar_telemetry::grpc::status_name;
 use yadgar_telemetry::observe::{Call, Outcome};
 use yadgar_telemetry::pb::yadgar::telemetry::v1::Kind;
 
-use crate::pb::yadgar::common::v1::{InheritedSetting, Meta, SettingValue};
+use crate::pb::yadgar::common::v1::{InheritedSetting, Meta, SettingScope, SettingValue};
 use crate::pb::yadgar::iamdb::v1::iam_db_service_server::IamDbService;
 use crate::pb::yadgar::iamdb::v1::*;
 /// D67's `Kind` AS THE CONTRACT DECLARES IT, aliased because `Kind` above is
@@ -28,7 +28,9 @@ use crate::pb::yadgar::iamdb::v1::*;
 /// same enum from two independently pinned sources.
 use crate::pb::yadgar::telemetry::v1::Kind as ContractKind;
 
-const SERVICE: &str = "iam-db";
+/// This service's name, on every telemetry record and on the rotation
+/// watcher's gauges. ONE spelling, because a dashboard selects on it.
+pub const SERVICE: &str = "iam-db";
 
 /// What `ListCredentials` returns when the caller names no page size.
 const DEFAULT_PAGE_SIZE: i32 = 50;
@@ -1052,6 +1054,619 @@ impl IamDbService for IamDb {
         });
         Ok(Response::new(SetRateLimitOverrideResponse {}))
     }
+
+    /// Write ONE LEVEL of ADR-0522's inheritable setting.
+    ///
+    /// **THE WRITE HALF THAT ADR-0522 SHIPPED WITHOUT.** The organisation's
+    /// value, the inheritance lock and every team override were changeable only
+    /// by direct SQL until this existed, which is ADR-0524's own opening
+    /// sentence. The two settings tables and their `CHECK (value IN (1, 2))`
+    /// constraints have been here since migrations 10 and 11; what was missing
+    /// was the verb, so this adds NO migration.
+    ///
+    /// **IT REFUSES THE CONTRACT'S CLAUSES ITSELF.** `yadgar.common.v1.SettingScope`
+    /// states the validation once and says it is binding "here rather than
+    /// summarised", so `check_inherited_setting` is a full port of it rather
+    /// than a trust of the caller. `iam` refuses the same clauses one hop up and
+    /// that is not a reason to skip them: a storage boundary whose correctness
+    /// lives in the service above it is a boundary that is correct by
+    /// arrangement.
+    ///
+    /// **IT WRITES THE INPUTS AND NEVER THE ANSWER.** Nothing here resolves
+    /// anything. The resolution depends on the team of the ROW being read and
+    /// happens where the reach is computed; this module does not even know which
+    /// record is being asked about.
+    ///
+    /// **IDEMPOTENT BY SHAPE *AND* BY A LEDGER, AND THE LEDGER IS FOR THE OTHER
+    /// HALF OF D9.** The verb states what the level should BE rather than how to
+    /// change it, so an identical repeat converges on the same state — that is
+    /// the property `SetUserAdmin` and `SetRateLimitOverride` get by with, and it
+    /// is why neither of them has a ledger. What that shape cannot do is refuse a
+    /// repeated key carrying a DIFFERENT request, which D9 as amended requires
+    /// and which this RPC's own contract comment enumerates the fields of.
+    /// Without somewhere to remember them, an operator retrying a lost call with
+    /// a corrected value gets the correction applied and no way to know which of
+    /// the two took effect.
+    ///
+    /// So `iam_inherited_setting_write` records what was asked for, and a
+    /// replayed key RE-DERIVES the setting rather than writing again. Re-running
+    /// the assignment would be harmless only if nothing else had changed the
+    /// level in between; if something had, it would undo that change and report
+    /// success. The outcome is re-derived rather than stored because this RPC is
+    /// NOT in ADR-0519's single-use-secret carve-out — the store keeps the
+    /// setting, so there is nothing spent to hand back.
+    ///
+    /// **ONE TRANSACTION (D5), AND THE READ-BACK IS INSIDE IT.** The response
+    /// carries the setting WHOLE — the other level and every other team's
+    /// override — so a read outside the write's transaction could answer with a
+    /// concurrent writer's half-applied state.
+    async fn set_inherited_setting(
+        &self,
+        req: Request<SetInheritedSettingRequest>,
+    ) -> Result<Response<SetInheritedSettingResponse>, Status> {
+        let rid = request_id_of(&req);
+        let r = req.into_inner();
+        // `tel`'s `user_id` STAYS EMPTY, and that is ADR-0534 rather than an
+        // oversight. The only identity in this request is `unverified_actor`,
+        // which is self-asserted; putting it where every other record in the
+        // estate carries an ATTESTED `Scope.user_id` would make a dashboard join
+        // an unverifiable string to a verified one.
+        let call = Call::start(SERVICE, "SetInheritedSetting", Kind::Write, tel(rid, ""));
+
+        // ADR-0534's RECORDING HALF, and the whole of what this boundary does
+        // with the field. It is written to the log and reaches nothing else: no
+        // WHERE clause, no branch, no refusal. A request carrying an actor and
+        // one carrying none take the identical path.
+        //
+        // THERE IS NO AUDIT STORE ON THIS BOUNDARY, so the structured log is
+        // where an attribution can land today. Said plainly rather than implied:
+        // the durable audit record ADR-0534 imagines does not exist here yet.
+        //
+        // ABSENT AND PRESENT-HOLDING-EMPTY ARE ONE CASE and are recorded as
+        // unattributed, NEVER as an actor whose id is the empty string —
+        // ADR-0512's collapse, pointed at the audit trail. `filter` is what keeps
+        // them together; `unwrap_or_default` would write "" as an actor.
+        tracing::info!(
+            unverified_actor = r
+                .unverified_actor
+                .as_ref()
+                .map(|a| a.user_id.as_str())
+                .filter(|id| !id.is_empty())
+                .unwrap_or("<unattributed>"),
+            setting = %r.name,
+            "an administrative write to an inheritable setting"
+        );
+
+        let scope = match check_inherited_setting(&r) {
+            Ok(scope) => scope,
+            Err(refusal) => {
+                call.fail(label(&refusal));
+                return Err(refusal);
+            }
+        };
+
+        // READ COMMITTED, FOR THIS TRANSACTION ONLY (ADR-0513). It is a
+        // correctness requirement rather than a tuning knob, and the argument is
+        // `RedeemEnrolment`'s verbatim: under the engine's default REPEATABLE
+        // READ a read view is established by the ledger read below, and MariaDB
+        // then refuses a later write to a row a concurrent winner has changed
+        // with 1020 `ER_CHECKREAD` rather than re-evaluating — which `db()`
+        // renders as UNAVAILABLE, turning a retry that should replay into a
+        // spurious 503.
+        //
+        // `SET TRANSACTION` WITHOUT `SESSION` OR `GLOBAL` applies to the NEXT
+        // transaction and then reverts, so a pooled connection carries nothing to
+        // its next borrower. That is what forces `acquire()` then
+        // `Acquire::begin` rather than `pool.begin()`: the statement and the
+        // transaction it configures must be the same connection.
+        let mut conn = self.pool.acquire().await.map_err(db)?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+            .execute(&mut *conn)
+            .await
+            .map_err(db)?;
+        let mut tx = sqlx::Acquire::begin(&mut *conn).await.map_err(db)?;
+
+        // D9's LEDGER, and the amended half of D9 is what it is for. The key
+        // replayed returns the setting; the key carrying a DIFFERENT request is
+        // refused with INVALID_ARGUMENT rather than silently overwriting the
+        // first one.
+        //
+        // A PLAIN READ, deliberately NOT `FOR UPDATE`. This catches a retry that
+        // arrives after the first attempt COMMITTED, which is the ordinary case.
+        // It cannot serialise two deliveries that arrive together, and no lock
+        // taken here could: an InnoDB gap lock on an absent row is purely
+        // inhibitive — it blocks an INSERT into the gap and does NOT exclude
+        // another transaction's gap lock on the same gap, so taking it turns the
+        // race into a deadlock rather than preventing it (ADR-0513). The
+        // serialisation point is the ledger INSERT further down, which takes a
+        // REAL record lock.
+        let claim = Claim::of(&r);
+        if !claim.key.is_empty() {
+            if let Some(prior) = recorded(&mut tx, &claim.key, Lock::No).await? {
+                claim.agrees_with(&prior)?;
+                // **NOTHING IS WRITTEN ON THIS PATH.** The verb is a
+                // state-setter, so re-running it would reach the same state — but
+                // re-running it after somebody else legitimately changed the
+                // level would UNDO their change and report success, which is the
+                // silent overwrite the ledger exists to stop.
+                //
+                // THE OUTCOME IS RE-DERIVED RATHER THAN STORED, and the contract
+                // says why: this RPC is not in ADR-0519's single-use-secret
+                // carve-out, because the outcome is the stored setting and the
+                // store keeps it. There is nothing spent to hand back.
+                let setting = read_inherited_setting(&mut tx, &r.name).await?;
+                tx.commit().await.map_err(db)?;
+                call.finish(Outcome {
+                    status: "OK",
+                    ..Default::default()
+                });
+                return Ok(Response::new(SetInheritedSettingResponse {
+                    setting: Some(setting),
+                }));
+            }
+        }
+
+        let done = match (scope, r.clear) {
+            // Upsert onto the primary key, the idempotence
+            // `SetRateLimitOverride` gets from the same shape. Migration 12 seeds
+            // this row, so in practice this always updates — the INSERT arm is
+            // what makes the handler correct against a deployment whose row was
+            // deleted rather than one that trusts a seed.
+            (SettingScope::Org, _) => {
+                sqlx::query(
+                    "INSERT INTO iam_org_setting (name, value, locked) VALUES (?, ?, ?)
+                     ON DUPLICATE KEY UPDATE value = VALUES(value), locked = VALUES(locked)",
+                )
+                .bind(&r.name)
+                // Both `expect`s are discharged by `check_inherited_setting`,
+                // which refuses an absent value and an absent lock at this scope
+                // before anything reaches here.
+                .bind(r.value.expect("validated present at organisation scope"))
+                .bind(r.locked.expect("validated present at organisation scope"))
+                .execute(&mut *tx)
+                .await
+            }
+            // THE WITHDRAWAL (ADR-0524). It DELETES rather than storing
+            // SETTING_VALUE_UNSPECIFIED, for the reason migration 11 gives:
+            // absence is how a team states nothing, and a stored zero would be an
+            // absent row wearing a disguise — one the table's own CHECK would
+            // refuse anyway.
+            //
+            // NO LIVENESS CHECK ON THE TEAM, unlike the set arm below, and the
+            // asymmetry is deliberate. A clear names a ROW TO REMOVE rather than
+            // a team to write to, so there is no foreign key to satisfy; and
+            // migration 11 says clearing the override a soft-deleted team strands
+            // is the job of whichever RPC does that deletion. Refusing here would
+            // leave that RPC with no verb to call.
+            (SettingScope::Team, true) => {
+                sqlx::query("DELETE FROM iam_team_setting_override WHERE name = ? AND team_id = ?")
+                    .bind(&r.name)
+                    .bind(team_id_of(&r))
+                    .execute(&mut *tx)
+                    .await
+            }
+            (SettingScope::Team, false) => {
+                // THE FOREIGN KEY IS NOT THE ERROR MESSAGE. Left to fire, an
+                // unknown team renders through `db()` as UNAVAILABLE — a
+                // retryable status for a request that can never succeed. The
+                // check is `SetRateLimitOverride`'s `live_user`, applied to the
+                // team.
+                live_team(&mut *tx, team_id_of(&r)).await?;
+                sqlx::query(
+                    "INSERT INTO iam_team_setting_override (name, team_id, value) VALUES (?, ?, ?)
+                     ON DUPLICATE KEY UPDATE value = VALUES(value)",
+                )
+                .bind(&r.name)
+                .bind(team_id_of(&r))
+                .bind(r.value.expect("validated present unless clear is set"))
+                .execute(&mut *tx)
+                .await
+            }
+            // `check_inherited_setting` refuses UNSPECIFIED and every number this
+            // enum does not declare, so this arm is unreachable. It is a refusal
+            // rather than an `unreachable!()`: a panic in a handler takes the
+            // whole process down, and this arm's whole subject is a value that
+            // arrived from the wire.
+            (SettingScope::Unspecified, _) => {
+                let refusal =
+                    Status::invalid_argument("scope names no level this contract declares");
+                call.fail(label(&refusal));
+                return Err(refusal);
+            }
+        }
+        .map_err(db)?;
+
+        // THE CLAIM IS RECORDED LAST, AND THE INSERT IS THE SERIALISATION POINT.
+        // A record lock on a real row, never a gap lock on an absent one — which
+        // is the shape ADR-0513 says does NOT have the defect it was written
+        // about, and which is available here because there is no secret to spend
+        // in the same transaction.
+        //
+        // A DUPLICATE KEY MEANS A CONCURRENT DELIVERY COMMITTED FIRST. The loser
+        // blocks on that lock until the winner commits, so the re-check below is
+        // the branch ADR-0513 requires — the one where the work turns out already
+        // done. Both deliveries did the work, which is harmless because the verb
+        // ASSIGNS; what the re-check adds is the refusal when the two payloads
+        // differ, and the rollback that unwinds the loser's write.
+        if !claim.key.is_empty() {
+            if let Err(e) = claim.record(&mut tx).await {
+                let duplicate = e
+                    .as_database_error()
+                    .is_some_and(|d| d.is_unique_violation());
+                if !duplicate {
+                    return Err(db(e));
+                }
+                let prior = recorded(&mut tx, &claim.key, Lock::Yes)
+                    .await?
+                    .ok_or_else(|| {
+                        // The row that made the INSERT fail is visible to any
+                        // read that follows it at READ COMMITTED, so this cannot
+                        // happen — and if it ever does, it is a broken store
+                        // rather than a caller's mistake.
+                        tracing::error!(
+                            "a duplicate idempotency key vanished before it could be re-read"
+                        );
+                        Status::unavailable("storage unavailable")
+                    })?;
+                claim.agrees_with(&prior)?;
+            }
+        }
+
+        // THE SETTING WHOLE, read in the transaction that wrote it. NOT the echo
+        // D48 refuses: the caller sent one level, and what goes back is the other
+        // level and every OTHER team's override — which the caller did not send
+        // and has no administrative read verb to fetch.
+        let setting = read_inherited_setting(&mut tx, &r.name).await?;
+        tx.commit().await.map_err(db)?;
+
+        call.finish(Outcome {
+            status: "OK",
+            rows: done.rows_affected() as u32,
+            ..Default::default()
+        });
+        Ok(Response::new(SetInheritedSettingResponse {
+            setting: Some(setting),
+        }))
+    }
+}
+
+/// What a `SetInheritedSetting` request ASKED FOR, which is what D9's amended
+/// rule compares one idempotency key's two deliveries on.
+///
+/// **THE MEMBERSHIP IS THE CONTRACT'S, NOT A JUDGEMENT MADE HERE.**
+/// `yadgar.iamdb.v1.SetInheritedSettingRequest` enumerates it: `scope`,
+/// `team_id`, `name`, `value`, `locked` and `clear` — every field of the message
+/// but two. `idempotency` carries the key the comparison is keyed on.
+///
+/// **`unverified_actor` IS EXCLUDED, AND THE EXCLUSION IS LOAD-BEARING.**
+/// `yadgar.common.v1.UnverifiedActor` states it once for every RPC carrying the
+/// field: including it would refuse, with INVALID_ARGUMENT, an IDENTICAL
+/// operation stamped with a different actor — a second administrator picking up
+/// a change the first one lost. The field would then decide whether a request
+/// SUCCEEDS, and it is meant to be inert by construction.
+///
+/// **THE THREE `Option`s CARRY PRESENCE INTO THE COMPARISON.** Collapsing an
+/// absent `value` onto a zero would make a request WITHDRAWING an override
+/// compare equal to one setting it OFF, which is ADR-0524's distinction
+/// destroyed at the one place it is checked rather than at the one place it is
+/// written.
+#[derive(Debug, PartialEq, Eq)]
+struct Claim {
+    key: String,
+    scope: i32,
+    team_id: Option<String>,
+    name: String,
+    value: Option<i32>,
+    locked: Option<bool>,
+    clear: bool,
+}
+
+impl Claim {
+    fn of(r: &SetInheritedSettingRequest) -> Self {
+        Self {
+            // THE EMPTY STRING IS NOT A KEY, the rule `RedeemEnrolment` already
+            // holds. Keying a ledger row on it would make two unrelated writes
+            // collide on one row, so the second would be refused as a differing
+            // payload under a key neither caller chose.
+            key: r
+                .idempotency
+                .as_ref()
+                .map(|i| i.key.clone())
+                .unwrap_or_default(),
+            scope: r.scope,
+            team_id: r.team_id.clone(),
+            name: r.name.clone(),
+            value: r.value,
+            locked: r.locked,
+            clear: r.clear,
+        }
+    }
+
+    /// Refuse a key that already recorded a DIFFERENT request (D9 as amended).
+    ///
+    /// Replaying it would hand the first request's outcome to a caller who sent
+    /// a second: the operation actually asked for is silently discarded and the
+    /// answer reports success. Refusing is the only response that never lies.
+    fn agrees_with(&self, prior: &Claim) -> Result<(), Status> {
+        // The key itself is what they were both found by, so it is never part of
+        // the difference.
+        match (
+            self.scope,
+            &self.team_id,
+            &self.name,
+            self.value,
+            self.locked,
+            self.clear,
+        ) == (
+            prior.scope,
+            &prior.team_id,
+            &prior.name,
+            prior.value,
+            prior.locked,
+            prior.clear,
+        ) {
+            true => Ok(()),
+            false => Err(Status::invalid_argument(
+                "this idempotency key was used with a different request; a repeated key carrying \
+                 a different payload is refused rather than replayed",
+            )),
+        }
+    }
+
+    async fn record(&self, tx: &mut sqlx::MySqlTransaction<'_>) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO iam_inherited_setting_write
+                 (idempotency_key, scope, team_id, name, value, locked, clear_requested)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&self.key)
+        .bind(self.scope)
+        .bind(&self.team_id)
+        .bind(&self.name)
+        .bind(self.value)
+        .bind(self.locked)
+        .bind(self.clear)
+        .execute(&mut **tx)
+        .await
+        .map(|_| ())
+    }
+}
+
+/// The request a key already recorded, or `None` if it has recorded nothing.
+///
+/// `Lock::No` is the ordinary pre-flight read; `Lock::Yes` is the re-check on
+/// the branch where the INSERT found the row already there, where the row DOES
+/// exist and a locking read is therefore a record lock rather than the gap lock
+/// ADR-0513 forbids.
+async fn recorded(
+    tx: &mut sqlx::MySqlTransaction<'_>,
+    key: &str,
+    lock: Lock,
+) -> Result<Option<Claim>, Status> {
+    const BASE: &str = "SELECT scope, team_id, name, value, locked, clear_requested
+                          FROM iam_inherited_setting_write
+                         WHERE idempotency_key = ?";
+    // AUDIT: both arms are literals in this file; `key` is bound, never
+    // interpolated.
+    let sql = match lock {
+        Lock::No => BASE.to_string(),
+        Lock::Yes => format!("{BASE} FOR UPDATE"),
+    };
+
+    let Some(row) = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(key)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(db)?
+    else {
+        return Ok(None);
+    };
+
+    Ok(Some(Claim {
+        key: key.to_string(),
+        scope: row.try_get("scope").map_err(db)?,
+        team_id: row.try_get("team_id").map_err(db)?,
+        name: row.try_get("name").map_err(db)?,
+        value: row.try_get("value").map_err(db)?,
+        locked: row.try_get("locked").map_err(db)?,
+        clear: row.try_get("clear_requested").map_err(db)?,
+    }))
+}
+
+/// The team this request names, after [`check_inherited_setting`] has proved one
+/// is there and is not empty.
+fn team_id_of(r: &SetInheritedSettingRequest) -> &str {
+    r.team_id
+        .as_deref()
+        .expect("validated present and non-empty at team scope")
+}
+
+/// `live_user`, for a team.
+///
+/// A soft-deleted team is NOT_FOUND. An override stored against one is an entry
+/// in the answer keyed on a team whose records are on their way out, which is
+/// the same argument `SetRateLimitOverride` makes about a soft-deleted person.
+async fn live_team<'e, E>(executor: E, team_id: &str) -> Result<(), Status>
+where
+    E: sqlx::Executor<'e, Database = sqlx::MySql>,
+{
+    let found: Option<String> =
+        sqlx::query_scalar("SELECT id FROM iam_team WHERE id = ? AND deleted_at IS NULL")
+            .bind(team_id)
+            .fetch_optional(executor)
+            .await
+            .map_err(db)?;
+    match found {
+        Some(_) => Ok(()),
+        None => Err(Status::not_found("no such live team")),
+    }
+}
+
+/// Both levels of one inheritable setting, unresolved.
+///
+/// The same two queries `ResolveCredential` makes, and deliberately the same
+/// answers — including that an ABSENT organisation row is
+/// SETTING_VALUE_UNSPECIFIED and never OFF. A store that states no policy must
+/// reach the enforcing `-db` as a refusal rather than as this module quietly
+/// choosing the strict one.
+async fn read_inherited_setting(
+    tx: &mut sqlx::MySqlTransaction<'_>,
+    name: &str,
+) -> Result<InheritedSetting, Status> {
+    let org = sqlx::query("SELECT value, locked FROM iam_org_setting WHERE name = ?")
+        .bind(name)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(db)?;
+    let (org_value, org_locked) = match org {
+        Some(row) => (
+            row.try_get::<i32, _>("value").map_err(db)?,
+            row.try_get::<bool, _>("locked").map_err(db)?,
+        ),
+        None => (SettingValue::Unspecified as i32, false),
+    };
+
+    // UNBOUNDED, on the same sparsity argument `ResolveCredential` states: at
+    // most one row per team that says something, and a team says something only
+    // when an operator writes one. A LIMIT would give the teams that fell off the
+    // end a WRONG answer rather than a slow one.
+    let team_override =
+        sqlx::query("SELECT team_id, value FROM iam_team_setting_override WHERE name = ?")
+            .bind(name)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(db)?
+            .into_iter()
+            .map(|r| Ok((r.try_get("team_id")?, r.try_get("value")?)))
+            .collect::<Result<_, sqlx::Error>>()
+            .map_err(db)?;
+
+    Ok(InheritedSetting {
+        org_value,
+        org_locked,
+        team_override,
+    })
+}
+
+/// Every clause `yadgar.common.v1.SettingScope` declares, and each one is
+/// `INVALID_ARGUMENT`.
+///
+/// **A PORT OF THE CONTRACT, NOT A SUMMARY OF IT.** The normative text lives in
+/// `common.proto` and says so; this is that text executed. `iam` holds an
+/// identical function against its own request type, and the duplication is the
+/// contract's own instruction — every boundary carrying this write refuses the
+/// same clauses, because a boundary that trusts its caller is one whose
+/// correctness lives somewhere else.
+///
+/// Returns the validated scope so the caller cannot re-derive it and disagree.
+fn check_inherited_setting(r: &SetInheritedSettingRequest) -> Result<SettingScope, Status> {
+    // proto3 enums are OPEN, so an unrecognised number arrives intact rather than
+    // collapsing to the zero. A `match` with a fallthrough would write the
+    // ORGANISATION's policy for a request that named neither level — the widest
+    // write there is, answering a request nobody made.
+    let scope = SettingScope::try_from(r.scope).map_err(|_| {
+        Status::invalid_argument(
+            "scope names no level this contract declares; there are two, an organisation and a \
+             team",
+        )
+    })?;
+
+    match scope {
+        SettingScope::Unspecified => {
+            return Err(Status::invalid_argument(
+                "scope is required: a write addresses the organisation's level or one team's, and \
+                 neither is the default",
+            ));
+        }
+        SettingScope::Org => {
+            // There is ONE organisation (D27), so a team id here is a caller that
+            // meant TEAM — and ignoring it would write the organisation's policy
+            // while the caller believed they wrote one team's.
+            if r.team_id.is_some() {
+                return Err(Status::invalid_argument(
+                    "a team id at organisation scope is a request that meant team scope; there is \
+                     one organisation and it is not named",
+                ));
+            }
+            // Every default is wrong: false is the unsafe direction, true locks a
+            // deployment that never asked, and keeping the stored value stops the
+            // verb from stating a wanted result.
+            if r.locked.is_none() {
+                return Err(Status::invalid_argument(
+                    "locked is required at organisation scope: it has no safe default, and an \
+                     unstated lock is the permissive half of a policy nobody chose",
+                ));
+            }
+            // The organisation always holds a value — the resolution's first step
+            // refuses an unset one — so there is nothing there to clear.
+            if r.clear {
+                return Err(Status::invalid_argument(
+                    "the organisation's value cannot be cleared: it always holds one, and a \
+                     deployment changes it by stating the other value",
+                ));
+            }
+        }
+        SettingScope::Team => {
+            // ABSENT and PRESENT-AND-EMPTY are two cases, and this boundary has
+            // to refuse the second: an empty key in the override map is a row no
+            // record's team will ever match.
+            if !r.team_id.as_deref().is_some_and(|t| !t.is_empty()) {
+                return Err(Status::invalid_argument(
+                    "a team id is required at team scope: nothing else names the override to write",
+                ));
+            }
+            // Meaningful at organisation scope only. `false` silently discarded
+            // is exactly the case this refusal exists for, which is why the field
+            // carries presence and this test is `is_some` rather than the value.
+            if r.locked.is_some() {
+                return Err(Status::invalid_argument(
+                    "locked is meaningful at organisation scope only: a team cannot state whether \
+                     teams may override",
+                ));
+            }
+        }
+    }
+
+    // SENT EXPLICITLY, THE ZERO IS STILL A REFUSAL AND NEVER A CLEAR — at either
+    // scope. It is what a caller that populated nothing sends, and reading it as
+    // a withdrawal would let an unpopulated field destroy configuration silently.
+    if r.value == Some(SettingValue::Unspecified as i32) {
+        return Err(Status::invalid_argument(
+            "value was sent unspecified: that is what an unpopulated field looks like, and it is \
+             never read as a value or as a withdrawal",
+        ));
+    }
+
+    // **AN OMITTED VALUE CAN NEVER BE READ AS A DELETION** (ADR-0524). This and
+    // the clause above are two tests rather than one on purpose: they are the two
+    // shapes that `value.unwrap_or_default()` collapses into a single case, and
+    // one test cannot fail for both.
+    if r.value.is_none() && !r.clear {
+        return Err(Status::invalid_argument(
+            "value is required unless clear is set: a request that states neither says nothing at \
+             all",
+        ));
+    }
+
+    // Two contradicting instructions, and neither is the obvious one to discard.
+    if r.clear && r.value.is_some() {
+        return Err(Status::invalid_argument(
+            "clear and value contradict each other: withdraw the override or state one, never \
+             both in the same request",
+        ));
+    }
+
+    // A store that accepted free text would accrete settings nothing reads, and a
+    // typo would be persisted as a new setting rather than refused at the call
+    // that made it. Adding a member is a contract release, never a data change.
+    if r.name != OWNER_READS_OWN_RECORD {
+        return Err(Status::invalid_argument(
+            "name is not a setting this contract declares; the vocabulary is closed and adding to \
+             it is a contract release",
+        ));
+    }
+
+    Ok(scope)
 }
 
 /// Whether a ledger read must see the latest committed row or may use this
@@ -1221,7 +1836,6 @@ fn epoch(seconds: i64) -> prost_types::Timestamp {
 }
 
 /// A status name for the metric label, shared rather than re-spelled per service.
-#[allow(dead_code)]
 fn label(status: &Status) -> &'static str {
     status_name(status)
 }

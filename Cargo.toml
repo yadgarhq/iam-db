@@ -56,20 +56,25 @@ yadgar-telemetry = { git = "https://github.com/yadgarhq/telemetry.git", tag = "v
 # before this crate existed and was wrong in every one of them for the same
 # reason — SIGINT alone, which Kubernetes never sends.
 #
-# `shutdown` and nothing else is used here. The crate also carries ADR-0523's
-# rotation watcher and the `DRAIN_BUDGET`/`drain_within` pair that bounds a
-# self-initiated drain, and neither applies to this service: nothing here ends
-# the serving future on its own, so the only drain that ever happens is the one
-# `terminationGracePeriodSeconds` already bounds. Adopting the budget without
-# the watcher would be a number bounding nothing.
-# `default-features = false` DROPS THE `rotate` FEATURE, and with it the whole
-# certificate-parsing tree — `x509-parser` over `asn1-rs`, `der-parser`,
-# `oid-registry` and `nom` — plus `sha2` and the `metrics` facade. This service
-# calls `shutdown` and nothing else, so it paid for all of it and used none of
-# it. THE FLAG AND THE PIN HAD TO MOVE TOGETHER: v0.1.0 declares no features at
-# all, so `default-features = false` against that tag is a silent no-op that
-# compiles, passes and removes nothing.
-yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle.git", tag = "v0.1.3", default-features = false }
+# ALL THREE UNITS, AND THEY ARE ONE UNIT. `rotate::watch` and `shutdown` are the
+# two arms of one `select!`, and whichever wins, `drain_within` bounds what
+# follows. This manifest used to carry `default-features = false`, which
+# compiled `rotate` out, on the reasoning that nothing here ends the serving
+# future on its own — true of the drain, and never true of the certificate.
+#
+# TAKING THE WATCHER BACK COSTS THE CERTIFICATE-PARSING TREE: `x509-parser` over
+# `asn1-rs`, `der-parser`, `oid-registry` and `nom`, plus `sha2` and the
+# `metrics` facade. The dependency subtree of this crate goes from 20 to 58
+# packages, which is what the original flag was buying. It buys the wrong thing:
+# `iam-db-tls` expires 2026-12-01T19:35:07Z, cert-manager renews it, and a
+# process that read its leaf once at boot presents the old one until something
+# restarts it. See `src/rotate.rs`.
+#
+# THE DRAIN BUDGET COMES WITH IT, NOT AFTER IT. tokio never unregisters a libc
+# signal handler, so once the rotation arm wins the `select!` a later SIGTERM is
+# swallowed and only SIGKILL remains — the watcher WITHOUT `drain_within` is the
+# bug, not half the fix.
+yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle.git", tag = "v0.1.3" }
 sqlx = { version = "0.9", default-features = false, features = [
   "runtime-tokio",
   "tls-rustls-ring",
