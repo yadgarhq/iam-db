@@ -26,7 +26,7 @@
 //!
 //! ADR-0523's rule is about PROVENANCE rather than payload: a file this process
 //! read once, out of a mount that can be rewritten underneath it, is watched
-//! whatever the bytes mean. Three materials:
+//! whatever the bytes mean. Four materials:
 //!
 //! - the listener's certificate AND its private key — both halves, or the pair
 //!   rotates half-watched;
@@ -37,7 +37,12 @@
 //!   which may be hours later, in a pod nobody is looking at, as a wave of
 //!   authentication failures with no cause attached;
 //! - the CA the engine's own certificate is verified against, when a deployment
-//!   names one.
+//!   names one;
+//! - **the mounted configuration document (step 2a of the rotation-knob
+//!   cut-over, ADR-0569, ADR-0570)** — `shared/shared.yaml`, rendered by
+//!   `yadgarhq/config` into the `shared` ConfigMap. It is the source the
+//!   rotation schedule itself now comes from, so an operator editing it
+//!   restarts this pod exactly as editing a CA bundle would.
 //!
 //! # The property every change here must keep
 //!
@@ -51,8 +56,8 @@
 use std::path::Path;
 
 pub use yadgar_lifecycle::rotate::{
-    watch, File, Inputs, Material, Presented, Schedule, ScheduleError, CERTIFICATE_NOT_AFTER,
-    WATCHED_FILES_UNREADABLE,
+    watch, Configuration, File, Inputs, Material, Presented, Schedule, ScheduleError,
+    CERTIFICATE_NOT_AFTER, WATCHED_FILES_UNREADABLE,
 };
 
 use crate::serve::ServerTls;
@@ -87,6 +92,17 @@ impl Material for ServerTls {
 /// VALUE, and a value is something `tests/assembly.rs` can call the SAME
 /// function for.
 ///
+/// **THE MOUNTED CONFIGURATION DOCUMENT IS THE FOURTH MEMBER (step 2a).**
+/// `config` is `shared/shared.yaml`, mounted from `yadgarhq/config`'s `shared`
+/// ConfigMap, and it is a [`Material`] like the other three: `Configuration`
+/// implements the trait by returning the one file it read its schedule from
+/// (`yadgar_lifecycle::rotate::Configuration::files`), so folding it in here
+/// joins the document to the ADR-0523 watch set through the exact same
+/// `Inputs::of` path the certificate, the password and the CA already take. It
+/// is folded LAST, and required rather than `Option`-wrapped — unlike the
+/// listener and the CA, every deployment mounts it and reads a schedule from
+/// it, so there is no configuration under which it is absent.
+///
 /// Called from `main.rs` INSIDE boot, beside the code that read these files.
 /// Collecting paths and reading them when the watcher first polls would put the
 /// rest of boot inside a window where a kubelet swap quietly becomes the
@@ -95,6 +111,7 @@ pub fn watch_set(
     listener: Option<&ServerTls>,
     db_password: &Path,
     db_ssl_ca: Option<&Path>,
+    config: &Configuration,
 ) -> Inputs {
-    Inputs::of(SERVICE, &[&listener, &db_password, &db_ssl_ca])
+    Inputs::of(SERVICE, &[&listener, &db_password, &db_ssl_ca, config])
 }

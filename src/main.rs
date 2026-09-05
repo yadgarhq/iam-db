@@ -89,6 +89,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env_or("DB_PASSWORD_FILE", "/var/run/secrets/iam-db/password").into();
     let secret: Secret = CredentialSource::SecretFile(db_password_file.clone()).resolve()?;
 
+    // STEP 2A OF THE ROTATION-KNOB CUT-OVER (ADR-0569, ADR-0570). The document
+    // `yadgarhq/config` renders into the `shared` ConfigMap, mounted at
+    // `/etc/yadgar/config/shared/shared.yaml`. There is no compiled-in default
+    // behind it any more: an absent, empty, or half-written document refuses the
+    // boot and names the file. The chart still sets TLS_ROTATION_POLL_SECS and
+    // TLS_ROTATION_SPLAY_MAX_SECS — this binary no longer reads either, but they
+    // stay so a rollout that lands this chart before this binary's digest still
+    // resolves a schedule on the old one. The runbook is `yadgarhq/deploy`'s
+    // MIGRATION_NOTES.md, steps 2a and 2b — NOT this repository's, which has no
+    // such section.
+    let rotation_config = rotate::Configuration::mounted();
+
     // THE WATCH SET, ASSEMBLED FROM THE RESOLVED CONFIGURATION AND HASHED AS THE
     // PROCESS READS IT (ADR-0523). It is built HERE, immediately after the last
     // of its members is read, rather than at the point the watcher is spawned:
@@ -96,29 +108,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // of probe-migrate-serve inside a window where a kubelet swap quietly becomes
     // the baseline, and the real rotation would never be noticed.
     //
-    // THREE MATERIALS, TWO OF WHICH ARE NOT THE CERTIFICATE. ADR-0523's rule is
+    // FOUR MATERIALS, THREE OF WHICH ARE NOT THE CERTIFICATE. ADR-0523's rule is
     // about provenance rather than payload — the database password is read once
-    // and baked into a pool that outlives every reconnect, and the engine's CA is
-    // mounted the same way — so both are watched exactly as the leaf is.
+    // and baked into a pool that outlives every reconnect, the engine's CA is
+    // mounted the same way, and the mounted configuration document joins the same
+    // set (step 2a) — so all three are watched exactly as the leaf is.
     //
     // ONE CALL, AND THE SAME ONE `tests/assembly.rs` MAKES. Nothing in a binary
     // entry point is reachable from a test, so a member deleted from a list built
     // HERE would compile, pass everything, and ship a process blind to that file.
     // The list lives in `rotate::watch_set`.
-    let tls_inputs = rotate::watch_set(
+    let watch_inputs = rotate::watch_set(
         listen_tls.as_ref(),
         &db_password_file,
         config.ssl_ca.as_deref(),
+        &rotation_config,
     );
 
-    // How often those files are re-hashed, and how long THIS pod waits before
-    // acting on a change. The splay is what stops both replicas exiting inside
-    // the same kubelet sync window — a PDB constrains eviction and does not
-    // govern a self-exit.
-    //
-    // PARSED AT BOOT rather than at the first poll, so a mistyped interval fails
-    // the boot instead of becoming a hot loop nobody would see.
-    let schedule = rotate::Schedule::from_env().map_err(|e| e.to_string())?;
+    // READ FROM THE SAME DOCUMENT THE WATCH SET JUST JOINED. A value the
+    // document names and this binary cannot use is a mistake to refuse, not one
+    // to paper over with a default nobody chose — and refusing it here means it
+    // is refused on a cleartext deployment too, which is where it would
+    // otherwise sit unnoticed until the cut-over.
+    let schedule = rotation_config.schedule().map_err(|e| e.to_string())?;
 
     // 1. PROBE, on a connection of its own and before the pool exists. Refusing
     //    here is the whole point of D7.
@@ -160,7 +172,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // recorder is a value nobody ever sees. This is the half of the rotation work
     // that makes a failure LOUD — if the watcher below dies, this gauge still
     // shows the loaded leaf ageing out.
-    tls_inputs.export_not_after();
+    watch_inputs.export_not_after();
 
     let addr: SocketAddr = env_or("LISTEN", "0.0.0.0:50051").parse()?;
     // `tls` is recorded because "is this listener encrypted?" must be answerable
@@ -170,7 +182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(
         %addr,
         tls = listen_tls.is_some(),
-        watching = tls_inputs.watched().len(),
+        watching = watch_inputs.watched().len(),
         rotation_poll_secs = schedule.poll().as_secs(),
         rotation_splay_max_secs = schedule.splay_max().as_secs(),
         drain_budget_secs = DRAIN_BUDGET.as_secs(),
@@ -227,7 +239,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             () = signals => {}
             // `rotate::watch` resolves ONLY when it has read a change, and never
             // at all when there is nothing to watch.
-            () = rotate::watch(tls_inputs, schedule) => {}
+            () = rotate::watch(watch_inputs, schedule) => {}
         }
     };
 
