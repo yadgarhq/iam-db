@@ -83,37 +83,6 @@ spec:
             - name: LISTEN_TLS_KEY_FILE
               value: /var/run/secrets/iam-db-tls/tls-key.pem
             {{- end }}
-            # ADR-0523's ROTATION WATCHER, and it is rendered WHETHER OR NOT TLS
-            # is on. The watch set is not only the serving certificate: it holds
-            # the database password, which every deployment mounts, so the
-            # watcher runs on a cleartext install too. That is correct — a
-            # rotated password is stale material either way — but it is not what
-            # "TLS off by default" would lead anyone to expect, so it is written
-            # down here.
-            #
-            # THE SPLAY IS THE ONLY CONTROL THERE IS. Both replicas see the
-            # refreshed file inside the same kubelet sync window, and the
-            # PodDisruptionBudget does NOT govern a self-exit — it constrains
-            # eviction, and nothing here is evicting anything. Renewal lands 30
-            # days before expiry, so five minutes of waiting costs nothing.
-            #
-            # NOT `| default`, which would hand back an interval nobody chose and
-            # leave an operator who believes they changed it running the old one.
-            # `required` catches a values override that nulls the block AND one
-            # that empties it, and turns either into a template-time error naming
-            # the value rather than a CrashLoop three layers from its message.
-            #
-            # NEITHER VARIABLE IS READ BY THIS BINARY ANY MORE (step 2a,
-            # `yadgarhq/deploy`'s MIGRATION_NOTES.md). It reads its schedule from
-            # the mounted configuration document below instead. Both stay
-            # rendered so a pod that rolls onto the OLD binary before this
-            # release's digest reaches `yadgarhq/argocd` still resolves a
-            # schedule from here — step 2b deletes them once that digest has
-            # landed.
-            - name: TLS_ROTATION_POLL_SECS
-              value: {{ required "tlsRotation.pollSeconds is how often iam-db re-hashes the files it read at boot and must be set; see the chart's values.yaml" .Values.tlsRotation.pollSeconds | quote }}
-            - name: TLS_ROTATION_SPLAY_MAX_SECS
-              value: {{ required "tlsRotation.splayMaxSeconds is the longest a pod waits before exiting on rotated material and must be set; see the chart's values.yaml" .Values.tlsRotation.splayMaxSeconds | quote }}
             - name: DB_HOST
               value: {{ .Values.database.host | quote }}
             - name: DB_PORT
