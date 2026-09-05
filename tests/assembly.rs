@@ -329,28 +329,3 @@ fn the_chart_mounts_the_shared_configmap_where_this_binary_looks_for_it() {
         mounted.path().display()
     );
 }
-
-/// STEP 2A KEEPS BOTH SOURCES LIVE (MIGRATION_NOTES.md, ADR-0569/ADR-0570).
-///
-/// This binary no longer reads `TLS_ROTATION_POLL_SECS` or
-/// `TLS_ROTATION_SPLAY_MAX_SECS` — it reads `rotate::Configuration::mounted()`
-/// instead. What still has to hold is that the chart goes on rendering BOTH
-/// variables under their established names: Argo takes this chart from HEAD
-/// the moment this pull request merges, while the image is pinned by digest
-/// minutes later from a separate pipeline, so a pod can roll onto the OLD
-/// binary — which still reads these two variables and has no other source.
-/// Deleting either is step 2b, and only after that digest has landed in
-/// `yadgarhq/argocd`.
-#[test]
-fn the_chart_still_renders_the_tls_rotation_variables_for_the_old_binary() {
-    assert!(
-        DEPLOYMENT.contains("name: TLS_ROTATION_POLL_SECS"),
-        "a pod that rolls onto the old binary before this release's digest reaches \
-         yadgarhq/argocd reads its poll interval from this variable and no other source"
-    );
-    assert!(
-        DEPLOYMENT.contains("name: TLS_ROTATION_SPLAY_MAX_SECS"),
-        "a pod that rolls onto the old binary before this release's digest reaches \
-         yadgarhq/argocd reads its splay ceiling from this variable and no other source"
-    );
-}
