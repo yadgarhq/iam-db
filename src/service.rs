@@ -30,9 +30,8 @@
 //!   core rule asks of a replay; each handler argues its own case where it
 //!   stands. What none of the six can do is D9's AMENDED half — refuse a repeated
 //!   key carrying a DIFFERENT payload — because that needs the prior REQUEST and
-//!   no table here keeps one. That gap is not this module's: it is O21, which
-//!   books it org-wide across 45 of the 47 RPCs in the estate that carry the
-//!   message.
+//!   no table here keeps one. That gap is not this module's to close alone: it
+//!   is booked org-wide as O21.
 //! - **THREE DISCARD THE KEY AND PUT NOTHING IN ITS PLACE.** `CreateUser`,
 //!   `CreateEnrolment` and `CreateCredential` mint a row per call, so a retry is
 //!   not a replay and the shape argument above does not reach them. Each carries
