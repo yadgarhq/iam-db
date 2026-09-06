@@ -375,6 +375,40 @@ impl IamDbService for IamDb {
         // the class of bug this fixes gets reintroduced.
         fits_password_column(&r.argon2id_hash)?;
 
+        // AND THE SAME SENTENCE APPLIES TO LIVENESS, WHICH IS WHY THIS IS HERE.
+        // `RedeemEnrolment` writes `iam_password` under `user_id IN (SELECT id
+        // FROM iam_user WHERE deleted_at IS NULL)`; this handler wrote the same
+        // column with no such clause. Both write it, so both check it.
+        //
+        // THE LAST WRITE OF THE CLASS PR #29 SWEPT, and it was missed because it
+        // HAS NO PRODUCTION CALLER — password rotation is outside the first cut
+        // (D73), so `iam` exposes no `SetPassword` and nothing in the estate
+        // could demonstrate the hole. Guarded now rather than when rotation
+        // arrives, so the author who builds rotation inherits a refusal instead
+        // of a defect.
+        //
+        // THE REACHABLE HALF IS THE STATUS, not the liveness. Measured on
+        // mariadb:11.8: an unknown `user_id` hits `fk_iam_password_user` and
+        // renders through `db()` as UNAVAILABLE — a retryable status for a
+        // request that can never succeed, so a client retries a typo forever.
+        // That is the defect `SetInheritedSetting`'s team arm and
+        // `SetRateLimitOverride` already refuse, and it is reachable today
+        // through anything that speaks this contract.
+        //
+        // AFTER `fits_password_column`, DELIBERATELY. A malformed argument is
+        // the caller's to fix whoever it names, and `CreateEnrolment` orders its
+        // own expiry check ahead of `live_user` for the same reason.
+        //
+        // A FOURTH INSTANCE OF THE RACE `AddTeamMember` DESCRIBES, and stated
+        // rather than left to be rediscovered: this check runs outside a
+        // transaction, so a person soft-deleted between it and the INSERT still
+        // gets a password row. LATENT — nothing in production writes
+        // `iam_user.deleted_at` and there is no `DeleteUser` RPC — and it
+        // becomes live on the same day `AddTeamMember`'s does, which is the day
+        // that RPC lands. Closing it needs a transaction around check and write
+        // on all four, which is one change rather than four.
+        live_user(&self.pool, &r.user_id).await?;
+
         sqlx::query(
             "INSERT INTO iam_password (user_id, argon2id_hash) VALUES (?, ?)
              ON DUPLICATE KEY UPDATE argon2id_hash = VALUES(argon2id_hash)",
@@ -670,6 +704,50 @@ impl IamDbService for IamDb {
             tel(rid, &r.user_id),
         );
 
+        // NO `live_user`, NO `live_team`, AND NO EXISTENCE CHECK — DECIDED,
+        // rather than the sweep stopping one short again. `AddTeamMember` above
+        // refuses an unrecognised id; this one answers OK with `rows: 0`. Two
+        // reasons, and the first is the one that settles it:
+        //
+        // THIS ESTATE ALREADY DECIDED THAT A NO-OP REMOVAL IS NOT AN ERROR.
+        // `SetInheritedSetting`'s CLEAR arm names a team that was never created
+        // and succeeds; `an_override_for_a_team_that_does_not_exist_is_not_found_rather_than_unavailable`
+        // asserts both halves and its comment calls the asymmetry with the write
+        // arm the point. Refusing here would fix one asymmetry by minting
+        // another, and would leave the clear arm as the inconsistent one.
+        //
+        // AND THE DEFECT PR #29 CLOSED DOES NOT REACH THIS HANDLER. That one was
+        // a FOREIGN KEY left to fire, rendering through `db()` as UNAVAILABLE —
+        // a retryable status for an impossible request. A DELETE naming a row
+        // that is not there violates no constraint: it is a no-op that already
+        // answers with a status a caller can act on. There is nothing of that
+        // class here to fix.
+        //
+        // WHAT IS GIVEN UP IS REAL, AND IT IS AN ASYMMETRY IN THE WORSE
+        // DIRECTION. After PR #29 a mistyped `team_id` on a GRANT is NOT_FOUND;
+        // the same typo on this REVOCATION is OK, and the caller cannot tell:
+        // `RemoveTeamMemberResponse` is empty and `rows` reaches the telemetry
+        // record only, never the wire. An operator who mistypes believes they
+        // removed an access they did not. The no-op IS visible — as
+        // `rows_returned: 0` on this call's `Outcome` — so the signal exists
+        // where the operator is not looking rather than nowhere.
+        //
+        // CLOSING IT NEEDS THE CONTRACT, WHICH IS NOT THIS REPOSITORY'S TO
+        // CHANGE. The honest fix is an outcome on the response — what
+        // `RedeemEnrolment` does with `RedeemOutcome` — so the caller learns a
+        // removal matched nothing without the boundary having to guess why.
+        // `proto/` here is VENDORED from `yadgarhq/proto` at the tag in
+        // `PROTO_VERSION` and CI fails on any diff (D70), so the field and this
+        // handler have to arrive together across two repositories, the way the
+        // module header says the idempotency ledger does.
+        //
+        // AND IF SOMEBODY DOES ADD A CHECK, IT IS EXISTENCE, NOT LIVENESS.
+        // `live_team` would refuse a RETRIED legitimate removal against a
+        // soft-deleted team, and migration 11 records that a soft delete is an
+        // UPDATE no `ON DELETE CASCADE` can see — so the memberships a future
+        // team-deletion strands are cleared by exactly this call. A never-created
+        // team is the only safe thing to refuse, and the foreign key already
+        // guarantees it stranded nothing.
         let done = sqlx::query("DELETE FROM iam_team_member WHERE team_id = ? AND user_id = ?")
             .bind(&r.team_id)
             .bind(&r.user_id)

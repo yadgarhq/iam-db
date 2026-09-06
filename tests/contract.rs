@@ -1353,6 +1353,18 @@ async fn administrative_writes_refuse_a_person_who_is_not_live() {
     // and stopped one short of both: a credential minted for a removed person is
     // handed back with an id and resolves for nobody, and a team granted to one
     // is a membership `ResolveCredential`'s `deleted_at IS NULL` never returns.
+    //
+    // SetPassword ARRIVED LATER STILL, and it is the LAST of the class rather
+    // than one more of it: the sweep that added CreateCredential and
+    // AddTeamMember missed a third, and the RPCs that take a `user_id` and write
+    // are now exhausted. It was missed because it HAS NO PRODUCTION CALLER —
+    // password rotation is outside the first cut (D73) and `iam` exposes no
+    // `SetPassword` — so nothing in the estate could demonstrate the hole. That
+    // is a reason to guard it BEFORE rotation lands, not after: the day a caller
+    // appears, the write is already refused. `RedeemEnrolment` writes the same
+    // column under `user_id IN (SELECT id FROM iam_user WHERE deleted_at IS
+    // NULL)`, so the guard on one writer and not the other is exactly what
+    // `fits_password_column` already refuses to allow on this pair.
     let svc = fresh("iam_db_test_live_writes").await;
     let (user_id, _cred) = seed(&svc, &[55u8; 32], &[55u8; 32]).await;
     team(&svc, "yadgar:team:t6").await;
@@ -1402,7 +1414,7 @@ async fn administrative_writes_refuse_a_person_who_is_not_live() {
 
     let err = svc
         .set_rate_limit_override(Request::new(SetRateLimitOverrideRequest {
-            user_id,
+            user_id: user_id.clone(),
             module: "recall".into(),
             kind: yadgar_iam_db::pb::yadgar::telemetry::v1::Kind::Read as i32,
             limit: Some(RateLimit {
@@ -1414,6 +1426,69 @@ async fn administrative_writes_refuse_a_person_who_is_not_live() {
         .await
         .expect_err("a limit on a removed person is one an operator believes is in force");
     assert_eq!(err.code(), tonic::Code::NotFound);
+
+    let err = svc
+        .set_password(Request::new(SetPasswordRequest {
+            user_id: user_id.clone(),
+            argon2id_hash: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA".into(),
+            ..Default::default()
+        }))
+        .await
+        .expect_err("a password set on a removed person is one no login will ever read");
+    assert_eq!(err.code(), tonic::Code::NotFound);
+
+    // AND THE ROW MUST NOT BE THERE. `iam_password` is an upsert onto a primary
+    // key the FOREIGN KEY lets through, so a refusal that still wrote would
+    // leave a hash behind for an account `GetPasswordHash` no longer answers
+    // for — invisible to every read on this boundary and to this test's status
+    // assertion alike.
+    assert_eq!(
+        count(
+            &svc,
+            "SELECT COUNT(*) FROM iam_password WHERE user_id = ?",
+            &user_id,
+        )
+        .await,
+        0,
+        "the refusal must not have written a hash either"
+    );
+}
+
+#[tokio::test]
+async fn setting_a_password_for_a_user_who_does_not_exist_is_not_found_rather_than_unavailable() {
+    // THE FOREIGN KEY IS NOT THE ERROR MESSAGE, on the argument
+    // `an_override_for_a_team_that_does_not_exist_is_not_found_rather_than_unavailable`
+    // already makes for `SetInheritedSetting`. Left to fire,
+    // `fk_iam_password_user` renders through `db()` as UNAVAILABLE — a retryable
+    // status for a request that can never succeed, so a client retries a typo
+    // forever and the record says this service was down.
+    //
+    // MUTATION THIS CATCHES: deleting `live_user` from `SetPassword`. The
+    // soft-delete arm above cannot catch it on its own, because the FOREIGN KEY
+    // is satisfied for a soft-deleted person and unsatisfied for an unknown one:
+    // one arm proves the guard runs, the other proves what it replaces.
+    let svc = fresh("iam_db_test_password_unknown").await;
+
+    let err = svc
+        .set_password(Request::new(SetPasswordRequest {
+            user_id: "yadgar:user:never-existed".into(),
+            argon2id_hash: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA".into(),
+            ..Default::default()
+        }))
+        .await
+        .expect_err("a password for a person who does not exist must not report success");
+    assert_eq!(err.code(), tonic::Code::NotFound);
+
+    assert_eq!(
+        count(
+            &svc,
+            "SELECT COUNT(*) FROM iam_password WHERE user_id = ?",
+            "yadgar:user:never-existed",
+        )
+        .await,
+        0,
+        "the refusal must not have written a hash either"
+    );
 }
 
 #[tokio::test]
