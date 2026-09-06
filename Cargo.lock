@@ -2736,7 +2736,7 @@ dependencies = [
 [[package]]
 name = "yadgar-telemetry"
 version = "0.1.0"
-source = "git+https://github.com/yadgarhq/telemetry.git?tag=v0.1.1#5047d0df4cfa66de1b3a37e9a081bd1db01eed42"
+source = "git+https://github.com/yadgarhq/telemetry.git?tag=v0.1.5#8b65f2a22c9d42827a26c9061fc34af09553a517"
 dependencies = [
  "metrics",
  "metrics-exporter-prometheus",

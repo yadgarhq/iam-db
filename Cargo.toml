@@ -50,7 +50,7 @@ prost-types = "0.14"
 # The shared instrumentation seam (D67), pinned by release tag like every in-org
 # crate. This repository sat one commit behind every other consumer until now —
 # a bare revision in five files has nothing that notices one falling behind.
-yadgar-telemetry = { git = "https://github.com/yadgarhq/telemetry.git", tag = "v0.1.1", features = ["grpc"] }
+yadgar-telemetry = { git = "https://github.com/yadgarhq/telemetry.git", tag = "v0.1.5", features = ["grpc"] }
 # WHICH SIGNALS END THIS PROCESS, decided once for the estate rather than once
 # per repository (ADR-0526's pin, D19's rule). `shutdown` stood in five copies
 # before this crate existed and was wrong in every one of them for the same

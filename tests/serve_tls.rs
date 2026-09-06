@@ -618,3 +618,64 @@ async fn a_certificate_and_a_key_that_do_not_match_are_an_error() {
         "the message must name BOTH files, because either could be the wrong one: {message}"
     );
 }
+
+/// THE REFUSAL ABOVE HAS TO SAY WHAT WAS WRONG, and the case above cannot tell.
+///
+/// It asserts the variant and the two PATHS, which are `serve.rs`'s own fields —
+/// so it passes whether `detail` was built by walking the error's `source()`
+/// chain or by a bare `e.to_string()`. On that one property it is a certifying
+/// fixture, green under both, and that is the exact defect telemetry#12
+/// corrected in the shared unit `serve::builder` now calls.
+///
+/// **TWO LAYERS AND ONE `source()` HOP, read out of the dependencies rather than
+/// inferred from rendered output.** The head is `tonic::transport::Error`: its
+/// `Display` is `f.write_str(self.description())` (tonic 0.14.6
+/// `src/transport/error.rs:79-83`), and `description()` returns the literal
+/// `"transport error"` for `Kind::Transport` (`:52-54`) without ever consulting
+/// the source. One hop down is `rustls::Error`, which is a LEAF — `impl
+/// std::error::Error for Error {}`, the default `source()` returning `None`
+/// (rustls 0.23.43 `src/error.rs:1022`) — and whose `InconsistentKeys` arm
+/// renders `keys may not be consistent: {why:?}` (`:1003-1005`).
+///
+/// **`KeyMismatch` IS NOT A THIRD LAYER, and an earlier version of this comment
+/// said it was.** It is the `{why:?}` INSIDE rustls's single `Display` string —
+/// the `Debug` of a `#[non_exhaustive]`, `Copy` enum (`:121-133`). The colon in
+/// front of it is rustls's own punctuation, not a join this walk performed.
+/// Reading a layer boundary out of a colon in rendered output is exactly the
+/// mistake ADR-0591 exists to stop, and the correction came from reading the two
+/// crates rather than from anything CI reported.
+///
+/// So the assertion below is on the DELIBERATE `Display` string and NOT on that
+/// `Debug`: a `#[non_exhaustive]` enum's `Debug` is the least stable text in the
+/// chain, and pinning it would redden five repositories at once for a change
+/// that is not a defect. Both spellings discriminate identically — neither
+/// appears anywhere in tonic's two words — so nothing is given up by choosing
+/// the stable one.
+///
+/// A `detail` carrying `keys may not be consistent` therefore crossed the one
+/// hop and cannot have come from the head alone. Reverting the call site to
+/// `e.to_string()` leaves `detail` as exactly `transport error` and turns this
+/// red.
+#[tokio::test]
+async fn the_refusal_names_the_reason_rather_than_just_transport_error() {
+    let one = pki(SERVED_NAME);
+    let other = pki(SERVED_NAME);
+    let cert = TempPem::with(&one.cert_pem);
+    let key = TempPem::with(&other.key_pem);
+    let tls = configured(cert.path(), key.path());
+
+    let Err(ServerTlsError::Rejected { detail, .. }) = serve::builder(Some(&tls)) else {
+        panic!("a key that does not match the certificate must be refused at boot");
+    };
+
+    assert!(
+        detail.contains("keys may not be consistent"),
+        "the detail must carry the layer UNDER tonic's `transport error`, which is \
+         the only part naming what was wrong; got: {detail:?}"
+    );
+    assert_ne!(
+        detail.trim(),
+        "transport error",
+        "the head of the chain alone says nothing an operator can act on"
+    );
+}
