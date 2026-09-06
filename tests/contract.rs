@@ -1987,6 +1987,70 @@ async fn clearing_a_rate_limit_override_deletes_it_rather_than_storing_zero() {
 }
 
 #[tokio::test]
+async fn re_setting_a_rate_limit_override_replaces_both_columns() {
+    // THE UPSERT'S UPDATE ARM, WHICH NOTHING ELSE READS BACK. Ledger 695 moved
+    // this handler's liveness predicate into the statement, and that turned
+    // `ON DUPLICATE KEY UPDATE rate = VALUES(rate), burst = VALUES(burst)` into
+    // `rate = ?, burst = ?` — because `VALUES()` names the row of an
+    // `INSERT ... VALUES` and this is now an `INSERT ... SELECT`. The column
+    // names used to carry the mapping; two positional binds do not.
+    //
+    // MUTATION THIS CATCHES: transposing those two binds. `rate` is a DOUBLE and
+    // `burst` an INT, so a swap stores 5 and 1 rather than 1.0 and 5, raises
+    // nothing, and every other test stays green — the first write goes through
+    // the SELECT list, which has its own binds and its own coverage in
+    // `clearing_a_rate_limit_override_deletes_it_rather_than_storing_zero`.
+    //
+    // BOTH COLUMNS DIFFER FROM THE FIRST WRITE AND FROM EACH OTHER, which is
+    // what makes this pin the assignment rather than the insert.
+    let svc = fresh("iam_db_test_rate_limit_replace").await;
+    let (user_id, _cred) = seed(&svc, &[52u8; 32], &[52u8; 32]).await;
+
+    let read = yadgar_iam_db::pb::yadgar::telemetry::v1::Kind::Read as i32;
+    for limit in [
+        RateLimit {
+            rate: 12.5,
+            burst: 30,
+        },
+        RateLimit {
+            rate: 3.25,
+            burst: 7,
+        },
+    ] {
+        svc.set_rate_limit_override(Request::new(SetRateLimitOverrideRequest {
+            user_id: user_id.clone(),
+            module: "recall".into(),
+            kind: read,
+            limit: Some(limit),
+            ..Default::default()
+        }))
+        .await
+        .expect("set override");
+    }
+
+    let got = svc
+        .resolve_credential(Request::new(ResolveCredentialRequest {
+            token_hash: vec![52u8; 32],
+        }))
+        .await
+        .expect("resolve")
+        .into_inner();
+    assert_eq!(
+        got.rate_limit_overrides.len(),
+        1,
+        "the composite primary key must make the second write an upsert"
+    );
+    assert_eq!(
+        got.rate_limit_overrides[0].limit,
+        Some(RateLimit {
+            rate: 3.25,
+            burst: 7
+        }),
+        "both columns must carry the second write's values, each in its own column"
+    );
+}
+
+#[tokio::test]
 async fn listing_credentials_omits_the_revoked_ones() {
     // MUTATION THIS CATCHES: dropping `revoked_at IS NULL`. The list is what a
     // person is shown of their own credentials, and a revoked one presented as
