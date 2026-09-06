@@ -32,8 +32,12 @@
 //! client that picks the other one is not talking to a closed port. That is a
 //! property of the test rig, not of the service.
 
+use std::collections::HashSet;
+use std::io::Write as _;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Barrier, OnceLock};
 use std::time::Duration;
 
 use rcgen::{
@@ -93,18 +97,104 @@ fn pki(san: &str) -> Pki {
 /// accepts it (D80).
 struct TempPem(PathBuf);
 
+/// One reading of the clock per PROCESS, so two runs that the OS gave the same
+/// recycled pid do not name the same files. It varies per run and never within
+/// one, which is what leaves [`unique_name`] with exactly one varying part.
+fn run_id() -> u128 {
+    static RUN: OnceLock<u128> = OnceLock::new();
+    *RUN.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    })
+}
+
+/// The name of one temporary PEM, unique within this process by CONSTRUCTION.
+///
+/// **THE CLOCK IS NOT A UNIQUENESS SOURCE ACROSS THREADS, and this is measured
+/// on this tree rather than assumed.** The name used to be `pid` plus a fresh
+/// nanosecond reading. Every test in this binary shares the pid and they run on
+/// threads, so two concurrent calls collide whenever both readings land on the
+/// same nanosecond — and then one `TempPem`'s `Drop` deletes a path a sibling
+/// test is still reading. A clock is a timestamp, not a nonce (ledger 681).
+///
+/// The counter is the ONLY part that varies within a run, which is what makes
+/// the property assertable rather than merely likely.
+fn unique_name() -> String {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "yadgar-iam-db-{}-{}-{}.pem",
+        std::process::id(),
+        run_id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// The SEQUENTIAL property, and it is a mutation guard rather than a
+/// reproduction — stated plainly because the distinction was measured. It
+/// PASSES against the clock-based name this change replaces: same-thread
+/// readings advance by tens of nanoseconds and never repeat, so a sequential
+/// assertion cannot see the defect.
+///
+/// MUTATION: replace `fetch_add(1, ..)` with `load(..)` and this fails on every
+/// run.
+#[test]
+fn two_temporary_names_are_never_the_same_name() {
+    assert_ne!(unique_name(), unique_name());
+
+    let many: HashSet<String> = (0..1000).map(|_| unique_name()).collect();
+    assert_eq!(many.len(), 1000, "1000 names must be 1000 distinct names");
+}
+
+/// THE CONCURRENT PROPERTY, which is the one that reproduces the defect, and it
+/// is the failing test this fix was written against. Cross-thread readings of
+/// `SystemTime::now()` repeat constantly; same-thread ones do not, which is why
+/// only a threaded assertion can see it.
+#[test]
+fn concurrent_names_are_all_distinct() {
+    const THREADS: usize = 16;
+    const PER_THREAD: usize = 2000;
+
+    let start = Arc::new(Barrier::new(THREADS));
+    let handles: Vec<_> = (0..THREADS)
+        .map(|_| {
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                (0..PER_THREAD).map(|_| unique_name()).collect::<Vec<_>>()
+            })
+        })
+        .collect();
+
+    let all: Vec<String> = handles
+        .into_iter()
+        .flat_map(|h| h.join().unwrap())
+        .collect();
+    let distinct: HashSet<&String> = all.iter().collect();
+    assert_eq!(
+        distinct.len(),
+        THREADS * PER_THREAD,
+        "{} of {} names collided across {THREADS} threads",
+        THREADS * PER_THREAD - distinct.len(),
+        THREADS * PER_THREAD
+    );
+}
+
 impl TempPem {
     fn with(contents: &str) -> Self {
-        let name = format!(
-            "yadgar-iam-db-{}-{}.pem",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        let path = std::env::temp_dir().join(name);
-        std::fs::write(&path, contents).unwrap();
+        let path = std::env::temp_dir().join(unique_name());
+        // `create_new`, not `fs::write`. Silence is what made the old collision
+        // expensive: two tests shared a path, one deleted it, and the other
+        // failed somewhere else entirely — as a missing file, or as a negative
+        // fixture that had been overwritten with valid material. If a name is
+        // ever reused, this panics and names the file instead.
+        let mut file = std::fs::File::options()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap_or_else(|e| panic!("{} already exists or cannot be made: {e}", path.display()));
+        file.write_all(contents.as_bytes()).unwrap();
         Self(path)
     }
 
@@ -151,19 +241,53 @@ async fn serve(tls: Option<&ServerTls>) -> u16 {
         .collect();
     assert!(!addrs.is_empty(), "{SERVED_NAME} resolved to nothing");
 
-    let first = TcpListener::bind(addrs[0]).await.unwrap();
-    let port = first.local_addr().unwrap().port();
-    spawn(first, tls);
-
-    for addr in &addrs[1..] {
-        let listener = TcpListener::bind(SocketAddr::new(addr.ip(), port))
-            .await
-            .expect("the same free port on a second address of the same name");
+    let (port, listeners) = bind_one_port_on_every_address(&addrs).await;
+    for listener in listeners {
         spawn(listener, tls);
     }
 
     ready(port).await;
     port
+}
+
+/// One ephemeral port, bound on EVERY address the name resolves to.
+///
+/// **THE KERNEL PICKS THE PORT FOR ONE ADDRESS AND PROMISES NOTHING ABOUT THE
+/// OTHERS.** Asking for an ephemeral port on `127.0.0.1` and then demanding that
+/// same number on `::1` fails whenever a concurrently running test in this
+/// binary was handed it there first — `EADDRINUSE` on the second bind, which the
+/// old code turned into `.expect(..)`. It is a second, independent race in the
+/// same rig, and it was measured firing on this tree, so fixing only the filed
+/// defect would have left the suite flaky.
+///
+/// So the whole SET is acquired before anything is spawned, and a partial
+/// acquisition is dropped and retried with a fresh port. Retrying is honest
+/// here: the failure is another process holding a number, which the next number
+/// does not have.
+async fn bind_one_port_on_every_address(addrs: &[SocketAddr]) -> (u16, Vec<TcpListener>) {
+    for _ in 0..50 {
+        let first = TcpListener::bind(addrs[0])
+            .await
+            .expect("an ephemeral port on the first address");
+        let port = first.local_addr().unwrap().port();
+
+        let mut listeners = vec![first];
+        for addr in &addrs[1..] {
+            match TcpListener::bind(SocketAddr::new(addr.ip(), port)).await {
+                Ok(listener) => listeners.push(listener),
+                // Dropping `listeners` releases the port on every address it was
+                // taken on, so the next attempt starts from nothing held.
+                Err(_) => break,
+            }
+        }
+        if listeners.len() == addrs.len() {
+            return (port, listeners);
+        }
+    }
+    panic!(
+        "no ephemeral port was free on all {} addresses",
+        addrs.len()
+    );
 }
 
 fn spawn(listener: TcpListener, tls: Option<&ServerTls>) {
