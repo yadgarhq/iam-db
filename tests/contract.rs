@@ -1819,6 +1819,83 @@ async fn a_team_soft_delete_landing_mid_call_still_refuses_an_inherited_setting_
 }
 
 #[tokio::test]
+async fn a_team_soft_delete_landing_after_the_idempotency_read_still_refuses_an_inherited_setting_override(
+) {
+    // LEDGER 722. The test above pins the race `live_team` closes when it is
+    // the FIRST read in the transaction — there, `recorded()` is skipped
+    // because the request carries no idempotency key, so the `INSERT ...
+    // SELECT ... LOCK IN SHARE MODE` is what opens the transaction's first
+    // read, and a locking read always sees the latest COMMITTED row regardless
+    // of isolation level. That test would pass at REPEATABLE READ too, and
+    // proves nothing about the isolation pin.
+    //
+    // THIS TEST PUTS A PLAIN READ FIRST. Keying the request runs `recorded()`
+    // — an ordinary, non-locking `SELECT` against `iam_inherited_setting_write`
+    // — before anything touches the team row. At REPEATABLE READ that FIRST
+    // read is what fixes the transaction's snapshot, so the snapshot forms
+    // while the team is still live.
+    //
+    // MEASURED, AND IT CORRECTS WHAT THE HANDLER'S OWN COMMENT PREDICTS FOR
+    // THIS LINE ("OK with rows: 0"). Mutating `READ COMMITTED` to `REPEATABLE
+    // READ` here does not make the write silently succeed. It makes the
+    // `INSERT ... SELECT ... LOCK IN SHARE MODE` against `iam_team` raise
+    // MariaDB error 1020, ER_CHECKREAD ("Record has changed since last read
+    // in table 'iam_team'"): that statement is now the SECOND read against a
+    // row covered by a snapshot `recorded()` already fixed, and a locking
+    // read finding its row changed since the snapshot was established is the
+    // same failure class the pin's original, first job (on the ledger's own
+    // table) exists to prevent — just landing on `iam_team` instead. `db()`
+    // renders it UNAVAILABLE, so the caller retries a write that can never
+    // succeed against a team that is gone: wrong, but visibly so, rather than
+    // the silent OK the comment predicts. This test asserts NOT_FOUND, which
+    // is what the SHIPPED statement (READ COMMITTED) actually returns, so it
+    // fails on the mutant regardless of which wrong status the mutant
+    // produces.
+    //
+    // MUTATION THIS CATCHES: `SET TRANSACTION ISOLATION LEVEL READ COMMITTED`
+    // becoming `... REPEATABLE READ` on the statement above. Measured red
+    // against that one-word change — `svc.set_inherited_setting` returns
+    // UNAVAILABLE (1020 on `iam_team`) rather than NOT_FOUND. Restored after
+    // measuring. The sibling test above stays GREEN under the identical
+    // mutation — its request carries no idempotency key, so its first read is
+    // the locking `INSERT ... SELECT` itself, which always reads the latest
+    // committed row regardless of isolation level — which is the coverage gap
+    // this test exists to close.
+    let svc = fresh("iam_db_test_race_inherited_setting_keyed").await;
+    seed_team(&svc, "yadgar:team:racesettingkeyed").await;
+
+    let req = keyed(
+        "k-racesetting-keyed",
+        team_request("yadgar:team:racesettingkeyed"),
+    );
+
+    let err = while_a_soft_delete_lands(
+        &svc,
+        Withdraw::Team,
+        "yadgar:team:racesettingkeyed",
+        svc.set_inherited_setting(Request::new(req)),
+    )
+    .await
+    .expect_err(
+        "an override stored — or silently reported as stored — for a team gone \
+         before the write is one an operator believes is in force",
+    );
+    assert_eq!(
+        err.code(),
+        tonic::Code::NotFound,
+        "NOT_FOUND: the isolation pin is what lets live_team's re-read see the \
+         committed delete rather than the idempotency read's earlier snapshot. \
+         At REPEATABLE READ this is UNAVAILABLE instead (measured: MariaDB 1020 \
+         ER_CHECKREAD on iam_team), never a silent OK"
+    );
+    assert_eq!(
+        overrides_for(&svc, "yadgar:team:racesettingkeyed").await,
+        0,
+        "the refusal must not have stored an override either"
+    );
+}
+
+#[tokio::test]
 async fn setting_a_password_for_a_user_who_does_not_exist_is_not_found_rather_than_unavailable() {
     // THE FOREIGN KEY IS NOT THE ERROR MESSAGE, on the argument
     // `an_override_for_a_team_that_does_not_exist_is_not_found_rather_than_unavailable`
