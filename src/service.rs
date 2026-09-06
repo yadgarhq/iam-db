@@ -1582,10 +1582,23 @@ impl IamDbService for IamDb {
         // rather than the ledger's. The `INSERT ... SELECT` below re-reads the
         // team's liveness under a shared lock, and only at READ COMMITTED does
         // the `live_team` that names its zero see a delete that committed while
-        // that statement waited. At REPEATABLE READ both would answer from the
-        // pre-delete snapshot. So this line is now load-bearing for two
-        // independent reasons, and removing it breaks the newer one silently —
-        // OK with `rows: 0` for a team that is gone, rather than a 503.
+        // that statement waited. So this line is load-bearing for two
+        // independent reasons.
+        //
+        // MEASURED (ledger 741, MariaDB 11.8.9), AND THE FAILURE DEPENDS ON
+        // WHETHER AN IDEMPOTENCY KEY WAS SENT. With a key, `recorded()` below
+        // runs a plain read first and fixes the transaction's REPEATABLE READ
+        // snapshot before the team row is touched; the later `INSERT ...
+        // SELECT ... LOCK IN SHARE MODE` then becomes a SECOND read against a
+        // row the snapshot already covers, and MariaDB raises 1020
+        // `ER_CHECKREAD` rather than re-evaluating — which `db()` renders
+        // UNAVAILABLE, a retryable 503 for a write that can never succeed.
+        // Without a key, that `INSERT ... SELECT` is the transaction's FIRST
+        // read, and a locking read is isolation-level-independent: it matches
+        // latest committed data regardless, so removing the pin changes
+        // nothing observable on that path. Neither path answers OK with
+        // `rows: 0` for a team that is gone. See `tests/contract.rs`,
+        // `a_team_soft_delete_landing_after_the_idempotency_read_still_refuses_an_inherited_setting_override`.
         //
         // `SET TRANSACTION` WITHOUT `SESSION` OR `GLOBAL` applies to the NEXT
         // transaction and then reverts, so a pooled connection carries nothing to
@@ -1757,11 +1770,18 @@ impl IamDbService for IamDb {
                 // FOREIGN KEY left to fire would have said UNAVAILABLE for both an
                 // unknown team and a soft-deleted one.
                 //
-                // IT READS THE COMMITTED DELETE ONLY BECAUSE THIS HANDLER PINS
-                // READ COMMITTED by its own `SET TRANSACTION` statement above. At
-                // the engine's default REPEATABLE READ this re-read would return
-                // the same pre-delete snapshot the failed check did, and answer OK
-                // with `rows: 0` for a team that is gone.
+                // MEASURED (ledger 741): removing this handler's READ COMMITTED
+                // pin does not make this re-read answer OK with `rows: 0` for a
+                // team that is gone. When the request carries an idempotency
+                // key, `recorded()` above already fixed a REPEATABLE READ
+                // snapshot before the team row was touched, so the `INSERT ...
+                // SELECT` further up — not this read — is the one that fails
+                // first, with 1020 `ER_CHECKREAD`, which `db()` renders
+                // UNAVAILABLE; this line is never reached on that path. Without
+                // a key, the `INSERT ... SELECT` is the transaction's first
+                // read and is isolation-level-independent, so it already
+                // matches the committed delete and this line correctly finds
+                // none. Neither path lets a gone team come back as OK.
                 if done.rows_affected() == 0 {
                     live_team(&mut *tx, team_id_of(&r)).await?;
                 }
