@@ -618,3 +618,43 @@ async fn a_certificate_and_a_key_that_do_not_match_are_an_error() {
         "the message must name BOTH files, because either could be the wrong one: {message}"
     );
 }
+
+/// THE REFUSAL ABOVE HAS TO SAY WHAT WAS WRONG, and the case above cannot tell.
+///
+/// It asserts the variant and the two PATHS, which are `serve.rs`'s own fields —
+/// so it passes whether `detail` was built by walking the error's `source()`
+/// chain or by a bare `e.to_string()`. On that one property it is a certifying
+/// fixture, green under both, and that is the exact defect telemetry#12
+/// corrected in the shared unit `serve::builder` now calls.
+///
+/// **The three layers, measured rather than remembered.** The head is
+/// `tonic::transport::Error`, whose whole `Display` is the two words `transport
+/// error`; under it rustls says `keys may not be consistent`; under THAT is
+/// `KeyMismatch`. Neither inner layer's text appears in the head, so a `detail`
+/// carrying `KeyMismatch` was reached by two `source()` hops and cannot have
+/// come from the head alone. Reverting the call site to `e.to_string()` leaves
+/// `detail` as exactly `transport error` and turns this red — which is why the
+/// assertion is on the INNERMOST layer rather than the middle one.
+#[tokio::test]
+async fn the_refusal_names_the_reason_rather_than_just_transport_error() {
+    let one = pki(SERVED_NAME);
+    let other = pki(SERVED_NAME);
+    let cert = TempPem::with(&one.cert_pem);
+    let key = TempPem::with(&other.key_pem);
+    let tls = configured(cert.path(), key.path());
+
+    let Err(ServerTlsError::Rejected { detail, .. }) = serve::builder(Some(&tls)) else {
+        panic!("a key that does not match the certificate must be refused at boot");
+    };
+
+    assert!(
+        detail.contains("KeyMismatch"),
+        "the detail must carry the layer UNDER tonic's `transport error`, which is \
+         the only part naming what was wrong; got: {detail:?}"
+    );
+    assert_ne!(
+        detail.trim(),
+        "transport error",
+        "the head of the chain alone says nothing an operator can act on"
+    );
+}

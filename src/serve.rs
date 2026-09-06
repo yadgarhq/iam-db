@@ -94,6 +94,15 @@ use std::path::{Path, PathBuf};
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use tonic::transport::{Identity, Server, ServerTlsConfig};
+// THE ONE ERROR-CHAIN FLATTENER FOR THE ESTATE (ADR-0591). The body that used to
+// sit below `builder` in this file was one of five — `iam`, `task`, `task-db`,
+// `project-db` and here — byte-identical apart from local names, under TWO
+// names: `chain` here and in `iam`, `describe` in the other three. It is deleted
+// rather than left beside the shared one, because a consolidation that adds a
+// sixth copy without removing the five is worse than none. The call site is
+// unchanged: the published signature is the PERMISSIVE `&dyn Error`, which
+// accepts everything the `&(dyn Error + 'static)` written here did.
+use yadgar_telemetry::diagnose::chain;
 
 /// The prefix the listener's transport is configured from:
 /// `LISTEN_TLS_ENABLED`, `LISTEN_TLS_CERT_FILE` and `LISTEN_TLS_KEY_FILE`.
@@ -329,10 +338,10 @@ pub fn builder(tls: Option<&ServerTls>) -> Result<Server, ServerTlsError> {
     // comparing the certificate's public key against the private one catches a
     // pair that is individually valid and jointly wrong.
     //
-    // `.to_string()` on the way out is NOT decoration. tonic's transport error
-    // renders as the three words "transport error" and keeps everything useful
-    // in its `source` chain, so a message that did not walk that chain would
-    // tell an operator nothing at all.
+    // `chain` on the way out is NOT decoration, and it is the SHARED one
+    // (ADR-0591). tonic's transport error renders as the two words "transport
+    // error" and keeps everything useful in its `source` chain, so a message
+    // that did not walk that chain would tell an operator nothing at all.
     Server::builder()
         .tls_config(config)
         .map_err(|e| ServerTlsError::Rejected {
@@ -340,18 +349,6 @@ pub fn builder(tls: Option<&ServerTls>) -> Result<Server, ServerTlsError> {
             key: tls.key_file.clone(),
             detail: chain(&e),
         })
-}
-
-/// Flatten an error and everything underneath it into one sentence.
-fn chain(error: &(dyn std::error::Error + 'static)) -> String {
-    let mut rendered = error.to_string();
-    let mut source = error.source();
-    while let Some(current) = source {
-        rendered.push_str(": ");
-        rendered.push_str(&current.to_string());
-        source = current.source();
-    }
-    rendered
 }
 
 #[cfg(test)]
