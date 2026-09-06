@@ -20,6 +20,39 @@ spec:
   # not enabled autoscaling, which is the chart's own default (D80).
   replicas: {{ .Values.replicaCount }}
   {{- end }}
+  {{- with .Values.rollingUpdate }}
+  # THE ROLL'S SHAPE, WRITTEN OUT BECAUSE THE DEFAULT IS COUNT-DEPENDENT
+  # (ledger 691). Kubernetes defaults both `maxUnavailable` and `maxSurge` to
+  # 25%, and it stores the PERCENTAGE rather than a resolved integer: the
+  # controller resolves it against the LIVE replica count at every roll,
+  # rounding `maxUnavailable` down and `maxSurge` up.
+  #
+  # AT THIS CHART'S OWN DEFAULT THIS CHANGES NOTHING, and the diff must not be
+  # read as if it did. 25% of `replicaCount: 2` is 0.5, which is already 0 down
+  # and 1 up. Checked against the live objects rather than assumed: every yadgar
+  # Deployment in the reference cluster stores `25%`/`25%` today and therefore
+  # already rolls at 0/1.
+  #
+  # WHAT IT CHANGES IS THAT THE GUARANTEE SURVIVES A COUNT CHANGE. `autoscaling`
+  # hands the count to KEDA up to `maxReplicas`, and at 6 that same 25% resolves
+  # to `maxUnavailable: 1` — a roll under load then runs a replica short,
+  # silently, because nobody ever wrote a number. This is ledger 606's argument
+  # about `failureThreshold` applied to the other inherited default in this
+  # file: the defect was never the value, it was that `git grep strategy` could
+  # not find it.
+  #
+  # THE SURGE POD IS SCHEDULABLE. It is three pods against two schedulable nodes
+  # in the reference cluster — three kind nodes, the control plane carrying
+  # `node-role.kubernetes.io/control-plane:NoSchedule` — at a 50m CPU request,
+  # and `topologySpreadConstraints` below is `ScheduleAnyway` precisely so that
+  # third pod is never the one that stalls the roll.
+  #
+  # `rollingUpdate: {}` in an operator's values renders nothing here and returns
+  # the field to the count-dependent default described above.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {{- toYaml . | nindent 6 }}
+  {{- end }}
   selector:
     matchLabels:
       app: {{ .Chart.Name }}
@@ -45,6 +78,78 @@ spec:
         fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
+      {{- with .Values.terminationGracePeriodSeconds }}
+      # 35 = 5 + 25 + 5, AND EVERY TERM IS SOMEBODY ELSE'S NUMBER (ledger 690).
+      # This is ONE budget covering BOTH halves of a pod's death, which is what
+      # makes the arithmetic non-obvious: kubelet runs the `preStop` handler
+      # first and sends SIGTERM only afterwards, and the clock does not restart
+      # in between. So this must cover the sleep below PLUS the drain after it.
+      #
+      #    5  the `preStop` sleep on the container below.
+      #   25  `yadgar_lifecycle::DRAIN_BUDGET` (lifecycle/src/drain.rs) — the
+      #       longest `drain_within` lets the serving future run once shutdown
+      #       has been asked for. A constant, deliberately, and not a number
+      #       this chart is allowed to set.
+      #    5  the slack that same constant's docstring reserves "to log and
+      #       exit".
+      #
+      # WHY NOT LEAVE IT AT THE INHERITED 30. 30 was exactly enough while nothing
+      # ran before SIGTERM: 30 - 25 is that 5s of slack and not one second more.
+      # A 5s `preStop` spends the whole of it and leaves a 25s budget inside a
+      # 25s window, so the first drain that actually used its budget would meet
+      # SIGKILL at the instant it overran — the one outcome `DRAIN_BUDGET`
+      # exists to make unreachable. Adding the hook without moving this number
+      # would have been strictly worse than adding neither.
+      #
+      # THE RELATIONSHIP IS NOW ASSERTABLE, WHICH IT WAS NOT. `DRAIN_BUDGET`'s
+      # docstring says "no chart in this estate sets or exposes it, so there is
+      # no rendered value to assert against and the relationship is stated here
+      # rather than faked as a test". This line is that rendered value. The rule
+      # that docstring states still holds and points the other way: "a
+      # deployment that lowers the grace period below 25s must lower this with
+      # it" — 35 does not lower it.
+      #
+      # `0` RENDERS NOTHING rather than rendering `0`, and the asymmetry is
+      # deliberate: a literal 0 is an immediate SIGKILL with no drain at all.
+      # Set 0 to return the field to kubelet's 30s default. There is no way to
+      # spell "kill instantly" through this chart.
+      terminationGracePeriodSeconds: {{ . }}
+      {{- end }}
+      {{- if .Values.topologySpread.enabled }}
+      # HOSTNAME IS THE ONLY AXIS THERE IS, AND `ScheduleAnyway` IS THE ONLY SAFE
+      # STRENGTH (ledger 691). Measured on the reference cluster rather than
+      # assumed: three kind nodes, not one of them carrying a
+      # `topology.kubernetes.io/zone` or `/region` label, and the control plane
+      # tainted `node-role.kubernetes.io/control-plane:NoSchedule` — two
+      # schedulable nodes for two replicas.
+      #
+      # `DoNotSchedule` WOULD HANG EVERY ROLL, and that is the whole reason this
+      # says otherwise. `maxSurge: 1` puts three pods on those two nodes for the
+      # length of a roll, which is a skew of 2 against `maxSkew: 1`; a required
+      # constraint leaves the surge pod Pending, and with `maxUnavailable: 0` the
+      # rollout then neither proceeds nor fails. It hangs, with no error — D68's
+      # failure mode wearing a different field's name.
+      #
+      # THE SELECTOR IS THIS TEMPLATE'S, NEVER THE OPERATOR'S, which is why only
+      # the three scalars live in `values.yaml`. It is `app: {{ .Chart.Name }}`
+      # — the label this Deployment actually sets, and the one the
+      # PodDisruptionBudget already selects on. A `labelSelector` that matches no
+      # pod is a field that does nothing for the rest of the chart's life, and
+      # neither `helm template` nor `helm lint --strict` will say a word about
+      # it.
+      #
+      # NO `affinity` BESIDE THIS, DELIBERATELY. A preferred `podAntiAffinity` on
+      # the same label and the same topology key is this same control spelled a
+      # second way, and two knobs for one decision is how they come to disagree.
+      # Ledger 691's `affinity` is declined rather than added.
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.topologySpread.maxSkew }}
+          topologyKey: {{ .Values.topologySpread.topologyKey }}
+          whenUnsatisfiable: {{ .Values.topologySpread.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              app: {{ .Chart.Name }}
+      {{- end }}
       containers:
         - name: {{ .Chart.Name }}
           # A published chart carries image.digest and no tag (D65, D61).
@@ -232,6 +337,57 @@ spec:
           # `tcpSocket` needs no change when tls.enabled is set: it completes a
           # TCP connection and no TLS handshake, so kubelet needs neither the
           # certificate nor the authority that signed it.
+          {{- with .Values.preStopSleepSeconds }}
+          # THE SLEEP IS FOR THE WITHDRAWAL, NOT FOR THE DRAIN (ledger 690).
+          # Deleting a pod fans out to two consumers that do not wait for each
+          # other: kubelet, which begins killing the container, and the
+          # EndpointSlice controller, whose removal then has to reach everything
+          # that routes here. Nothing orders those two. With no `preStop`,
+          # SIGTERM can win, and the drain below — which is careful, bounded and
+          # correct — then drains a listener that callers are still being sent
+          # to. What is lost is every request dispatched INTO that window, and no
+          # amount of drain budget helps with those: they arrive after the
+          # decision to stop and before anyone was told.
+          #
+          # THE PATH HERE IS EVERY CALLER'S OWN BALANCER, which is the longer
+          # of the two shapes this estate has. This Service is headless
+          # (`clusterIP: None` in `service.yaml`) so callers resolve the pod
+          # addresses and balance across them client-side through `yadgar-dial`.
+          # The removal therefore has to reach each CALLER's endpoint watch and
+          # then its balancer, rather than one kube-proxy per node — more hops
+          # than a virtual IP and less bounded, which is the case 5s is sized
+          # for.
+          #
+          # THIS IS NOT WHAT THE READINESS PROBE COVERS, and the probe's own
+          # stanza below says so: a pod being ROLLED never pays the probe window,
+          # because the EndpointSlice controller drops a pod carrying a
+          # `deletionTimestamp` with no probe involved. That probe governs the
+          # self-initiated rotation drain of ADR-0523, where there is no
+          # `deletionTimestamp` for anything to see. This governs the deletion
+          # path. The two do not overlap, and neither substitutes for the other.
+          #
+          # `sleep`, NOT AN `exec` OF /bin/sleep — AND THE IMAGE LEAVES NO
+          # CHOICE. `Containerfile` ships this binary on
+          # `ghcr.io/yadgarhq/runtime`, which is distroless/static (D63): no
+          # shell, no `sleep` binary. An `exec` handler would fail, kubelet would
+          # log the failure and proceed straight to SIGTERM, and this chart would
+          # look hardened while doing nothing whatsoever. The `sleep` action is
+          # the API server's own and needs neither shell nor binary. It wants a
+          # control plane at v1.30 or newer; verified present on the reference
+          # cluster's v1.36 with `kubectl explain
+          # pod.spec.containers.lifecycle.preStop.sleep`, and an older control
+          # plane would drop the field rather than refuse it.
+          #
+          # 5s IS PAID ON EVERY POD DEATH, which is the cost worth naming rather
+          # than burying. It lengthens a rolling update by 5s per batch and a
+          # node drain by 5s per pod, and it is spent INSIDE
+          # `terminationGracePeriodSeconds` above rather than added to it. `0`
+          # renders no `lifecycle` block at all.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: {{ . }}
+          {{- end }}
           readinessProbe:
             tcpSocket:
               port: grpc
