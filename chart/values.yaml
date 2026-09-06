@@ -206,10 +206,11 @@ preStopSleepSeconds: 5
 
 # THE WHOLE BUDGET FOR A POD'S DEATH: the sleep above, then SIGTERM, then the
 # drain, then SIGKILL. 35 = 5 (sleep) + 25 (`yadgar_lifecycle::DRAIN_BUDGET`) +
-# 5 (the slack that constant's docstring reserves to log and exit). Lowering
-# this below 25 means lowering `DRAIN_BUDGET` with it, which is that crate's
-# rule and not this chart's. `0` renders nothing and returns the field to
-# kubelet's 30s default.
+# 5 (the slack that constant's docstring reserves to log and exit). Kubelet
+# runs preStop before sending SIGTERM, so the sleep and the drain share one
+# clock. Lowering this below 30 (DRAIN_BUDGET + that slack, both owned by
+# lifecycle/src/drain.rs) breaks that crate's floor, not this chart's. `0`
+# renders nothing and returns the field to kubelet's 30s default.
 terminationGracePeriodSeconds: 35
 
 # THE ROLL. `maxUnavailable: 0` is the guarantee and `maxSurge: 1` is what pays

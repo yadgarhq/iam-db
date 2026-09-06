@@ -106,7 +106,7 @@ spec:
       # no rendered value to assert against and the relationship is stated here
       # rather than faked as a test". This line is that rendered value. The rule
       # that docstring states still holds and points the other way: "a
-      # deployment that lowers the grace period below 25s must lower this with
+      # deployment that lowers the grace period below 30s must lower this with
       # it" — 35 does not lower it.
       #
       # `0` RENDERS NOTHING rather than rendering `0`, and the asymmetry is
