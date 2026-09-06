@@ -1709,11 +1709,23 @@ impl IamDbService for IamDb {
                 // `INSERT ... SELECT` raises 1020 `ER_CHECKREAD` at READ
                 // COMMITTED and matches nothing at REPEATABLE READ, and `db()`
                 // renders the former as UNAVAILABLE, shipping a retryable status
-                // for a request that can never succeed. It costs no lock the
-                // engine was not taking: InnoDB's foreign-key parent-existence
-                // check is itself a locking read and takes S on `iam_team` before
-                // the child row lock, so on a table carrying that constraint this
-                // makes explicit a lock that was already there.
+                // for a request that can never succeed.
+                //
+                // WHAT THE CLAUSE COSTS, SPLIT BY CASE RATHER THAN CALLED FREE.
+                // Wherever the team ROW EXISTS — live or soft-deleted — it costs
+                // nothing: InnoDB's foreign-key parent-existence check is itself
+                // a locking read and takes S on `iam_team` before the child row
+                // lock, so this only makes explicit a lock the engine was already
+                // taking. On an UNKNOWN team it is a genuinely new lock, because
+                // the old `live_team` refused before the INSERT ran and the
+                // foreign key never fired. It is small and it is measured: a
+                // shared lock on a MISSING primary key takes a supremum gap lock
+                // at REPEATABLE READ, and at the READ COMMITTED this handler pins
+                // it is 30ms. Unlike the five siblings, which run autocommit
+                // single statements, this one holds it to the end of a
+                // transaction that still has the claim INSERT and the read-back
+                // to do — so the hold is the transaction's rather than the
+                // statement's. Negligible, not absent.
                 //
                 // `VALUES(value)` DOES NOT SURVIVE THE REWRITE — it names a
                 // column of an `INSERT ... VALUES` row, which no longer exists —
