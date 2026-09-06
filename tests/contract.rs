@@ -1460,6 +1460,303 @@ async fn administrative_writes_refuse_a_person_who_is_not_live() {
         "the refusal must not have written a hash either"
     );
 }
+/// Which liveness the interleaved soft delete withdraws.
+enum Withdraw {
+    User,
+    Team,
+}
+
+/// Run `call` with a soft delete COMMITTING WHILE THE WRITE IS IN FLIGHT.
+///
+/// **THIS IS THE INTERLEAVING, NOT A SEQUENTIAL DELETE.**
+/// `administrative_writes_refuse_a_person_who_is_not_live` deletes FIRST and
+/// then calls, so the handler's own liveness check sees the withdrawal and
+/// refuses. That test passes whether the check and the write are one statement
+/// or two. These put the delete BETWEEN them.
+///
+/// The lever is an InnoDB row lock rather than a sleep. The deleter's
+/// transaction holds an exclusive lock on the person's (or the team's) row and
+/// does not commit, so:
+///
+/// - a handler that checks liveness with a bare `SELECT` reads a consistent
+///   snapshot, does not block, and passes the check;
+/// - its write then blocks — on the foreign key's shared lock, or on the
+///   liveness predicate's own — until the deleter commits;
+/// - the deleter commits 300ms in, and the write resumes against a person who
+///   is now gone.
+///
+/// A handler whose predicate lives in the write statement re-reads under that
+/// lock and matches nothing. A handler that checked separately has nothing left
+/// to re-read and writes anyway.
+///
+/// The timeout is named rather than left to `innodb_lock_wait_timeout`, which
+/// is 50 seconds: a fix that deadlocks must fail as a deadlock, not as a stall.
+async fn while_a_soft_delete_lands<T>(
+    svc: &IamDb,
+    withdraw: Withdraw,
+    id: &str,
+    call: impl std::future::Future<Output = T>,
+) -> T {
+    let sql = match withdraw {
+        Withdraw::User => "UPDATE iam_user SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
+        Withdraw::Team => "UPDATE iam_team SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
+    };
+    let mut tx = svc
+        .pool()
+        .begin()
+        .await
+        .expect("open the deleter's transaction");
+    sqlx::query(sql)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .expect("take the row's write lock");
+
+    let lands = async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        tx.commit().await.expect("commit the soft delete");
+    };
+
+    tokio::time::timeout(std::time::Duration::from_secs(20), async move {
+        let (out, ()) = tokio::join!(call, lands);
+        out
+    })
+    .await
+    .expect("the write must not sit on the row lock until innodb_lock_wait_timeout")
+}
+
+/// The five writes below share one argument, stated once here.
+///
+/// **THE RACE THE FIVE GUARDED WRITES ALL CARRIED**, and the reason a guard on
+/// the pool followed by a write on the pool is not a guard at all. Between
+/// `live_user`'s SELECT and the INSERT that followed it there was a whole round
+/// trip, and a person soft-deleted inside that window got the write anyway — a
+/// password, a credential, an enrolment, a membership or a rate limit, all
+/// belonging to an account every READ on this boundary already refuses to
+/// return.
+///
+/// **LATENT WHEN THESE WERE WRITTEN.** Nothing in production sets
+/// `iam_user.deleted_at` — there is no `DeleteUser` RPC, and the only writer
+/// anywhere is `soft_delete` above, whose own comment says it exists to reach a
+/// state no RPC creates — and `iam_team.deleted_at` has no writer at all. So
+/// these tests drive the delete themselves, and it is the arrival of that RPC
+/// rather than any change here that makes the defect reachable.
+///
+/// **MUTATION THESE CATCH:** moving any of the five predicates back out of its
+/// write statement into a preceding `live_user` / `live_team` call. Every other
+/// test in this file stays green when you do, including the sequential liveness
+/// test above — which is how all five survived three sweeps.
+///
+/// **ONE TEST PER HANDLER, DELIBERATELY.** A single test asserting all five
+/// stops at the first failure, so a regression in the fourth would be reported
+/// as a defect in the first. These fail independently and name what broke.
+#[tokio::test]
+async fn a_soft_delete_landing_mid_call_still_refuses_a_password() {
+    let svc = fresh("iam_db_test_race_password").await;
+    let user = enrolee(&svc, 81, b"encrypted-pw").await;
+
+    let err = while_a_soft_delete_lands(
+        &svc,
+        Withdraw::User,
+        &user,
+        svc.set_password(Request::new(SetPasswordRequest {
+            user_id: user.clone(),
+            argon2id_hash: GOOD_HASH.into(),
+            ..Default::default()
+        })),
+    )
+    .await
+    .expect_err("a hash written for a person who left mid-call is one no login reads");
+    assert_eq!(err.code(), tonic::Code::NotFound);
+    assert_eq!(
+        count(
+            &svc,
+            "SELECT COUNT(*) FROM iam_password WHERE user_id = ?",
+            &user,
+        )
+        .await,
+        0,
+        "the refusal must not have written a hash either"
+    );
+}
+
+#[tokio::test]
+async fn a_soft_delete_landing_mid_call_still_refuses_a_credential() {
+    // The foreign key is what made this one reachable: a soft delete leaves the
+    // parent row in place, so `fk_iam_credential_user` was satisfied by an
+    // account `ResolveCredential` will never return.
+    let svc = fresh("iam_db_test_race_credential").await;
+    let user = enrolee(&svc, 82, b"encrypted-cred").await;
+
+    let err = while_a_soft_delete_lands(
+        &svc,
+        Withdraw::User,
+        &user,
+        svc.create_credential(Request::new(CreateCredentialRequest {
+            user_id: user.clone(),
+            token_hash: vec![82u8; 32],
+            label: "laptop".into(),
+            ..Default::default()
+        })),
+    )
+    .await
+    .expect_err("a credential minted mid-delete authenticates nobody for its whole lifetime");
+    assert_eq!(err.code(), tonic::Code::NotFound);
+    assert_eq!(
+        count(
+            &svc,
+            "SELECT COUNT(*) FROM iam_credential WHERE user_id = ?",
+            &user,
+        )
+        .await,
+        0,
+        "the refusal must not have minted a credential either"
+    );
+}
+
+#[tokio::test]
+async fn a_soft_delete_landing_mid_call_still_refuses_an_enrolment() {
+    // The redemption path has always checked; only the creation path did not,
+    // so what this one prevented was an enrolment reported OK and then
+    // permanently NOT_FOUND on redeem.
+    let svc = fresh("iam_db_test_race_enrolment").await;
+    let user = enrolee(&svc, 83, b"encrypted-enrol").await;
+
+    let err = while_a_soft_delete_lands(
+        &svc,
+        Withdraw::User,
+        &user,
+        svc.create_enrolment(Request::new(CreateEnrolmentRequest {
+            user_id: user.clone(),
+            secret_hash: vec![83u8; 32],
+            expires_at: Some(at(3600)),
+            ..Default::default()
+        })),
+    )
+    .await
+    .expect_err("an enrolment minted mid-delete is permanently NOT_FOUND on redeem");
+    assert_eq!(err.code(), tonic::Code::NotFound);
+    assert_eq!(
+        count(
+            &svc,
+            "SELECT COUNT(*) FROM iam_enrolment WHERE user_id = ?",
+            &user,
+        )
+        .await,
+        0,
+        "the refusal must not have minted an enrolment either"
+    );
+}
+
+#[tokio::test]
+async fn a_soft_delete_landing_mid_call_still_refuses_a_membership() {
+    // AddTeamMember's USER predicate — one of the two it carries.
+    let svc = fresh("iam_db_test_race_member_user").await;
+    // `seed_team` rather than `team`, because `iam_team.name` is UNIQUE and the
+    // team-side test seeds one of its own.
+    seed_team(&svc, "yadgar:team:race").await;
+    let user = enrolee(&svc, 84, b"encrypted-member").await;
+
+    let err = while_a_soft_delete_lands(
+        &svc,
+        Withdraw::User,
+        &user,
+        svc.add_team_member(Request::new(AddTeamMemberRequest {
+            team_id: "yadgar:team:race".into(),
+            user_id: user.clone(),
+            ..Default::default()
+        })),
+    )
+    .await
+    .expect_err("a membership granted mid-delete is one ResolveCredential never returns");
+    assert_eq!(err.code(), tonic::Code::NotFound);
+    assert_eq!(
+        count(
+            &svc,
+            "SELECT COUNT(*) FROM iam_team_member WHERE user_id = ?",
+            &user,
+        )
+        .await,
+        0,
+        "the refusal must not have granted the membership either"
+    );
+}
+
+#[tokio::test]
+async fn a_team_soft_delete_landing_mid_call_still_refuses_a_membership() {
+    // AddTeamMember's TEAM predicate, and the only place on this boundary where
+    // a team's liveness races a write. `iam_team.deleted_at` has no writer at
+    // all today — not even a test helper — so this is the one arm of the class
+    // that no code path can reach until a team-deleting RPC exists.
+    let svc = fresh("iam_db_test_race_member_team").await;
+    seed_team(&svc, "yadgar:team:racedoomed").await;
+    let user = enrolee(&svc, 85, b"encrypted-joiner").await;
+
+    let err = while_a_soft_delete_lands(
+        &svc,
+        Withdraw::Team,
+        "yadgar:team:racedoomed",
+        svc.add_team_member(Request::new(AddTeamMemberRequest {
+            team_id: "yadgar:team:racedoomed".into(),
+            user_id: user.clone(),
+            ..Default::default()
+        })),
+    )
+    .await
+    .expect_err("a membership in a team that left mid-call is a grant into nothing");
+    assert_eq!(err.code(), tonic::Code::NotFound);
+    assert_eq!(
+        count(
+            &svc,
+            "SELECT COUNT(*) FROM iam_team_member WHERE user_id = ?",
+            &user,
+        )
+        .await,
+        0,
+        "the refusal must not have granted the membership either"
+    );
+}
+
+#[tokio::test]
+async fn a_soft_delete_landing_mid_call_still_refuses_a_rate_limit_override() {
+    // THE SET ARM ONLY. `SetRateLimitOverride`'s CLEAR arm is deliberately not
+    // tested here and deliberately still checks-then-writes: the write its
+    // window lets through DELETES an override belonging to a person on their way
+    // out, which misleads nobody, and joining the predicate in would make a
+    // soft-deleted person's override unclearable. `RemoveTeamMember`'s handler
+    // argues the same for the same reason.
+    let svc = fresh("iam_db_test_race_rate_limit").await;
+    let user = enrolee(&svc, 86, b"encrypted-limited").await;
+
+    let err = while_a_soft_delete_lands(
+        &svc,
+        Withdraw::User,
+        &user,
+        svc.set_rate_limit_override(Request::new(SetRateLimitOverrideRequest {
+            user_id: user.clone(),
+            module: "recall".into(),
+            kind: yadgar_iam_db::pb::yadgar::telemetry::v1::Kind::Read as i32,
+            limit: Some(RateLimit {
+                rate: 1.0,
+                burst: 1,
+            }),
+            ..Default::default()
+        })),
+    )
+    .await
+    .expect_err("a limit stored mid-delete is one an operator believes is in force");
+    assert_eq!(err.code(), tonic::Code::NotFound);
+    assert_eq!(
+        count(
+            &svc,
+            "SELECT COUNT(*) FROM iam_rate_limit_override WHERE user_id = ?",
+            &user,
+        )
+        .await,
+        0,
+        "the refusal must not have stored a limit either"
+    );
+}
 
 #[tokio::test]
 async fn setting_a_password_for_a_user_who_does_not_exist_is_not_found_rather_than_unavailable() {
