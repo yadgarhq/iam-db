@@ -380,8 +380,10 @@ impl IamDbService for IamDb {
         // FROM iam_user WHERE deleted_at IS NULL)`; this handler wrote the same
         // column with no such clause. Both write it, so both check it.
         //
-        // THE LAST WRITE OF THE CLASS PR #29 SWEPT, and it was missed because it
-        // HAS NO PRODUCTION CALLER — password rotation is outside the first cut
+        // THE LAST GRANT-SHAPED WRITE OF THE CLASS PR #29 SWEPT — `RemoveTeamMember`
+        // still takes a `user_id` and is deliberately not here, because it REVOKES
+        // rather than grants and its handler carries why. This one was missed
+        // because it HAS NO PRODUCTION CALLER — password rotation is outside the first cut
         // (D73), so `iam` exposes no `SetPassword` and nothing in the estate
         // could demonstrate the hole. Guarded now rather than when rotation
         // arrives, so the author who builds rotation inherits a refusal instead
@@ -707,7 +709,11 @@ impl IamDbService for IamDb {
         // NO `live_user`, NO `live_team`, AND NO EXISTENCE CHECK — DECIDED,
         // rather than the sweep stopping one short again. `AddTeamMember` above
         // refuses an unrecognised id; this one answers OK with `rows: 0`. Two
-        // reasons, and the first is the one that settles it:
+        // `SetPassword` WAS guarded in the same change that wrote this comment,
+        // so the two halves are one decision rather than two: a liveness guard
+        // belongs on a write that GRANTS reach, and this one takes reach away.
+        //
+        // Two reasons, and the first is the one that settles it:
         //
         // THIS ESTATE ALREADY DECIDED THAT A NO-OP REMOVAL IS NOT AN ERROR.
         // `SetInheritedSetting`'s CLEAR arm names a team that was never created

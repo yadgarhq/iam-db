@@ -1356,8 +1356,12 @@ async fn administrative_writes_refuse_a_person_who_is_not_live() {
     //
     // SetPassword ARRIVED LATER STILL, and it is the LAST of the class rather
     // than one more of it: the sweep that added CreateCredential and
-    // AddTeamMember missed a third, and the RPCs that take a `user_id` and write
-    // are now exhausted. It was missed because it HAS NO PRODUCTION CALLER —
+    // AddTeamMember missed a third, and the writes that GRANT are now
+    // exhausted. The one write on this boundary that still takes a `user_id`
+    // and is not here is `RemoveTeamMember`, which REVOKES rather than grants —
+    // a liveness guard there would refuse the retried cleanup a future
+    // team deletion strands, and its handler carries the whole argument.
+    // SetPassword was missed because it HAS NO PRODUCTION CALLER —
     // password rotation is outside the first cut (D73) and `iam` exposes no
     // `SetPassword` — so nothing in the estate could demonstrate the hole. That
     // is a reason to guard it BEFORE rotation lands, not after: the day a caller
