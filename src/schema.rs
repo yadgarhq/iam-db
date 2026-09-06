@@ -326,11 +326,13 @@ fn rate_limit_override() -> Migration {
         // row rather than a second row, so no SELECT is needed to tell a first
         // grant from a repeat before the write lands.
         //
-        // THAT idempotence is not the same claim as "no race here". Both this
-        // table's own writer and iam_team_member's check the person is live
-        // before this write runs, and that check is a separate statement
-        // outside the upsert — see service.rs's comment on AddTeamMember for
-        // why the gap it leaves is latent rather than closed.
+        // THAT idempotence was never the same claim as "no race here", and the
+        // gap it left is now closed (ledger 695). Both this table's writer and
+        // iam_team_member's used to check the person is live in a SEPARATE
+        // statement ahead of the upsert; both now carry the predicate in the
+        // upsert's own SELECT, and re-read only to render a zero match as
+        // NOT_FOUND. `SetRateLimitOverride`'s CLEAR arm is the one exception and
+        // its handler says why.
         //
         // CLEARING AN OVERRIDE DELETES THE ROW. An absent row means "the
         // deployment's configured default governs this bucket"; a stored rate of
@@ -418,9 +420,26 @@ fn team_setting_override() -> Migration {
         //
         // The composite primary key carries the idempotence, so setting an
         // override twice is an upsert onto one row rather than a second row.
-        // SetInheritedSetting's team arm does check the team is live before this
-        // write, but that check and this upsert run inside the same transaction
-        // (`&mut *tx`), so it is not a race the way AddTeamMember's is.
+        // SetInheritedSetting's team arm checks the team is live before this
+        // write, inside the same transaction (`&mut *tx`). AND THAT IS NOT WHAT
+        // CLOSES A LIVENESS RACE, WHICH IS THE CORRECTION THIS COMMENT EXISTS
+        // FOR: it used to say the shared transaction made this arm safe, and
+        // ledger 695's review measured the opposite. A transaction buys
+        // ATOMICITY. It does not make a read see a concurrent writer.
+        //
+        // `live_team` IS A PLAIN NON-LOCKING SELECT WHEREVER IT RUNS, inside a
+        // transaction or not. This handler sets READ COMMITTED explicitly, and
+        // at that level the check reported a team live, the upsert below then
+        // blocked on the foreign key's shared lock while the deleter committed,
+        // and the override landed for a team whose `deleted_at` was set — which
+        // the handler then reads back and returns as in force.
+        //
+        // SO THIS IS A SIXTH INSTANCE OF THE CLASS LEDGER 695 CLOSED IN FIVE
+        // HANDLERS, recorded rather than fixed because it is the least reachable
+        // of the six: `iam_team.deleted_at` has NO writer anywhere, test helpers
+        // included, so no code path reaches it yet. What it needs is what the
+        // five got — the predicate inside the write statement under `LOCK IN
+        // SHARE MODE` — or a locking read. Not a transaction around both.
         //
         // ON DELETE CASCADE, AND IT COVERS HARD DELETION ONLY. An override
         // outliving a team whose row is gone would be an entry in the answer

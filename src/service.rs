@@ -403,49 +403,73 @@ impl IamDbService for IamDb {
         // the caller's to fix whoever it names, and `CreateEnrolment` orders its
         // own expiry check ahead of `live_user` for the same reason.
         //
-        // A FIFTH INSTANCE OF THE RACE `AddTeamMember` DESCRIBES, and stated
-        // rather than left to be rediscovered: this check runs outside a
-        // transaction, so a person soft-deleted between it and the INSERT still
-        // gets a password row. LATENT — nothing in production writes
-        // `iam_user.deleted_at` and there is no `DeleteUser` RPC — and it
-        // becomes live on the same day `AddTeamMember`'s does, which is the day
-        // that RPC lands.
+        // THE CHECK RIDES IN THE WRITE, and this handler is where the shape is
+        // argued for the four that follow it (ledger 695). A `live_user` on the
+        // pool followed by an INSERT on the pool is TWO statements with a round
+        // trip between them: a person soft-deleted inside that window passed the
+        // check and got the password row anyway. The predicate is now in the
+        // INSERT's own SELECT, so the row the liveness is read from IS the row
+        // the write is derived from, and there is no window between them.
         //
-        // THE WHOLE SET, COUNTED HERE BECAUSE EVERY PARTIAL COUNT SO FAR HAS
-        // UNDERSTATED IT: `SetPassword` (this line), `CreateCredential`,
-        // `AddTeamMember` (both `live_team` and `live_user`), `CreateEnrolment`
-        // and `SetRateLimitOverride`. FIVE. `AddTeamMember`'s own comment names
-        // only `SetRateLimitOverride`, and `CreateEnrolment` — which guards on
-        // the pool and then INSERTs on the pool exactly as this does — has gone
-        // uncounted throughout. `SetUserAdmin` is NOT in the set and must not be
-        // added to it: its UPDATE carries `deleted_at IS NULL` in its own WHERE
-        // clause, so it is already atomic, and its `live_user` runs only to
-        // render a zero match as NOT_FOUND.
+        // `SetUserAdmin` HAS ALWAYS HAD THIS SHAPE — its UPDATE carries
+        // `deleted_at IS NULL` in its own WHERE and its `live_user` runs only on
+        // a zero match. It was never in the racing set, and what closes the
+        // other four is being made to look like it rather than being wrapped in
+        // a transaction none of them otherwise needs.
         //
-        // TWO SHAPES CLOSE IT, AND THE LIGHTER ONE IS ALREADY IN THIS FILE.
-        // Wrapping check and write in a transaction is one change across the
-        // five. Or per-handler, by moving the predicate INTO the write statement
-        // the way `SetUserAdmin` does — here that is `INSERT INTO iam_password
-        // (user_id, argon2id_hash) SELECT ?, ? FROM iam_user WHERE id = ? AND
-        // deleted_at IS NULL ON DUPLICATE KEY UPDATE ...`, with `live_user` kept
-        // only to turn a zero match into NOT_FOUND. `RedeemEnrolment` takes the
-        // same approach inside its transaction. Not done here because it is a
-        // change to five handlers and this pull request measured one.
-        live_user(&self.pool, &r.user_id).await?;
-
-        sqlx::query(
-            "INSERT INTO iam_password (user_id, argon2id_hash) VALUES (?, ?)
-             ON DUPLICATE KEY UPDATE argon2id_hash = VALUES(argon2id_hash)",
+        // `LOCK IN SHARE MODE` RATHER THAN A BARE SELECT, AND IT IS MEASURED.
+        // Against mariadb:11.8 holding an uncommitted soft delete on the
+        // person's row, the write blocks on that row's exclusive lock either
+        // way — but the bare form takes its own shared lock only at REPEATABLE
+        // READ. At READ COMMITTED it fails with ER_CHECKREAD (1020), which
+        // `db()` renders as UNAVAILABLE: a retryable status for a request that
+        // can never succeed. With the clause the statement blocks, re-reads
+        // under the lock and matches nothing at BOTH levels. This service sets
+        // an isolation level only inside `RedeemEnrolment` and
+        // `SetInheritedSetting`, so every statement here inherits the server's —
+        // the clause is what stops the answer depending on how that server is
+        // configured.
+        //
+        // THE HASH IS BOUND TWICE INSTEAD OF `VALUES()`. `VALUES()` names the
+        // row of an `INSERT ... VALUES`, and what it means inside an
+        // `INSERT ... SELECT` is not a question to settle by experiment on the
+        // statement that stores a password. Two binds of one parameter say it
+        // outright.
+        let done = sqlx::query(
+            "INSERT INTO iam_password (user_id, argon2id_hash)
+             SELECT id, ? FROM iam_user
+              WHERE id = ? AND deleted_at IS NULL
+              LOCK IN SHARE MODE
+             ON DUPLICATE KEY UPDATE argon2id_hash = ?",
         )
+        .bind(&r.argon2id_hash)
         .bind(&r.user_id)
         .bind(&r.argon2id_hash)
         .execute(&self.pool)
         .await
         .map_err(db)?;
 
+        // `live_user` KEPT, FOR THE ZERO ONLY — `SetUserAdmin`'s branch
+        // verbatim. `sqlx` reports MATCHED rows, so zero cannot mean "the hash
+        // was already that value"; it can only mean the SELECT found no live row
+        // for this id. The re-read turns that into NOT_FOUND rather than a
+        // silent OK, and answers the same whether the id is unknown or the
+        // person is soft-deleted.
+        if done.rows_affected() == 0 {
+            live_user(&self.pool, &r.user_id).await?;
+        }
+
         call.finish(Outcome {
             status: "OK",
-            rows: 1,
+            // FROM THE DRIVER, BECAUSE THE LITERAL `1` THIS REPLACES WAS ALREADY
+            // FALSE. An `ON DUPLICATE KEY UPDATE` whose assignment genuinely
+            // changes a stored value reports TWO — one for the attempted insert
+            // and one for the update the engine counts separately — and
+            // REPLACING a password hash is exactly that case. Measured through a
+            // real pool: 1 on a first set, 1 on a repeat of the same hash, 2 on a
+            // change. The constant was harmless only because rotation is outside
+            // the first cut (D73) and this RPC has no caller yet.
+            rows: done.rows_affected() as u32,
             ..Default::default()
         });
         Ok(Response::new(SetPasswordResponse {}))
@@ -486,10 +510,18 @@ impl IamDbService for IamDb {
         // write — `RedeemEnrolment`, then `IssueCredential` — already spends the
         // enrolment under `user_id IN (SELECT id FROM iam_user WHERE deleted_at IS
         // NULL)`, so liveness is established one call earlier on that path too.
-        live_user(&self.pool, &r.user_id).await?;
-
+        // THE PREDICATE IS IN THE INSERT, on `SetPassword`'s argument and for
+        // its reasons (ledger 695). A `live_user` here followed by an INSERT
+        // below is two statements, and a person soft-deleted between them still
+        // got a credential — one handed back with an id and accepted by nobody,
+        // because `ResolveCredential` joins `deleted_at IS NULL`.
+        //
+        // THE FOREIGN KEY IS WHAT MADE IT REACHABLE. A soft delete leaves the
+        // parent row in place, so `fk_iam_credential_user` is satisfied by an
+        // account nobody expects to act again; the constraint proves existence
+        // and never liveness, which is this handler's own argument above.
         let id = format!("yadgar:credential:{}", uuid::Uuid::now_v7());
-        sqlx::query(
+        let done = sqlx::query(
             // FROM_UNIXTIME, because the contract carries epoch SECONDS and the
             // column is a TIMESTAMP. Binding the integer directly makes MariaDB
             // read 1798761600 as a datetime literal — it does not error, it
@@ -497,19 +529,49 @@ impl IamDbService for IamDb {
             // nobody chose. Converting in SQL keeps the one representation the
             // column understands.
             "INSERT INTO iam_credential (id, user_id, token_hash, label, expires_at)
-             VALUES (?, ?, ?, ?, FROM_UNIXTIME(?))",
+             SELECT ?, id, ?, ?, FROM_UNIXTIME(?) FROM iam_user
+              WHERE id = ? AND deleted_at IS NULL
+              LOCK IN SHARE MODE",
         )
         .bind(&id)
-        .bind(&r.user_id)
         .bind(&r.token_hash)
         .bind(&r.label)
         .bind(r.expires_at.map(|t| t.seconds))
+        .bind(&r.user_id)
         .execute(&self.pool)
         .await
         .map_err(db)?;
 
+        // Zero MATCHED rows is no live person, and `live_user` is here only to
+        // say so as NOT_FOUND. `SetPassword` carries the full argument.
+        //
+        // THE BRANCH FALLS THROUGH IF THE RE-READ DISAGREES, AND THAT IS NEW
+        // WITH LEDGER 695 RATHER THAN INHERITED. Before this change a zero row
+        // count was impossible here; now `live_user` returning Ok after a zero
+        // match sends this handler on to report OK with a `credential_id` for a
+        // row it never inserted. Reaching it needs `deleted_at` to go set and
+        // then back to NULL between two statements, and nothing in this estate
+        // un-deletes a person — that column has no writer outside a test helper
+        // that only ever sets it. `SetUserAdmin` has carried the identical
+        // branch since it was written, and its exposure is milder only because
+        // its response carries nothing to fabricate. THE HONEST FIX is to make a
+        // zero-row write terminal whatever the re-read says. That is a change to
+        // these three handlers AND to `SetUserAdmin`, so it belongs with the
+        // argument for changing `SetUserAdmin` rather than smuggled in beside a
+        // race fix. `CreateEnrolment` and `AddTeamMember` carry the same branch
+        // and point here.
+        if done.rows_affected() == 0 {
+            live_user(&self.pool, &r.user_id).await?;
+        }
+
         call.finish(Outcome {
             status: "OK",
+            // STILL A LITERAL, AND THE REASON IS NARROWER THAN "THE NONE CASE
+            // ALREADY RETURNED". This statement inserts exactly one row or none;
+            // none returns NOT_FOUND unless the re-read above disagrees, which
+            // is the fall-through that branch describes and which nothing can
+            // currently cause. Only `SetPassword`'s upsert can report a number a
+            // constant cannot predict.
             rows: 1,
             ..Default::default()
         });
@@ -651,43 +713,46 @@ impl IamDbService for IamDb {
         // first: `ResolveCredential` joins `deleted_at IS NULL`, so a team granted
         // to a removed person is a membership no read returns. That is the same
         // class the three writes above already refuse.
-        live_team(&self.pool, &r.team_id).await?;
-        live_user(&self.pool, &r.user_id).await?;
-
         // Idempotent (D9) by the composite primary key: two concurrent inserts
         // of the same (team_id, user_id) cannot create two rows, only one write
         // and one no-op UPDATE.
         //
-        // THE LIVENESS CHECKS ABOVE STILL RACE THIS INSERT. `live_team` and
-        // `live_user` run outside a transaction, so a person OR a team
-        // soft-deleted between the check and this INSERT still gets a
-        // membership row — soft-delete does not cascade, only `ON DELETE
-        // CASCADE` does, and nothing re-checks liveness at write time. LATENT
-        // rather than live on both sides, and unevenly so: nothing in
-        // production sets `iam_user.deleted_at` today (there is no `DeleteUser`
-        // RPC; the only writer anywhere is a test helper whose own comment says
-        // it exists to reach a state no RPC creates), and `iam_team.deleted_at`
-        // has no writer at all, test included — no code path can reach it yet.
-        // The user side BECOMES a live defect the day a `DeleteUser` RPC lands,
-        // the same arrival that test helper is standing in for now.
-        // `SetRateLimitOverride` carries the identical gap on the user side —
-        // it calls `live_user` outside any transaction before its own upsert —
-        // so this is existing practice rather than a hole opened here. NAMING
-        // ONE SIBLING UNDERSTATED IT: `CreateCredential`, `CreateEnrolment` and
-        // `SetPassword` carry the same gap, making FIVE handlers in all.
-        // `SetPassword`'s comment enumerates the set and the two shapes that
-        // close it; a plan that wraps only the handlers named here would leave
-        // the others racing with nothing left in the tree saying so.
+        // BOTH PREDICATES RIDE IN THE INSERT (ledger 695), which is the only
+        // handler here that needs two. `live_team` and `live_user` used to run
+        // ahead of it on the pool, and a person OR a team soft-deleted in the
+        // window between them and this statement still got a membership row —
+        // soft-delete does not cascade, only `ON DELETE CASCADE` does, and
+        // nothing re-checked liveness at write time.
+        //
+        // `CROSS JOIN` RATHER THAN A MISSING `ON`. The two ids are independent
+        // and each `WHERE` clause selects at most one row, so the product is one
+        // row or none; there is no join key between these tables to state. It is
+        // spelled out because an unqualified `JOIN` here reads as a lost
+        // condition.
+        //
+        // ONE STATEMENT, TWO ANSWERS — hence the pair of re-reads below rather
+        // than one. A zero match says only that the product was empty; which of
+        // the two ids emptied it is what the caller needs, and `live_team`
+        // before `live_user` keeps the order this handler answered in before.
         let done = sqlx::query(
             "INSERT INTO iam_team_member (team_id, user_id, added_by)
-             VALUES (?, ?, 'system')
-             ON DUPLICATE KEY UPDATE team_id = team_id",
+             SELECT t.id, u.id, 'system'
+               FROM iam_team t CROSS JOIN iam_user u
+              WHERE t.id = ? AND t.deleted_at IS NULL
+                AND u.id = ? AND u.deleted_at IS NULL
+              LOCK IN SHARE MODE
+             ON DUPLICATE KEY UPDATE iam_team_member.team_id = iam_team_member.team_id",
         )
         .bind(&r.team_id)
         .bind(&r.user_id)
         .execute(&self.pool)
         .await
         .map_err(db)?;
+
+        if done.rows_affected() == 0 {
+            live_team(&self.pool, &r.team_id).await?;
+            live_user(&self.pool, &r.user_id).await?;
+        }
 
         call.finish(Outcome {
             status: "OK",
@@ -696,10 +761,21 @@ impl IamDbService for IamDb {
             // client capability set (`connection/stream.rs`), masks it against
             // what the server advertises, and exposes no `MySqlConnectOptions`
             // knob to turn it off — so every statement this service runs reports
-            // MATCHED rows rather than CHANGED ones. Measured through a real pool
-            // on this exact statement: 1 on a fresh membership, and 1 on every
-            // repeat. The literal `1` this replaces was correct in each case the
-            // handler can still reach.
+            // MATCHED rows rather than CHANGED ones. RE-MEASURED THROUGH A REAL
+            // POOL AFTER LEDGER 695 CHANGED THE STATEMENT, because a number
+            // sourced from the driver is only honest while somebody checks it
+            // against the statement it comes from: the `INSERT ... SELECT` form
+            // reports 1 on a fresh membership and 1 on every repeat, exactly as
+            // the `INSERT ... VALUES` form did. The literal `1` this replaces was
+            // correct in each case the handler can still reach.
+            //
+            // THE THIRD OUTCOME DOES NOT ARISE HERE. An `ON DUPLICATE KEY UPDATE`
+            // whose assignment CHANGES a value reports 2 — `SetPassword` and
+            // `SetRateLimitOverride` both do, measured — and this one assigns a
+            // primary-key column to itself on purpose, so it never changes
+            // anything. Zero is the remaining case, and it returns NOT_FOUND
+            // above unless BOTH re-reads disagree — `CreateCredential` says why
+            // nothing can make them, and what closing that properly needs.
             //
             // WHAT IT BUYS IS THAT THE NUMBER FOLLOWS THE STATEMENT. If the
             // statement changes, or the driver's capability set does, the record
@@ -846,26 +922,32 @@ impl IamDbService for IamDb {
             .ok_or_else(|| Status::invalid_argument("an enrolment must carry an expiry"))?;
 
         // The FOREIGN KEY proves the user row EXISTS; it does not prove the
-        // person is live. Without this an enrolment minted for a soft-deleted
-        // account is accepted, reported OK, and is then permanently NOT_FOUND on
-        // redeem — because the redemption path DOES check. An admin would be
-        // told the enrolment was issued and the person could never use it.
-        live_user(&self.pool, &r.user_id).await?;
-
+        // person is live. Without the predicate below, an enrolment minted for a
+        // soft-deleted account is accepted, reported OK, and is then permanently
+        // NOT_FOUND on redeem — because the redemption path DOES check. An admin
+        // would be told the enrolment was issued and the person could never use
+        // it.
+        //
+        // IN THE INSERT RATHER THAN AHEAD OF IT (ledger 695), on `SetPassword`'s
+        // argument. `RedeemEnrolment` already spends under `user_id IN (SELECT
+        // id FROM iam_user WHERE deleted_at IS NULL)`, so the pair of RPCs now
+        // decides liveness the same way at both ends of one enrolment's life.
         let id = format!("yadgar:enrolment:{}", uuid::Uuid::now_v7());
-        sqlx::query(
+        let done = sqlx::query(
             // FROM_UNIXTIME for the reason CreateCredential already carries: the
             // contract sends epoch SECONDS and the column is a TIMESTAMP.
             // Binding the integer directly does not error — MariaDB reads it as
             // a datetime literal and stores something else, and the enrolment
             // then expires at a time nobody chose.
             "INSERT INTO iam_enrolment (id, user_id, secret_hash, expires_at)
-             VALUES (?, ?, ?, FROM_UNIXTIME(?))",
+             SELECT ?, id, ?, FROM_UNIXTIME(?) FROM iam_user
+              WHERE id = ? AND deleted_at IS NULL
+              LOCK IN SHARE MODE",
         )
         .bind(&id)
-        .bind(&r.user_id)
         .bind(&r.secret_hash)
         .bind(expires_at.seconds)
+        .bind(&r.user_id)
         .execute(&self.pool)
         .await
         .map_err(|e| match &e {
@@ -875,8 +957,21 @@ impl IamDbService for IamDb {
             _ => db(e),
         })?;
 
+        // A DUPLICATE SECRET STILL WINS OVER A DEAD USER, and it cannot reach
+        // this branch: a soft-deleted person's SELECT yields no row, so the
+        // unique index is never consulted and the arm above never fires. The two
+        // refusals do not compete.
+        if done.rows_affected() == 0 {
+            live_user(&self.pool, &r.user_id).await?;
+        }
+
         call.finish(Outcome {
             status: "OK",
+            // A LITERAL FOR THE SAME REASON `CreateCredential`'s is, and with
+            // the same narrowing: one row or none, and none returns NOT_FOUND
+            // unless the re-read disagrees. That handler carries the argument,
+            // including what a fabricated `enrolment_id` would cost if it could
+            // happen.
             rows: 1,
             ..Default::default()
         });
@@ -1291,28 +1386,76 @@ impl IamDbService for IamDb {
         // person's overrides — so a limit stored against one is a limit an
         // operator believes is in force and is not. That is this handler's own
         // argument about KIND_JOB, applied to the user rather than to the kind.
-        live_user(&self.pool, &r.user_id).await?;
-
+        // THE TWO ARMS DECIDE LIVENESS DIFFERENTLY, AND THAT IS THE WHOLE OF
+        // WHAT LEDGER 695 CHANGED HERE. A single `live_user` used to run ahead
+        // of both. The SET arm now carries the predicate in its own statement;
+        // the CLEAR arm keeps the separate check on purpose. Argued below at the
+        // arm it applies to rather than in one place that fits neither.
         let done = match &r.limit {
             // Upsert onto the composite primary key — the same structural
             // idempotence AddTeamMember gets from iam_team_member's.
+            //
+            // THE PREDICATE IS IN THE STATEMENT (ledger 695), because a limit
+            // stored for a person soft-deleted mid-call is exactly what this
+            // handler's own paragraph above refuses: a limit an operator
+            // believes is in force and that `ResolveCredential` never reads.
+            //
+            // `rate` AND `burst` BOUND TWICE RATHER THAN `VALUES()`, for
+            // `SetPassword`'s reason — `VALUES()` names an `INSERT ... VALUES`
+            // row and this is an `INSERT ... SELECT`.
             Some(limit) => {
-                sqlx::query(
+                let done = sqlx::query(
                     "INSERT INTO iam_rate_limit_override (user_id, module, kind, rate, burst)
-                     VALUES (?, ?, ?, ?, ?)
-                     ON DUPLICATE KEY UPDATE rate = VALUES(rate), burst = VALUES(burst)",
+                     SELECT id, ?, ?, ?, ? FROM iam_user
+                      WHERE id = ? AND deleted_at IS NULL
+                      LOCK IN SHARE MODE
+                     ON DUPLICATE KEY UPDATE rate = ?, burst = ?",
                 )
-                .bind(&r.user_id)
                 .bind(&r.module)
                 .bind(r.kind)
                 .bind(limit.rate)
                 .bind(limit.burst)
+                .bind(&r.user_id)
+                .bind(limit.rate)
+                .bind(limit.burst)
                 .execute(&self.pool)
                 .await
+                .map_err(db)?;
+
+                if done.rows_affected() == 0 {
+                    live_user(&self.pool, &r.user_id).await?;
+                }
+                done
             }
             // ABSENT DELETES, restoring the deployment's configured default for
             // this bucket. A stored zero would not: that is a denial.
+            //
+            // THE CHECK STAYS A SEPARATE STATEMENT ON THIS ARM, AND THE RESIDUAL
+            // RACE IS ARGUED HARMLESS RATHER THAN CLOSED. What the window lets
+            // through is a DELETE of an override belonging to a person being
+            // soft-deleted in the same instant — a row nothing will read again,
+            // removed. There is no state an operator could be misled by, which
+            // is the harm every other arm of this change is about. That is the
+            // whole argument, and it is enough on its own.
+            //
+            // TWO ARGUMENTS THAT WOULD ALSO FIT HERE ARE FALSE, AND ARE NAMED SO
+            // THAT NOBODY REACHES FOR THEM. Joining the predicate into the
+            // DELETE does NOT newly make a soft-deleted person's override
+            // unclearable: the unconditional `live_user` above already answers
+            // NOT_FOUND for exactly that person, so the cost is paid whichever
+            // shape this arm takes. Nor is closing it expensive — in the race
+            // window a joined predicate would match nothing, giving `rows: 0`
+            // with status OK, and `SetRateLimitOverrideResponse` is empty, so no
+            // caller could observe the difference. This arm is left as it was
+            // because it has no defect to fix, not because fixing it would cost
+            // anything.
+            //
+            // AND IT IS NOT `RemoveTeamMember`'S ARGUMENT. That handler carries
+            // NO liveness check at all, and its own comment names this arm as
+            // "the same shape as this handler, answered the other way". Citing
+            // it here would make two different decisions look like one.
             None => {
+                live_user(&self.pool, &r.user_id).await?;
                 sqlx::query(
                     "DELETE FROM iam_rate_limit_override
                       WHERE user_id = ? AND module = ? AND kind = ?",
@@ -1322,9 +1465,9 @@ impl IamDbService for IamDb {
                 .bind(r.kind)
                 .execute(&self.pool)
                 .await
+                .map_err(db)?
             }
-        }
-        .map_err(db)?;
+        };
 
         call.finish(Outcome {
             status: "OK",
@@ -1530,6 +1673,29 @@ impl IamDbService for IamDb {
                 // retryable status for a request that can never succeed. The
                 // check is `SetRateLimitOverride`'s `live_user`, applied to the
                 // team.
+                //
+                // AND IT STILL RACES THE UPSERT BELOW, WHICH BEING INSIDE THE
+                // TRANSACTION DOES NOT FIX. Ledger 695 moved five handlers'
+                // predicates into their write statements and left this one, on
+                // the belief that a check and a write sharing a transaction
+                // cannot come apart. Measured false: a transaction buys
+                // ATOMICITY, not a read that sees a concurrent writer.
+                // `live_team` is a plain non-locking SELECT here as everywhere,
+                // this handler runs at READ COMMITTED by its own statement
+                // above, and there the check reported a team live while the
+                // deleter's soft delete committed during the upsert's wait on
+                // the foreign key's shared lock. The override landed, and
+                // `read_inherited_setting` returned it as in force.
+                //
+                // NOT CLOSED HERE, AND THE REASON IS REACH RATHER THAN COST.
+                // `iam_team.deleted_at` has no writer anywhere — no RPC, no test
+                // helper — so nothing can reach this today, where the five had a
+                // helper standing in for the `DeleteUser` RPC that will make
+                // theirs reachable. The fix when it is wanted is the shape the
+                // five took: `deleted_at IS NULL` inside this INSERT's own
+                // SELECT under `LOCK IN SHARE MODE`, with `live_team` kept only
+                // to render a zero match as NOT_FOUND. Migration 11 carries the
+                // same correction.
                 live_team(&mut *tx, team_id_of(&r)).await?;
                 sqlx::query(
                     "INSERT INTO iam_team_setting_override (name, team_id, value) VALUES (?, ?, ?)
