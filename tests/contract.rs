@@ -1418,11 +1418,11 @@ async fn administrative_writes_refuse_a_person_who_is_not_live() {
 
 #[tokio::test]
 async fn promoting_an_unknown_user_is_not_found_but_re_asserting_a_flag_is_not() {
-    // TWO REASONS FOR ZERO AFFECTED ROWS, and they are not the same answer.
-    // MariaDB reports CHANGED rows rather than matched ones, so re-asserting a
-    // flag the user already has affects nothing — and reading that as NOT_FOUND
-    // would break the idempotence this RPC gets from assigning rather than
-    // toggling. A mistyped id must still be refused.
+    // `sqlx-mysql` reports MATCHED rows, not CHANGED ones, so re-asserting a
+    // flag the user already has still MATCHES that row and affects one, never
+    // zero — reading a match as NOT_FOUND would break the idempotence this RPC
+    // gets from assigning rather than toggling. A mistyped id, which matches
+    // nothing, must still be refused.
     let svc = fresh("iam_db_test_admin_unknown").await;
     let (user_id, _cred) = seed(&svc, &[56u8; 32], &[56u8; 32]).await;
 

@@ -417,7 +417,10 @@ fn team_setting_override() -> Migration {
         // for the same reason: two ways to say nothing is one way too many.
         //
         // The composite primary key carries the idempotence, so setting an
-        // override twice is an upsert onto one row and nothing checks first.
+        // override twice is an upsert onto one row rather than a second row.
+        // SetInheritedSetting's team arm does check the team is live before this
+        // write, but that check and this upsert run inside the same transaction
+        // (`&mut *tx`), so it is not a race the way AddTeamMember's is.
         //
         // ON DELETE CASCADE, AND IT COVERS HARD DELETION ONLY. An override
         // outliving a team whose row is gone would be an entry in the answer
