@@ -1722,9 +1722,9 @@ async fn a_soft_delete_landing_mid_call_still_refuses_a_rate_limit_override() {
     // THE SET ARM ONLY. `SetRateLimitOverride`'s CLEAR arm is deliberately not
     // tested here and deliberately still checks-then-writes: the write its
     // window lets through DELETES an override belonging to a person on their way
-    // out, which misleads nobody, and joining the predicate in would make a
-    // soft-deleted person's override unclearable. `RemoveTeamMember`'s handler
-    // argues the same for the same reason.
+    // out, so there is no state an operator could be misled by. That is the
+    // whole reason. Closing that arm would cost nothing either — the handler's
+    // comment names both of the arguments that would wrongly say otherwise.
     let svc = fresh("iam_db_test_race_rate_limit").await;
     let user = enrolee(&svc, 86, b"encrypted-limited").await;
 

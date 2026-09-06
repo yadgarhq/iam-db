@@ -544,16 +544,34 @@ impl IamDbService for IamDb {
 
         // Zero MATCHED rows is no live person, and `live_user` is here only to
         // say so as NOT_FOUND. `SetPassword` carries the full argument.
+        //
+        // THE BRANCH FALLS THROUGH IF THE RE-READ DISAGREES, AND THAT IS NEW
+        // WITH LEDGER 695 RATHER THAN INHERITED. Before this change a zero row
+        // count was impossible here; now `live_user` returning Ok after a zero
+        // match sends this handler on to report OK with a `credential_id` for a
+        // row it never inserted. Reaching it needs `deleted_at` to go set and
+        // then back to NULL between two statements, and nothing in this estate
+        // un-deletes a person — that column has no writer outside a test helper
+        // that only ever sets it. `SetUserAdmin` has carried the identical
+        // branch since it was written, and its exposure is milder only because
+        // its response carries nothing to fabricate. THE HONEST FIX is to make a
+        // zero-row write terminal whatever the re-read says. That is a change to
+        // these three handlers AND to `SetUserAdmin`, so it belongs with the
+        // argument for changing `SetUserAdmin` rather than smuggled in beside a
+        // race fix. `CreateEnrolment` and `AddTeamMember` carry the same branch
+        // and point here.
         if done.rows_affected() == 0 {
             live_user(&self.pool, &r.user_id).await?;
         }
 
         call.finish(Outcome {
             status: "OK",
-            // STILL A LITERAL, and still honest: this statement inserts exactly
-            // one row or none, and the none case has already returned above.
-            // Only `SetPassword`'s upsert can report a number the constant does
-            // not predict.
+            // STILL A LITERAL, AND THE REASON IS NARROWER THAN "THE NONE CASE
+            // ALREADY RETURNED". This statement inserts exactly one row or none;
+            // none returns NOT_FOUND unless the re-read above disagrees, which
+            // is the fall-through that branch describes and which nothing can
+            // currently cause. Only `SetPassword`'s upsert can report a number a
+            // constant cannot predict.
             rows: 1,
             ..Default::default()
         });
@@ -755,8 +773,9 @@ impl IamDbService for IamDb {
             // whose assignment CHANGES a value reports 2 — `SetPassword` and
             // `SetRateLimitOverride` both do, measured — and this one assigns a
             // primary-key column to itself on purpose, so it never changes
-            // anything. Zero is the remaining case and has already returned
-            // NOT_FOUND above.
+            // anything. Zero is the remaining case, and it returns NOT_FOUND
+            // above unless BOTH re-reads disagree — `CreateCredential` says why
+            // nothing can make them, and what closing that properly needs.
             //
             // WHAT IT BUYS IS THAT THE NUMBER FOLLOWS THE STATEMENT. If the
             // statement changes, or the driver's capability set does, the record
@@ -948,8 +967,11 @@ impl IamDbService for IamDb {
 
         call.finish(Outcome {
             status: "OK",
-            // A LITERAL FOR THE SAME REASON `CreateCredential`'s is: one row or
-            // none, and none has already returned.
+            // A LITERAL FOR THE SAME REASON `CreateCredential`'s is, and with
+            // the same narrowing: one row or none, and none returns NOT_FOUND
+            // unless the re-read disagrees. That handler carries the argument,
+            // including what a fabricated `enrolment_id` would cost if it could
+            // happen.
             rows: 1,
             ..Default::default()
         });
@@ -1413,15 +1435,25 @@ impl IamDbService for IamDb {
             // through is a DELETE of an override belonging to a person being
             // soft-deleted in the same instant — a row nothing will read again,
             // removed. There is no state an operator could be misled by, which
-            // is the harm every other arm of this change is about.
+            // is the harm every other arm of this change is about. That is the
+            // whole argument, and it is enough on its own.
             //
-            // AND CLOSING IT WOULD COST SOMETHING REAL. Joining the predicate
-            // into the DELETE makes a soft-deleted person's override
-            // unclearable, which is `RemoveTeamMember`'s argument verbatim: a
-            // guard that refuses the one call able to clean up after a deletion
-            // is worse than the gap it closes. The unconditional `live_user`
-            // that answers NOT_FOUND for an unknown person is this arm's
-            // existing decision and is left as it was.
+            // TWO ARGUMENTS THAT WOULD ALSO FIT HERE ARE FALSE, AND ARE NAMED SO
+            // THAT NOBODY REACHES FOR THEM. Joining the predicate into the
+            // DELETE does NOT newly make a soft-deleted person's override
+            // unclearable: the unconditional `live_user` above already answers
+            // NOT_FOUND for exactly that person, so the cost is paid whichever
+            // shape this arm takes. Nor is closing it expensive — in the race
+            // window a joined predicate would match nothing, giving `rows: 0`
+            // with status OK, and `SetRateLimitOverrideResponse` is empty, so no
+            // caller could observe the difference. This arm is left as it was
+            // because it has no defect to fix, not because fixing it would cost
+            // anything.
+            //
+            // AND IT IS NOT `RemoveTeamMember`'S ARGUMENT. That handler carries
+            // NO liveness check at all, and its own comment names this arm as
+            // "the same shape as this handler, answered the other way". Citing
+            // it here would make two different decisions look like one.
             None => {
                 live_user(&self.pool, &r.user_id).await?;
                 sqlx::query(
@@ -1641,6 +1673,29 @@ impl IamDbService for IamDb {
                 // retryable status for a request that can never succeed. The
                 // check is `SetRateLimitOverride`'s `live_user`, applied to the
                 // team.
+                //
+                // AND IT STILL RACES THE UPSERT BELOW, WHICH BEING INSIDE THE
+                // TRANSACTION DOES NOT FIX. Ledger 695 moved five handlers'
+                // predicates into their write statements and left this one, on
+                // the belief that a check and a write sharing a transaction
+                // cannot come apart. Measured false: a transaction buys
+                // ATOMICITY, not a read that sees a concurrent writer.
+                // `live_team` is a plain non-locking SELECT here as everywhere,
+                // this handler runs at READ COMMITTED by its own statement
+                // above, and there the check reported a team live while the
+                // deleter's soft delete committed during the upsert's wait on
+                // the foreign key's shared lock. The override landed, and
+                // `read_inherited_setting` returned it as in force.
+                //
+                // NOT CLOSED HERE, AND THE REASON IS REACH RATHER THAN COST.
+                // `iam_team.deleted_at` has no writer anywhere — no RPC, no test
+                // helper — so nothing can reach this today, where the five had a
+                // helper standing in for the `DeleteUser` RPC that will make
+                // theirs reachable. The fix when it is wanted is the shape the
+                // five took: `deleted_at IS NULL` inside this INSERT's own
+                // SELECT under `LOCK IN SHARE MODE`, with `live_team` kept only
+                // to render a zero match as NOT_FOUND. Migration 11 carries the
+                // same correction.
                 live_team(&mut *tx, team_id_of(&r)).await?;
                 sqlx::query(
                     "INSERT INTO iam_team_setting_override (name, team_id, value) VALUES (?, ?, ?)
