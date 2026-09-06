@@ -323,8 +323,14 @@ fn rate_limit_override() -> Migration {
         name: "create_rate_limit_override".into(),
         // The composite primary key carries the idempotence, the same shape
         // iam_team_member uses: setting one override twice is an upsert onto one
-        // row rather than a second row, so nothing checks first and there is no
-        // race between the check and the write.
+        // row rather than a second row, so no SELECT is needed to tell a first
+        // grant from a repeat before the write lands.
+        //
+        // THAT idempotence is not the same claim as "no race here". Both this
+        // table's own writer and iam_team_member's check the person is live
+        // before this write runs, and that check is a separate statement
+        // outside the upsert — see service.rs's comment on AddTeamMember for
+        // why the gap it leaves is latent rather than closed.
         //
         // CLEARING AN OVERRIDE DELETES THE ROW. An absent row means "the
         // deployment's configured default governs this bucket"; a stored rate of
@@ -411,7 +417,10 @@ fn team_setting_override() -> Migration {
         // for the same reason: two ways to say nothing is one way too many.
         //
         // The composite primary key carries the idempotence, so setting an
-        // override twice is an upsert onto one row and nothing checks first.
+        // override twice is an upsert onto one row rather than a second row.
+        // SetInheritedSetting's team arm does check the team is live before this
+        // write, but that check and this upsert run inside the same transaction
+        // (`&mut *tx`), so it is not a race the way AddTeamMember's is.
         //
         // ON DELETE CASCADE, AND IT COVERS HARD DELETION ONLY. An override
         // outliving a team whose row is gone would be an entry in the answer

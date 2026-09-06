@@ -596,8 +596,25 @@ impl IamDbService for IamDb {
         live_team(&self.pool, &r.team_id).await?;
         live_user(&self.pool, &r.user_id).await?;
 
-        // Idempotent (D9) by the composite primary key rather than by checking
-        // first, which would be a race between the check and the insert.
+        // Idempotent (D9) by the composite primary key: two concurrent inserts
+        // of the same (team_id, user_id) cannot create two rows, only one write
+        // and one no-op UPDATE.
+        //
+        // THE LIVENESS CHECKS ABOVE STILL RACE THIS INSERT. `live_team` and
+        // `live_user` run outside a transaction, so a person OR a team
+        // soft-deleted between the check and this INSERT still gets a
+        // membership row — soft-delete does not cascade, only `ON DELETE
+        // CASCADE` does, and nothing re-checks liveness at write time. LATENT
+        // rather than live on both sides, and unevenly so: nothing in
+        // production sets `iam_user.deleted_at` today (there is no `DeleteUser`
+        // RPC; the only writer anywhere is a test helper whose own comment says
+        // it exists to reach a state no RPC creates), and `iam_team.deleted_at`
+        // has no writer at all, test included — no code path can reach it yet.
+        // The user side BECOMES a live defect the day a `DeleteUser` RPC lands,
+        // the same arrival that test helper is standing in for now.
+        // `SetRateLimitOverride` carries the identical gap on the user side —
+        // it calls `live_user` outside any transaction before its own upsert —
+        // so this is existing practice rather than a hole opened here.
         let done = sqlx::query(
             "INSERT INTO iam_team_member (team_id, user_id, added_by)
              VALUES (?, ?, 'system')
@@ -1094,11 +1111,15 @@ impl IamDbService for IamDb {
         // leaves an operator believing an admin exists, or believing one was
         // demoted while they still hold the flag.
         //
-        // DISAMBIGUATED RATHER THAN INFERRED FROM THE ROW COUNT, because the two
-        // reasons for zero are not the same answer. MariaDB reports CHANGED rows,
-        // not matched ones, so re-asserting a flag a user already has affects
-        // zero rows — and treating that as NOT_FOUND would break the idempotence
-        // this handler gets for free from assigning rather than toggling.
+        // DISAMBIGUATED RATHER THAN INFERRED FROM THE ROW COUNT, because a
+        // written-but-unconfirmed grant is worse than an explicit failure.
+        // `sqlx-mysql` reports MATCHED rows, not CHANGED ones, so re-asserting a
+        // flag a user already has still MATCHES that row and reports one, never
+        // zero — zero here can only mean the WHERE clause found no live row for
+        // this id. `live_user` below re-reads to turn that zero into NOT_FOUND
+        // rather than a silent OK, and it answers NOT_FOUND whether the id is
+        // unknown or the person is soft-deleted: this branch does not need to
+        // tell the two apart, only to refuse reporting success for either.
         if done.rows_affected() == 0 {
             live_user(&self.pool, &r.user_id).await?;
         }
