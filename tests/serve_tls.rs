@@ -250,6 +250,12 @@ async fn serve(tls: Option<&ServerTls>) -> u16 {
     port
 }
 
+/// How many ports to try before giving up on finding one free everywhere. The
+/// count is NAMED rather than inlined so the panic below can state it; the
+/// number is unchanged, because lowering it is a behaviour change with no
+/// measurement behind it.
+const BIND_ATTEMPTS: usize = 50;
+
 /// One ephemeral port, bound on EVERY address the name resolves to.
 ///
 /// **THE KERNEL PICKS THE PORT FOR ONE ADDRESS AND PROMISES NOTHING ABOUT THE
@@ -264,11 +270,20 @@ async fn serve(tls: Option<&ServerTls>) -> u16 {
 /// acquisition is dropped and retried with a fresh port. Retrying is honest
 /// here: the failure is another process holding a number, which the next number
 /// does not have.
+///
+/// **RETRYING IS ONLY HONEST FOR A PORT SOMEBODY ELSE HOLDS.** Every other bind
+/// error is permanent, so retrying one spends fifty ports to learn nothing and
+/// then blames port exhaustion for it. The case that makes this concrete: on a
+/// host with IPv6 disabled where `localhost` still resolves `::1`, every bind on
+/// `::1` returns `EADDRNOTAVAIL`. So `AddrInUse` is retried and every other
+/// error names the address it happened on — the form `yadgar-dial`'s
+/// `tests/common/mod.rs` already carries, which this rig cited as its precedent
+/// and then did not adopt (ledger 708).
 async fn bind_one_port_on_every_address(addrs: &[SocketAddr]) -> (u16, Vec<TcpListener>) {
-    for _ in 0..50 {
+    for _ in 0..BIND_ATTEMPTS {
         let first = TcpListener::bind(addrs[0])
             .await
-            .expect("an ephemeral port on the first address");
+            .unwrap_or_else(|e| panic!("no free port on {}: {e}", addrs[0].ip()));
         let port = first.local_addr().unwrap().port();
 
         let mut listeners = vec![first];
@@ -277,7 +292,8 @@ async fn bind_one_port_on_every_address(addrs: &[SocketAddr]) -> (u16, Vec<TcpLi
                 Ok(listener) => listeners.push(listener),
                 // Dropping `listeners` releases the port on every address it was
                 // taken on, so the next attempt starts from nothing held.
-                Err(_) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => break,
+                Err(e) => panic!("binding {} on port {port}: {e}", addr.ip()),
             }
         }
         if listeners.len() == addrs.len() {
@@ -285,9 +301,41 @@ async fn bind_one_port_on_every_address(addrs: &[SocketAddr]) -> (u16, Vec<TcpLi
         }
     }
     panic!(
-        "no ephemeral port was free on all {} addresses",
+        "no ephemeral port was free on all {} addresses in {BIND_ATTEMPTS} attempts",
         addrs.len()
     );
+}
+
+/// A PERMANENT bind failure on a LATER address names that address, rather than
+/// being spent as one of [`BIND_ATTEMPTS`] retries.
+///
+/// The failure is a real one rather than a mocked one: `192.0.2.0/24` is
+/// TEST-NET-1, reserved for documentation and assigned to no interface, so
+/// binding it returns `EADDRNOTAVAIL`. Against the `Err(_) => break` this
+/// replaces, the case panicked with "no ephemeral port was free on all 2
+/// addresses" — port exhaustion, which is the wrong diagnosis and the whole of
+/// ledger 708.
+#[tokio::test]
+#[should_panic(expected = "binding 192.0.2.1")]
+async fn a_permanent_failure_on_a_later_address_is_reported_not_retried() {
+    let addrs = [
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+        SocketAddr::from(([192, 0, 2, 1], 0)),
+    ];
+    bind_one_port_on_every_address(&addrs).await;
+}
+
+/// The same property on the FIRST address, which is a SEPARATE path through the
+/// same function and the likelier one to meet a disabled address family:
+/// `localhost` resolves `::1` AHEAD of `127.0.0.1` on this machine, so a host
+/// with IPv6 off fails on `addrs[0]` before the loop is ever reached. That bind
+/// used to carry `.expect("an ephemeral port on the first address")`, which
+/// named no address and reported the wrong cause just as the loop did.
+#[tokio::test]
+#[should_panic(expected = "no free port on 192.0.2.1")]
+async fn a_permanent_failure_on_the_first_address_is_reported_not_retried() {
+    let addrs = [SocketAddr::from(([192, 0, 2, 1], 0))];
+    bind_one_port_on_every_address(&addrs).await;
 }
 
 fn spawn(listener: TcpListener, tls: Option<&ServerTls>) {
