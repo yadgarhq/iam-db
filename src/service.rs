@@ -596,8 +596,21 @@ impl IamDbService for IamDb {
         live_team(&self.pool, &r.team_id).await?;
         live_user(&self.pool, &r.user_id).await?;
 
-        // Idempotent (D9) by the composite primary key rather than by checking
-        // first, which would be a race between the check and the insert.
+        // Idempotent (D9) by the composite primary key: two concurrent inserts
+        // of the same (team_id, user_id) cannot create two rows, only one write
+        // and one no-op UPDATE.
+        //
+        // THE LIVENESS CHECKS ABOVE STILL RACE THIS INSERT. `live_team` and
+        // `live_user` run outside a transaction, so a person soft-deleted
+        // between the check and this INSERT still gets a membership row —
+        // soft-delete does not cascade, only `ON DELETE CASCADE` does, and
+        // nothing re-checks liveness at write time. LATENT rather than live:
+        // nothing in production sets `iam_user.deleted_at` today (there is no
+        // `DeleteUser` RPC; the only writer is a test helper whose own comment
+        // says it exists to reach a state no RPC creates). `SetRateLimitOverride`
+        // carries the identical gap — it calls `live_user` outside any
+        // transaction before its own upsert — so this is existing practice
+        // rather than a hole opened here.
         let done = sqlx::query(
             "INSERT INTO iam_team_member (team_id, user_id, added_by)
              VALUES (?, ?, 'system')
@@ -1095,10 +1108,12 @@ impl IamDbService for IamDb {
         // demoted while they still hold the flag.
         //
         // DISAMBIGUATED RATHER THAN INFERRED FROM THE ROW COUNT, because the two
-        // reasons for zero are not the same answer. MariaDB reports CHANGED rows,
-        // not matched ones, so re-asserting a flag a user already has affects
-        // zero rows — and treating that as NOT_FOUND would break the idempotence
-        // this handler gets for free from assigning rather than toggling.
+        // reasons for zero are not the same answer. `sqlx-mysql` reports MATCHED
+        // rows, not CHANGED ones, so re-asserting a flag a user already has still
+        // MATCHES that row and reports one, never zero. Zero here can only mean
+        // the WHERE clause found no live row for this id — either the id does
+        // not exist, or the person is soft-deleted — and `live_user` below tells
+        // the two apart and answers NOT_FOUND only for the first.
         if done.rows_affected() == 0 {
             live_user(&self.pool, &r.user_id).await?;
         }
