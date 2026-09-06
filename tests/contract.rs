@@ -1354,14 +1354,17 @@ async fn administrative_writes_refuse_a_person_who_is_not_live() {
     // handed back with an id and resolves for nobody, and a team granted to one
     // is a membership `ResolveCredential`'s `deleted_at IS NULL` never returns.
     //
-    // SetPassword ARRIVED LATER STILL, and it is the LAST of the class rather
-    // than one more of it: the sweep that added CreateCredential and
-    // AddTeamMember missed a third, and the writes that GRANT are now
-    // exhausted. The one write on this boundary that still takes a `user_id`
-    // and is not here is `RemoveTeamMember`, which REVOKES rather than grants —
-    // a liveness guard there would refuse the retried cleanup a future
-    // team deletion strands, and its handler carries the whole argument.
-    // SetPassword was missed because it HAS NO PRODUCTION CALLER —
+    // SetPassword ARRIVED LATER STILL, and it CLOSES this test rather than
+    // merely extending it: the sweep that added CreateCredential and
+    // AddTeamMember missed a third. Every write on this boundary that takes a
+    // `user_id` is now guarded except `RemoveTeamMember`, and that one is out
+    // for a reason its own handler argues at length — NOT because it revokes.
+    // `SetUserAdmin` is here in BOTH directions and `SetRateLimitOverride`'s
+    // absent-limit arm is a guarded DELETE, so revoking earns no exemption on
+    // this boundary. The exemption is that `live_user` and `live_team` would
+    // each refuse a removal that must stay possible, while catching none of the
+    // mistake worth catching. SetPassword was missed because it HAS NO
+    // PRODUCTION CALLER —
     // password rotation is outside the first cut (D73) and `iam` exposes no
     // `SetPassword` — so nothing in the estate could demonstrate the hole. That
     // is a reason to guard it BEFORE rotation lands, not after: the day a caller
