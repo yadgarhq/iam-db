@@ -33,7 +33,10 @@
 //! that without a recorder — so the metric is proved by the value it would
 //! carry rather than by a second dev-dependency.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Barrier, OnceLock};
 
 use rcgen::{
     date_time_ymd, BasicConstraints, CertificateParams, CertifiedIssuer, DnType,
@@ -49,19 +52,86 @@ use yadgar_iam_db::serve::{self, ServerTls};
 /// would report an expiry ten years out.
 const LEAF_NOT_AFTER: i64 = 1_813_017_600; // 2027-06-15T00:00:00Z
 
+/// One reading of the clock per PROCESS, so two runs that the OS gave the same
+/// recycled pid do not name the same directories. It varies per run and never
+/// within one, which is what leaves [`unique_name`] with exactly one varying
+/// part.
+fn run_id() -> u128 {
+    static RUN: OnceLock<u128> = OnceLock::new();
+    *RUN.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    })
+}
+
+/// The name of one temporary directory, unique within this process by
+/// CONSTRUCTION.
+///
+/// **THE CLOCK IS NOT A UNIQUENESS SOURCE ACROSS THREADS, and this is measured
+/// on this tree rather than assumed** (ledger 710, and ledger 681 for the
+/// sibling in `tests/serve_tls.rs`). `Mount::new` and `configuration` each
+/// named their directory with `pid` plus a fresh nanosecond reading. Every
+/// test in this binary shares the pid and they run on threads, so two
+/// concurrent calls collided whenever both readings landed on the same
+/// nanosecond — and then one `Mount`'s `Drop` deleted a directory a sibling
+/// test was still reading. A clock is a timestamp, not a nonce.
+///
+/// The counter is the ONLY part that varies within a run, which is what makes
+/// the property assertable rather than merely likely.
+fn unique_name(prefix: &str) -> String {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "{prefix}-{}-{}-{}",
+        std::process::id(),
+        run_id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// THE CONCURRENT PROPERTY, which is the one that reproduces the defect
+/// (ledger 710, and ledger 681 for the sibling in `tests/serve_tls.rs`).
+/// Cross-thread readings of `SystemTime::now()` repeat constantly; same-thread
+/// ones do not, which is why only a threaded assertion can see it.
+#[test]
+fn concurrent_names_are_all_distinct() {
+    const THREADS: usize = 16;
+    const PER_THREAD: usize = 2000;
+
+    let start = Arc::new(Barrier::new(THREADS));
+    let handles: Vec<_> = (0..THREADS)
+        .map(|_| {
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                (0..PER_THREAD)
+                    .map(|_| unique_name("yadgar-iam-db-assembly"))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+
+    let all: Vec<String> = handles
+        .into_iter()
+        .flat_map(|h| h.join().unwrap())
+        .collect();
+    let distinct: HashSet<&String> = all.iter().collect();
+    assert_eq!(
+        distinct.len(),
+        THREADS * PER_THREAD,
+        "{} of {} names collided across {THREADS} threads",
+        THREADS * PER_THREAD - distinct.len(),
+        THREADS * PER_THREAD
+    );
+}
+
 /// A directory that deletes itself, standing in for the mount.
 struct Mount(PathBuf);
 
 impl Mount {
     fn new(files: &[(&str, String)]) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "yadgar-iam-db-assembly-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let path = std::env::temp_dir().join(unique_name("yadgar-iam-db-assembly"));
         std::fs::create_dir_all(&path).unwrap();
         for (name, contents) in files {
             std::fs::write(path.join(name), contents).unwrap();
@@ -160,14 +230,7 @@ fn watched(inputs: &rotate::Inputs) -> Vec<String> {
 /// ConfigMaps land in separate directories in the real deployment and nothing
 /// here should suggest otherwise.
 fn configuration(body: &str) -> Configuration {
-    let root = std::env::temp_dir().join(format!(
-        "yadgar-iam-db-assembly-config-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = std::env::temp_dir().join(unique_name("yadgar-iam-db-assembly-config"));
     std::fs::create_dir_all(root.join("shared")).unwrap();
     std::fs::write(root.join("shared").join("shared.yaml"), body).unwrap();
     Configuration::under(root)
