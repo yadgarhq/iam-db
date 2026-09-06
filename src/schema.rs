@@ -420,26 +420,30 @@ fn team_setting_override() -> Migration {
         //
         // The composite primary key carries the idempotence, so setting an
         // override twice is an upsert onto one row rather than a second row.
-        // SetInheritedSetting's team arm checks the team is live before this
-        // write, inside the same transaction (`&mut *tx`). AND THAT IS NOT WHAT
-        // CLOSES A LIVENESS RACE, WHICH IS THE CORRECTION THIS COMMENT EXISTS
-        // FOR: it used to say the shared transaction made this arm safe, and
-        // ledger 695's review measured the opposite. A transaction buys
+        // SetInheritedSetting's team arm now carries `deleted_at IS NULL` INSIDE
+        // this table's INSERT, under `LOCK IN SHARE MODE` — it is an
+        // `INSERT ... SELECT` from `iam_team` rather than an `INSERT ... VALUES`
+        // after a `live_team` call.
+        //
+        // A SHARED TRANSACTION IS NOT WHAT CLOSES A LIVENESS RACE, WHICH IS THE
+        // CORRECTION THIS COMMENT EXISTS FOR. It said first that the shared
+        // transaction made this arm safe; ledger 695's review measured the
+        // opposite, and ledger 704 then fixed the arm. A transaction buys
         // ATOMICITY. It does not make a read see a concurrent writer.
         //
         // `live_team` IS A PLAIN NON-LOCKING SELECT WHEREVER IT RUNS, inside a
-        // transaction or not. This handler sets READ COMMITTED explicitly, and
-        // at that level the check reported a team live, the upsert below then
-        // blocked on the foreign key's shared lock while the deleter committed,
-        // and the override landed for a team whose `deleted_at` was set — which
-        // the handler then reads back and returns as in force.
+        // transaction or not. This handler sets READ COMMITTED explicitly, and at
+        // that level the check reported a team live, the upsert then blocked on
+        // this table's foreign key while the deleter committed, and the override
+        // landed for a team whose `deleted_at` was set — which the handler read
+        // back and returned as in force. Measured red, then green, by
+        // `a_team_soft_delete_landing_mid_call_still_refuses_an_inherited_setting_override`.
         //
-        // SO THIS IS A SIXTH INSTANCE OF THE CLASS LEDGER 695 CLOSED IN FIVE
-        // HANDLERS, recorded rather than fixed because it is the least reachable
-        // of the six: `iam_team.deleted_at` has NO writer anywhere, test helpers
-        // included, so no code path reaches it yet. What it needs is what the
-        // five got — the predicate inside the write statement under `LOCK IN
-        // SHARE MODE` — or a locking read. Not a transaction around both.
+        // THE REACHABILITY ARGUMENT THAT DEFERRED THIS WAS FALSE. It said
+        // `iam_team.deleted_at` has NO writer anywhere, test helpers included.
+        // `Withdraw::Team` in the contract test is one, and the AddTeamMember
+        // race test already used it. What is true is that no RPC deletes a team
+        // yet — the same latency the other five were fixed under.
         //
         // ON DELETE CASCADE, AND IT COVERS HARD DELETION ONLY. An override
         // outliving a team whose row is gone would be an entry in the answer

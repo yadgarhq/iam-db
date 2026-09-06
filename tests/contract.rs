@@ -1525,9 +1525,12 @@ async fn while_a_soft_delete_lands<T>(
     .expect("the write must not sit on the row lock until innodb_lock_wait_timeout")
 }
 
-/// The five writes below share one argument, stated once here.
+/// The six writes below share one argument, stated once here. Five were fixed by
+/// ledger 695 and the sixth — `SetInheritedSetting`'s team arm — by ledger 704,
+/// which is the same defect one layer further in: that one guarded on the pool
+/// and wrote inside a TRANSACTION, and the transaction was mistaken for a guard.
 ///
-/// **THE RACE THE FIVE GUARDED WRITES ALL CARRIED**, and the reason a guard on
+/// **THE RACE THE SIX GUARDED WRITES ALL CARRIED**, and the reason a guard on
 /// the pool followed by a write on the pool is not a guard at all. Between
 /// `live_user`'s SELECT and the INSERT that followed it there was a whole round
 /// trip, and a person soft-deleted inside that window got the write anyway — a
@@ -1538,16 +1541,19 @@ async fn while_a_soft_delete_lands<T>(
 /// **LATENT WHEN THESE WERE WRITTEN.** Nothing in production sets
 /// `iam_user.deleted_at` — there is no `DeleteUser` RPC, and the only writer
 /// anywhere is `soft_delete` above, whose own comment says it exists to reach a
-/// state no RPC creates — and `iam_team.deleted_at` has no writer at all. So
-/// these tests drive the delete themselves, and it is the arrival of that RPC
-/// rather than any change here that makes the defect reachable.
+/// state no RPC creates. `iam_team.deleted_at` has no PRODUCTION writer either —
+/// team creation and deletion are both outside the first cut — and its only
+/// writer anywhere is `Withdraw::Team` in the helper above. So these tests drive
+/// the delete themselves, and it is the arrival of those RPCs rather than any
+/// change here that makes the defect reachable.
 ///
-/// **MUTATION THESE CATCH:** moving any of the five predicates back out of its
+/// **MUTATION THESE CATCH:** moving any of the six predicates back out of its
 /// write statement into a preceding `live_user` / `live_team` call. Every other
 /// test in this file stays green when you do, including the sequential liveness
-/// test above — which is how all five survived three sweeps.
+/// test above — which is how all five survived three sweeps, and how the sixth
+/// survived the sweep that fixed the five.
 ///
-/// **ONE TEST PER HANDLER, DELIBERATELY.** A single test asserting all five
+/// **ONE TEST PER HANDLER, DELIBERATELY.** A single test asserting all six
 /// stops at the first failure, so a regression in the fourth would be reported
 /// as a defect in the first. These fail independently and name what broke.
 #[tokio::test]
@@ -1684,10 +1690,11 @@ async fn a_soft_delete_landing_mid_call_still_refuses_a_membership() {
 
 #[tokio::test]
 async fn a_team_soft_delete_landing_mid_call_still_refuses_a_membership() {
-    // AddTeamMember's TEAM predicate, and the only place on this boundary where
-    // a team's liveness races a write. `iam_team.deleted_at` has no writer at
-    // all today — not even a test helper — so this is the one arm of the class
-    // that no code path can reach until a team-deleting RPC exists.
+    // AddTeamMember's TEAM predicate, one of the two places on this boundary
+    // where a team's liveness races a write — `SetInheritedSetting`'s team arm
+    // is the other, tested below. `Withdraw::Team` is the only writer of
+    // `iam_team.deleted_at` anywhere, so both are latent until a team-deleting
+    // RPC exists, and both are fixed anyway.
     let svc = fresh("iam_db_test_race_member_team").await;
     seed_team(&svc, "yadgar:team:racedoomed").await;
     let user = enrolee(&svc, 85, b"encrypted-joiner").await;
@@ -1755,6 +1762,59 @@ async fn a_soft_delete_landing_mid_call_still_refuses_a_rate_limit_override() {
         .await,
         0,
         "the refusal must not have stored a limit either"
+    );
+}
+
+#[tokio::test]
+async fn a_team_soft_delete_landing_mid_call_still_refuses_an_inherited_setting_override() {
+    // THE SIXTH INSTANCE OF THE CLASS (ledger 704), and the one ledger 695 left
+    // behind. `SetInheritedSetting`'s team arm called `live_team` and then wrote,
+    // and the tree argued the shared TRANSACTION made that safe. It does not: a
+    // transaction buys ATOMICITY, and `live_team` is a plain non-locking SELECT
+    // wherever it runs. The handler pins READ COMMITTED by its own `SET
+    // TRANSACTION` statement, so the check read a snapshot in which the team was
+    // live, the upsert then blocked on `fk_iam_team_setting_override_team`'s
+    // shared lock while the deleter committed, and the override landed for a team
+    // whose `deleted_at` was set — which `read_inherited_setting` handed back as
+    // in force.
+    //
+    // THE REACHABILITY ARGUMENT THE TREE MADE WAS ALSO STALE. Migration 11 and
+    // the handler both said `iam_team.deleted_at` has no writer anywhere, "test
+    // helpers included". `Withdraw::Team` above is one, and the membership test
+    // below already used it — the claim was self-contradictory before this test
+    // existed. What remains true is that no RPC deletes a team yet, which is the
+    // same latency the five siblings were fixed under.
+    //
+    // MUTATION THIS CATCHES: moving the predicate back out of the INSERT into a
+    // preceding `live_team` call. Measured red against the pre-fix statement —
+    // status OK, one override row for a soft-deleted team.
+    //
+    // THE CLEAR ARM IS DELIBERATELY NOT TESTED HERE and deliberately still checks
+    // nothing: a clear names a ROW TO REMOVE rather than a team to write to, and
+    // migration 11 leaves the override a soft-deleted team strands to be cleared
+    // by exactly that call.
+    let svc = fresh("iam_db_test_race_inherited_setting").await;
+    seed_team(&svc, "yadgar:team:racesetting").await;
+
+    let err = while_a_soft_delete_lands(
+        &svc,
+        Withdraw::Team,
+        "yadgar:team:racesetting",
+        svc.set_inherited_setting(Request::new(team_request("yadgar:team:racesetting"))),
+    )
+    .await
+    .expect_err("an override stored mid-delete is one an operator believes is in force");
+    assert_eq!(
+        err.code(),
+        tonic::Code::NotFound,
+        "NOT_FOUND rather than UNAVAILABLE: an `INSERT ... SELECT` without \
+         `LOCK IN SHARE MODE` raises ER_CHECKREAD (1020) at READ COMMITTED, which \
+         `db()` renders as a retryable status for a request that can never succeed"
+    );
+    assert_eq!(
+        overrides_for(&svc, "yadgar:team:racesetting").await,
+        0,
+        "the refusal must not have stored an override either"
     );
 }
 
@@ -2424,6 +2484,56 @@ async fn a_team_override_is_written_and_comes_back_in_the_answer() {
     // this override is inert — and it is stored and returned anyway.
     assert!(setting.org_locked);
     assert_eq!(setting.org_value, SettingValue::On as i32);
+}
+
+#[tokio::test]
+async fn re_stating_a_team_override_replaces_the_value_and_never_reports_not_found() {
+    // **THE ORDINARY PATH THE RACE TEST CANNOT SEE.** Ledger 704 moved the team
+    // predicate into the INSERT, and a zero match now means "no live team" and
+    // renders NOT_FOUND. So the one way that change breaks a request nobody was
+    // worried about is a LIVE team whose upsert reports zero — and that is a
+    // question about row counts rather than about liveness.
+    //
+    // `sqlx-mysql` hardcodes `Capabilities::FOUND_ROWS` (`connection/stream.rs`)
+    // with no `MySqlConnectOptions` knob to turn it off, so every statement here
+    // reports MATCHED rows rather than CHANGED ones: a fresh insert is 1, an
+    // `ON DUPLICATE KEY UPDATE` that CHANGES the value is 2, and one that changes
+    // nothing is still 1. Never 0 for a team that is there. Asserted through the
+    // handler in all three shapes rather than by reading the number back, because
+    // the number is the code's own output and the refusal is what a caller sees.
+    let svc = fresh("iam_db_test_reset_team").await;
+    seed_team(&svc, "yadgar:team:a").await;
+
+    // Fresh insert, identical repeat, then a CHANGED value — the three counts
+    // FOUND_ROWS tells apart, and the middle one is the case a naive
+    // `rows_affected() == 0` check would have refused.
+    for (n, value) in [
+        (1, SettingValue::Off),
+        (2, SettingValue::Off),
+        (3, SettingValue::On),
+    ] {
+        let setting = svc
+            .set_inherited_setting(Request::new(SetInheritedSettingRequest {
+                value: Some(value as i32),
+                ..team_request("yadgar:team:a")
+            }))
+            .await
+            .unwrap_or_else(|e| panic!("call {n} states an override for a LIVE team: {e:?}"))
+            .into_inner()
+            .setting
+            .expect("setting");
+        assert_eq!(
+            setting.team_override.get("yadgar:team:a"),
+            Some(&(value as i32)),
+            "call {n} must leave the value it stated in force"
+        );
+    }
+
+    assert_eq!(
+        overrides_for(&svc, "yadgar:team:a").await,
+        1,
+        "three calls upsert onto one row rather than accreting three"
+    );
 }
 
 #[tokio::test]

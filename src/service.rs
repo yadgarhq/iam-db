@@ -404,12 +404,14 @@ impl IamDbService for IamDb {
         // own expiry check ahead of `live_user` for the same reason.
         //
         // THE CHECK RIDES IN THE WRITE, and this handler is where the shape is
-        // argued for the four that follow it (ledger 695). A `live_user` on the
-        // pool followed by an INSERT on the pool is TWO statements with a round
-        // trip between them: a person soft-deleted inside that window passed the
-        // check and got the password row anyway. The predicate is now in the
-        // INSERT's own SELECT, so the row the liveness is read from IS the row
-        // the write is derived from, and there is no window between them.
+        // argued for the five that follow it (ledger 695, and ledger 704 for
+        // `SetInheritedSetting`'s team arm, which that sweep left behind). A
+        // `live_user` on the pool followed by an INSERT on the pool is TWO
+        // statements with a round trip between them: a person soft-deleted
+        // inside that window passed the check and got the password row anyway.
+        // The predicate is now in the INSERT's own SELECT, so the row the
+        // liveness is read from IS the row the write is derived from, and there
+        // is no window between them.
         //
         // `SetUserAdmin` HAS ALWAYS HAD THIS SHAPE — its UPDATE carries
         // `deleted_at IS NULL` in its own WHERE and its `live_user` runs only on
@@ -1576,6 +1578,15 @@ impl IamDbService for IamDb {
         // renders as UNAVAILABLE, turning a retry that should replay into a
         // spurious 503.
         //
+        // LEDGER 704 GAVE THIS STATEMENT A SECOND JOB, and it is the team arm's
+        // rather than the ledger's. The `INSERT ... SELECT` below re-reads the
+        // team's liveness under a shared lock, and only at READ COMMITTED does
+        // the `live_team` that names its zero see a delete that committed while
+        // that statement waited. At REPEATABLE READ both would answer from the
+        // pre-delete snapshot. So this line is now load-bearing for two
+        // independent reasons, and removing it breaks the newer one silently —
+        // OK with `rows: 0` for a team that is gone, rather than a 503.
+        //
         // `SET TRANSACTION` WITHOUT `SESSION` OR `GLOBAL` applies to the NEXT
         // transaction and then reverts, so a pooled connection carries nothing to
         // its next borrower. That is what forces `acquire()` then
@@ -1647,6 +1658,7 @@ impl IamDbService for IamDb {
                 .bind(r.locked.expect("validated present at organisation scope"))
                 .execute(&mut *tx)
                 .await
+                .map_err(db)?
             }
             // THE WITHDRAWAL (ADR-0524). It DELETES rather than storing
             // SETTING_VALUE_UNSPECIFIED, for the reason migration 11 gives:
@@ -1666,6 +1678,7 @@ impl IamDbService for IamDb {
                     .bind(team_id_of(&r))
                     .execute(&mut *tx)
                     .await
+                    .map_err(db)?
             }
             (SettingScope::Team, false) => {
                 // THE FOREIGN KEY IS NOT THE ERROR MESSAGE. Left to fire, an
@@ -1674,38 +1687,85 @@ impl IamDbService for IamDb {
                 // check is `SetRateLimitOverride`'s `live_user`, applied to the
                 // team.
                 //
-                // AND IT STILL RACES THE UPSERT BELOW, WHICH BEING INSIDE THE
-                // TRANSACTION DOES NOT FIX. Ledger 695 moved five handlers'
-                // predicates into their write statements and left this one, on
-                // the belief that a check and a write sharing a transaction
-                // cannot come apart. Measured false: a transaction buys
-                // ATOMICITY, not a read that sees a concurrent writer.
-                // `live_team` is a plain non-locking SELECT here as everywhere,
-                // this handler runs at READ COMMITTED by its own statement
-                // above, and there the check reported a team live while the
-                // deleter's soft delete committed during the upsert's wait on
-                // the foreign key's shared lock. The override landed, and
-                // `read_inherited_setting` returned it as in force.
+                // THE PREDICATE RIDES IN THE INSERT (ledger 704), AND A SHARED
+                // TRANSACTION IS NOT WHAT PUT IT THERE. Ledger 695 moved five
+                // handlers' predicates into their write statements and left this
+                // one, on the belief that a check and a write inside one
+                // transaction cannot come apart. Measured false: a transaction
+                // buys ATOMICITY, which is a different property from "the row I
+                // checked is still the row I am writing against". `live_team` is
+                // a plain non-locking SELECT wherever it runs, so the check read
+                // a snapshot in which the team was live, this upsert then blocked
+                // on `fk_iam_team_setting_override_team`'s shared lock while the
+                // deleter committed, and the override landed for a team whose
+                // `deleted_at` was set — which `read_inherited_setting` handed
+                // back as in force. Migration 11 carries the same correction.
                 //
-                // NOT CLOSED HERE, AND THE REASON IS REACH RATHER THAN COST.
-                // `iam_team.deleted_at` has no writer anywhere — no RPC, no test
-                // helper — so nothing can reach this today, where the five had a
-                // helper standing in for the `DeleteUser` RPC that will make
-                // theirs reachable. The fix when it is wanted is the shape the
-                // five took: `deleted_at IS NULL` inside this INSERT's own
-                // SELECT under `LOCK IN SHARE MODE`, with `live_team` kept only
-                // to render a zero match as NOT_FOUND. Migration 11 carries the
-                // same correction.
-                live_team(&mut *tx, team_id_of(&r)).await?;
-                sqlx::query(
-                    "INSERT INTO iam_team_setting_override (name, team_id, value) VALUES (?, ?, ?)
-                     ON DUPLICATE KEY UPDATE value = VALUES(value)",
+                // `LOCK IN SHARE MODE` IS NOT WHAT CLOSES THE RACE, AND SAYING
+                // OTHERWISE MISNAMES BOTH HALVES. What closes it is the predicate
+                // being IN the write: the row liveness is read from is the row
+                // written against, re-read after the deleter commits. The clause
+                // buys something narrower and still mandatory — a bare
+                // `INSERT ... SELECT` raises 1020 `ER_CHECKREAD` at READ
+                // COMMITTED and matches nothing at REPEATABLE READ, and `db()`
+                // renders the former as UNAVAILABLE, shipping a retryable status
+                // for a request that can never succeed.
+                //
+                // WHAT THE CLAUSE COSTS, SPLIT BY CASE RATHER THAN CALLED FREE.
+                // Wherever the team ROW EXISTS — live or soft-deleted — it costs
+                // nothing: InnoDB's foreign-key parent-existence check is itself
+                // a locking read and takes S on `iam_team` before the child row
+                // lock, so this only makes explicit a lock the engine was already
+                // taking. On an UNKNOWN team it is a genuinely new lock, because
+                // the old `live_team` refused before the INSERT ran and the
+                // foreign key never fired. It is small and it is measured: a
+                // shared lock on a MISSING primary key takes a supremum gap lock
+                // at REPEATABLE READ, and at the READ COMMITTED this handler pins
+                // it is 30ms. Unlike the five siblings, which run autocommit
+                // single statements, this one holds it to the end of a
+                // transaction that still has the claim INSERT and the read-back
+                // to do — so the hold is the transaction's rather than the
+                // statement's. Negligible, not absent.
+                //
+                // `VALUES(value)` DOES NOT SURVIVE THE REWRITE — it names a
+                // column of an `INSERT ... VALUES` row, which no longer exists —
+                // so the value is bound twice, `SetRateLimitOverride`'s shape.
+                // The transposition hazard that shape carries does not arise:
+                // there is one data column, and nothing to swap it with.
+                //
+                // THE ASSIGNMENT IS QUALIFIED because an unqualified column on
+                // the left of `ON DUPLICATE KEY UPDATE` inside an
+                // `INSERT ... SELECT` is ambiguous (1052) under sqlx's binary
+                // protocol, `AddTeamMember`'s reason.
+                let done = sqlx::query(
+                    "INSERT INTO iam_team_setting_override (name, team_id, value)
+                     SELECT ?, id, ? FROM iam_team
+                      WHERE id = ? AND deleted_at IS NULL
+                      LOCK IN SHARE MODE
+                     ON DUPLICATE KEY UPDATE iam_team_setting_override.value = ?",
                 )
                 .bind(&r.name)
+                .bind(r.value.expect("validated present unless clear is set"))
                 .bind(team_id_of(&r))
                 .bind(r.value.expect("validated present unless clear is set"))
                 .execute(&mut *tx)
                 .await
+                .map_err(db)?;
+
+                // `live_team` IS KEPT ONLY TO NAME THE ZERO, never to guard the
+                // write. A zero match says the SELECT found no live team, and the
+                // FOREIGN KEY left to fire would have said UNAVAILABLE for both an
+                // unknown team and a soft-deleted one.
+                //
+                // IT READS THE COMMITTED DELETE ONLY BECAUSE THIS HANDLER PINS
+                // READ COMMITTED by its own `SET TRANSACTION` statement above. At
+                // the engine's default REPEATABLE READ this re-read would return
+                // the same pre-delete snapshot the failed check did, and answer OK
+                // with `rows: 0` for a team that is gone.
+                if done.rows_affected() == 0 {
+                    live_team(&mut *tx, team_id_of(&r)).await?;
+                }
+                done
             }
             // `check_inherited_setting` refuses UNSPECIFIED and every number this
             // enum does not declare, so this arm is unreachable. It is a refusal
@@ -1718,8 +1778,7 @@ impl IamDbService for IamDb {
                 call.fail(label(&refusal));
                 return Err(refusal);
             }
-        }
-        .map_err(db)?;
+        };
 
         // THE CLAIM IS RECORDED LAST, AND THE INSERT IS THE SERIALISATION POINT.
         // A record lock on a real row, never a gap lock on an absent one — which
