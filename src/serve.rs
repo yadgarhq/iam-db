@@ -277,11 +277,13 @@ impl ServerTls {
     /// exists — so a bad path is a startup error naming a file rather than a
     /// handshake failure much later, and never a quiet downgrade.
     fn tls_config(&self) -> Result<ServerTlsConfig, ServerTlsError> {
+        // ADR-0523-WATCHED: ServerTls
         let cert =
             std::fs::read(&self.cert_file).map_err(|source| ServerTlsError::CertUnreadable {
                 path: self.cert_file.clone(),
                 source,
             })?;
+        // ADR-0523-WATCHED: ServerTls
         let key =
             std::fs::read(&self.key_file).map_err(|source| ServerTlsError::KeyUnreadable {
                 path: self.key_file.clone(),
