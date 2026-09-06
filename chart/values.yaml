@@ -195,3 +195,42 @@ autoscaling:
 # the database password and the engine CA when one is named — files this process
 # reads once and then keeps using for the life of the pod. ADR-0523's rule is
 # about provenance rather than payload.
+
+# HOW LONG THIS POD STAYS ROUTABLE AFTER DELETION BEGINS (ledger 690). Kubelet
+# runs this sleep BEFORE it sends SIGTERM, so it buys the EndpointSlice removal
+# time to reach whatever routes here. It is spent INSIDE
+# `terminationGracePeriodSeconds` below, never added to it. `0` renders no
+# `lifecycle` block at all. The reasoning, and why an `exec` of /bin/sleep is
+# not an option on a distroless image, is in `templates/deployment.yaml`.
+preStopSleepSeconds: 5
+
+# THE WHOLE BUDGET FOR A POD'S DEATH: the sleep above, then SIGTERM, then the
+# drain, then SIGKILL. 35 = 5 (sleep) + 25 (`yadgar_lifecycle::DRAIN_BUDGET`) +
+# 5 (the slack that constant's docstring reserves to log and exit). Lowering
+# this below 25 means lowering `DRAIN_BUDGET` with it, which is that crate's
+# rule and not this chart's. `0` renders nothing and returns the field to
+# kubelet's 30s default.
+terminationGracePeriodSeconds: 35
+
+# THE ROLL. `maxUnavailable: 0` is the guarantee and `maxSurge: 1` is what pays
+# for it. Both are written out because the inherited default is 25% of the LIVE
+# replica count: 0/1 at two replicas, which is what this already does, but 1/2
+# once KEDA scales to `autoscaling.maxReplicas` — a capacity dip nobody chose.
+# `rollingUpdate: {}` returns the field to that default.
+rollingUpdate:
+  maxUnavailable: 0
+  maxSurge: 1
+
+# SPREAD THE REPLICAS OVER NODES, BUT NEVER AT THE COST OF A ROLL (ledger 691).
+# `ScheduleAnyway` is load-bearing rather than timid: `maxSurge: 1` above
+# briefly puts three pods on the reference cluster's two schedulable nodes, and
+# `DoNotSchedule` at `maxSkew: 1` would leave the surge pod Pending and hang the
+# rollout with no error. The `labelSelector` is deliberately NOT here — the
+# template writes `app: <chart name>` itself, because a selector that matches
+# nothing is a field that fails silently for the life of the chart. Set
+# `enabled: false` to render no constraint at all.
+topologySpread:
+  enabled: true
+  maxSkew: 1
+  topologyKey: kubernetes.io/hostname
+  whenUnsatisfiable: ScheduleAnyway
