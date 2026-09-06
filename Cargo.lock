@@ -2709,7 +2709,7 @@ dependencies = [
 [[package]]
 name = "yadgar-lifecycle"
 version = "0.1.0"
-source = "git+https://github.com/yadgarhq/lifecycle.git?tag=v0.2.0#edfad2e1c85ef8e20af307ea99f0096593a820c0"
+source = "git+https://github.com/yadgarhq/lifecycle.git?tag=v0.2.3#aed24765436e372d44e8974d41a8f30cd480c5ef"
 dependencies = [
  "metrics",
  "rustls-pki-types",
