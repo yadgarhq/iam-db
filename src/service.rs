@@ -87,6 +87,26 @@ const MAX_PAGE_SIZE: i32 = 200;
 /// own; one carrying anything else still needs a table of its own.
 const OWNER_READS_OWN_RECORD: &str = "owner_reads_own_record";
 
+/// `CreateEnrolment` received a non-empty idempotency key, and discarded it.
+///
+/// **A TRANSITION DETECTOR, NOT A TRIPWIRE, AND NOT A DOUBLE-MINT DETECTOR.**
+/// `plans/create-enrolment-idempotency.md` §4.2's interim sensor, executed —
+/// see the module header and `create_enrolment`'s own comment for what this
+/// handler does with the key it is handed. This counter does not, and cannot,
+/// recognise a REPEATED key: that needs a ledger retaining prior keys, which is
+/// ledger 668's mechanism and 668's class, and is explicitly out of scope here.
+///
+/// **What it proves is narrower, and it is still the whole point.** Before the
+/// gateway's `/admin` route exists, nothing sends a key here and this reads
+/// zero. The day that route lands, the gateway forwards a key on EVERY
+/// `IssueEnrolment`, so this goes non-zero and STAYS non-zero, forever. **That
+/// one zero-to-nonzero transition is the entire signal.** A steady non-zero
+/// RATE after that day is the CORRECT and PERMANENT reading — never an
+/// incident, and never evidence this fixes the idempotency defect. It proves
+/// the clock started; it does not stop it.
+pub const ENROLMENT_IDEMPOTENCY_DISCARDED: &str =
+    "yadgar_iamdb_enrolment_idempotency_discarded_total";
+
 pub struct IamDb {
     pool: MySqlPool,
 }
@@ -914,6 +934,18 @@ impl IamDbService for IamDb {
         // INVALID_ARGUMENT. See the module header for why the ledger that closes
         // this cannot land in this repository alone.
         //
+        // THE SENSOR. See [`ENROLMENT_IDEMPOTENCY_DISCARDED`]'s doc comment for
+        // what firing does and does not prove — in short, it detects the estate
+        // ENTERING the exposed state, once, and never a double-mint.
+        if r.idempotency.as_ref().is_some_and(|k| !k.key.is_empty()) {
+            tracing::warn!(
+                user_id = %r.user_id,
+                "CreateEnrolment received a non-empty idempotency key, and this \
+                 handler discards it"
+            );
+            metrics::counter!(ENROLMENT_IDEMPOTENCY_DISCARDED).increment(1);
+        }
+
         // Explicit, because the alternative is worse than a rejection. The
         // column is NOT NULL, so FROM_UNIXTIME(NULL) makes the engine refuse
         // under STRICT_TRANS_TABLES — and `db()` renders every engine error as

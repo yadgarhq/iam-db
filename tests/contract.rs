@@ -1052,6 +1052,92 @@ async fn an_unknown_secret_is_not_found_rather_than_an_error() {
     );
 }
 
+#[test]
+fn a_non_empty_idempotency_key_on_create_enrolment_trips_the_sensor() {
+    // LEDGER 638/668's INTERIM SENSOR (`plans/create-enrolment-idempotency.md`
+    // §4.2), executed. `create_enrolment` DISCARDS `r.idempotency` — see the
+    // handler's own comment — and today nothing sends a key, so a counter
+    // proved only by that silence proves nothing. This test sends one.
+    //
+    // A SYNC TEST BUILDING ITS OWN current_thread RUNTIME, the same shape
+    // `gateway`'s `the_cache_counter_reports_a_miss_and_then_a_hit` uses: a
+    // LOCAL recorder rather than `metrics::install()`, because a global one is
+    // process-wide and this binary's tests run in parallel, which would race
+    // every other test that emits a metric.
+    let recorder = metrics_util::debugging::DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime");
+
+    metrics::with_local_recorder(&recorder, || {
+        rt.block_on(async {
+            let svc = fresh("iam_db_test_enrol_idempotency_sensor").await;
+            let user_id = enrolee(&svc, 60, b"c").await;
+
+            svc.create_enrolment(Request::new(CreateEnrolmentRequest {
+                user_id: user_id.clone(),
+                secret_hash: vec![60u8; 32],
+                expires_at: Some(at(3600)),
+                idempotency: Some(Idempotency {
+                    key: "k-enrol-sensor".into(),
+                }),
+                ..Default::default()
+            }))
+            .await
+            .expect(
+                "create enrolment must still succeed — the sensor observes, it does not refuse",
+            );
+        });
+    });
+
+    let emitted = snapshotter.snapshot().into_vec();
+    let fired = emitted.iter().any(|(key, _, _, value)| {
+        key.key().name() == yadgar_iam_db::service::ENROLMENT_IDEMPOTENCY_DISCARDED
+            && matches!(
+                value,
+                metrics_util::debugging::DebugValue::Counter(n) if *n >= 1
+            )
+    });
+    assert!(
+        fired,
+        "a non-empty idempotency key on CreateEnrolment must trip the sensor \
+         — a counter proved only by production silence is not proved"
+    );
+}
+
+#[test]
+fn an_empty_idempotency_key_on_create_enrolment_does_not_trip_the_sensor() {
+    // THE OTHER DIRECTION, so a counter that increments unconditionally cannot
+    // pass the test above. `enrol()` below sends no key, which is every caller
+    // of this RPC today (§7.0: nothing sends a key until `/admin` lands).
+    let recorder = metrics_util::debugging::DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime");
+
+    metrics::with_local_recorder(&recorder, || {
+        rt.block_on(async {
+            let svc = fresh("iam_db_test_enrol_idempotency_sensor_quiet").await;
+            let user_id = enrolee(&svc, 61, b"c").await;
+            enrol(&svc, &user_id, 61, 3600).await;
+        });
+    });
+
+    let emitted = snapshotter.snapshot().into_vec();
+    let fired = emitted.iter().any(|(key, _, _, _)| {
+        key.key().name() == yadgar_iam_db::service::ENROLMENT_IDEMPOTENCY_DISCARDED
+    });
+    assert!(
+        !fired,
+        "an empty (or absent) idempotency key must not trip the sensor — a \
+         one-directional counter that fires unconditionally proves nothing"
+    );
+}
+
 #[tokio::test]
 async fn a_soft_deleted_persons_enrolment_is_not_redeemable() {
     // MUTATION THIS CATCHES: dropping the JOIN's `u.deleted_at IS NULL`. An
