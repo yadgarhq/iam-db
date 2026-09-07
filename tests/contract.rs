@@ -1052,6 +1052,128 @@ async fn an_unknown_secret_is_not_found_rather_than_an_error() {
     );
 }
 
+#[test]
+fn a_non_empty_idempotency_key_on_create_enrolment_trips_the_sensor() {
+    // LEDGER 638/668's INTERIM SENSOR (`plans/create-enrolment-idempotency.md`
+    // §4.2), executed. `create_enrolment` DISCARDS `r.idempotency` — see the
+    // handler's own comment — and today nothing sends a key, so a counter
+    // proved only by that silence proves nothing. This test sends one.
+    //
+    // A SYNC TEST BUILDING ITS OWN current_thread RUNTIME, the same shape
+    // `gateway`'s `the_cache_counter_reports_a_miss_and_then_a_hit` uses: a
+    // LOCAL recorder rather than `metrics::install()`, because a global one is
+    // process-wide and this binary's tests run in parallel, which would race
+    // every other test that emits a metric.
+    let recorder = metrics_util::debugging::DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime");
+
+    metrics::with_local_recorder(&recorder, || {
+        rt.block_on(async {
+            let svc = fresh("iam_db_test_enrol_idempotency_sensor").await;
+            let user_id = enrolee(&svc, 60, b"c").await;
+
+            svc.create_enrolment(Request::new(CreateEnrolmentRequest {
+                user_id: user_id.clone(),
+                secret_hash: vec![60u8; 32],
+                expires_at: Some(at(3600)),
+                idempotency: Some(Idempotency {
+                    key: "k-enrol-sensor".into(),
+                }),
+                ..Default::default()
+            }))
+            .await
+            .expect(
+                "create enrolment must still succeed — the sensor observes, it does not refuse",
+            );
+        });
+    });
+
+    let emitted = snapshotter.snapshot().into_vec();
+    let fired = emitted.iter().any(|(key, _, _, value)| {
+        key.key().name() == yadgar_iam_db::service::ENROLMENT_IDEMPOTENCY_DISCARDED
+            && matches!(
+                value,
+                metrics_util::debugging::DebugValue::Counter(n) if *n >= 1
+            )
+    });
+    assert!(
+        fired,
+        "a non-empty idempotency key on CreateEnrolment must trip the sensor \
+         — a counter proved only by production silence is not proved"
+    );
+}
+
+#[test]
+fn an_empty_idempotency_key_on_create_enrolment_does_not_trip_the_sensor() {
+    // THE OTHER DIRECTION, so a counter that increments unconditionally cannot
+    // pass the test above. TWO cases, not one: an ABSENT `idempotency` (every
+    // caller of this RPC today — §7.0: nothing sends a key until `/admin`
+    // lands) and a PRESENT-BUT-EMPTY key. The second is the boundary §7.0 is
+    // most emphatic about — "sending an EMPTY idempotency key would suppress
+    // the sensor and look like prudence" — and it is a DIFFERENT code path
+    // through the handler's `is_some_and(|k| !k.key.is_empty())` guard than
+    // the absent case is. Proved distinct by a mutation: `if
+    // r.idempotency.is_some()` (firing on an empty-string key too) left a
+    // version of this test that checked only the absent case GREEN.
+    let recorder = metrics_util::debugging::DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime");
+
+    metrics::with_local_recorder(&recorder, || {
+        rt.block_on(async {
+            let svc = fresh("iam_db_test_enrol_idempotency_sensor_quiet").await;
+
+            // ABSENT.
+            let user_id = enrolee(&svc, 61, b"c").await;
+            enrol(&svc, &user_id, 61, 3600).await;
+
+            // PRESENT AND EMPTY.
+            let user_id = enrolee(&svc, 62, b"c").await;
+            svc.create_enrolment(Request::new(CreateEnrolmentRequest {
+                user_id,
+                secret_hash: vec![62u8; 32],
+                expires_at: Some(at(3600)),
+                idempotency: Some(Idempotency { key: String::new() }),
+                ..Default::default()
+            }))
+            .await
+            .expect("create enrolment must still succeed on an empty key");
+        });
+    });
+
+    let emitted = snapshotter.snapshot().into_vec();
+    let fired = emitted.iter().any(|(key, _, _, _)| {
+        key.key().name() == yadgar_iam_db::service::ENROLMENT_IDEMPOTENCY_DISCARDED
+    });
+    assert!(
+        !fired,
+        "an empty (or absent) idempotency key must not trip the sensor — a \
+         one-directional counter that fires unconditionally proves nothing"
+    );
+}
+
+#[test]
+fn the_enrolment_idempotency_discarded_counter_is_named_the_thing_an_operator_queries() {
+    // AS A LITERAL, never through the constant — ADR-0599, and the precedent
+    // `gateway` sets for its own bespoke counters
+    // (`attest.rs::the_cache_counter_is_named_the_thing_an_operator_queries`,
+    // `limit.rs`'s equivalent for `DEGRADED`). Routing this assertion through
+    // `ENROLMENT_IDEMPOTENCY_DISCARDED` would make a later edit to the
+    // constant's VALUE pass every test while silently orphaning anything a
+    // dashboard or alert already built on the old name.
+    assert_eq!(
+        yadgar_iam_db::service::ENROLMENT_IDEMPOTENCY_DISCARDED,
+        "yadgar_iamdb_enrolment_idempotency_discarded_total"
+    );
+}
+
 #[tokio::test]
 async fn a_soft_deleted_persons_enrolment_is_not_redeemable() {
     // MUTATION THIS CATCHES: dropping the JOIN's `u.deleted_at IS NULL`. An

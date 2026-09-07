@@ -51,6 +51,13 @@ prost-types = "0.14"
 # crate. This repository sat one commit behind every other consumer until now —
 # a bare revision in five files has nothing that notices one falling behind.
 yadgar-telemetry = { git = "https://github.com/yadgarhq/telemetry.git", tag = "v0.1.5", features = ["grpc"] }
+# The metrics facade, DIRECTLY rather than through yadgar-telemetry. D67's three
+# signals go through that seam and still do; `create_enrolment`'s idempotency
+# sensor is a fourth, belonging to this one handler — the same reasoning
+# `gateway`'s `CACHE` and `DEGRADED` counters give for depending on it
+# directly. Already in this tree via yadgar-telemetry, so it adds nothing to
+# the build.
+metrics = "0.24"
 # WHICH SIGNALS END THIS PROCESS, decided once for the estate rather than once
 # per repository (ADR-0526's pin, D19's rule). `shutdown` stood in five copies
 # before this crate existed and was wrong in every one of them for the same
@@ -114,6 +121,15 @@ rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"]
 # which is how the same builder the binary uses gets served on a port the test
 # chose. Dev-only, so the shipped tree is unchanged.
 tokio-stream = { version = "0.1", features = ["net"] }
+# A recorder to assert AGAINST, for the idempotency-sensor test. `metrics` is
+# the facade `yadgar-telemetry` already publishes through and `metrics-util`
+# ships the debugging recorder that can be snapshotted in-process; both are
+# already in this tree via `metrics-exporter-prometheus`, so neither adds
+# anything to the build. The same pair `gateway` uses for its own bespoke
+# counters' tests.
+metrics-util = { version = "0.20", default-features = false, features = [
+  "debugging",
+] }
 
 [lints.rust]
 unsafe_code = "forbid"
