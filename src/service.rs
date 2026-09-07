@@ -96,14 +96,17 @@ const OWNER_READS_OWN_RECORD: &str = "owner_reads_own_record";
 /// recognise a REPEATED key: that needs a ledger retaining prior keys, which is
 /// ledger 668's mechanism and 668's class, and is explicitly out of scope here.
 ///
-/// **What it proves is narrower, and it is still the whole point.** Before the
-/// gateway's `/admin` route exists, nothing sends a key here and this reads
-/// zero. The day that route lands, the gateway forwards a key on EVERY
-/// `IssueEnrolment`, so this goes non-zero and STAYS non-zero, forever. **That
-/// one zero-to-nonzero transition is the entire signal.** A steady non-zero
-/// RATE after that day is the CORRECT and PERMANENT reading — never an
-/// incident, and never evidence this fixes the idempotency defect. It proves
-/// the clock started; it does not stop it.
+/// **What it proves is narrower, and it is still the whole point.** The
+/// `metrics::counter!` macro below runs only inside the `if`, and that macro
+/// call is what REGISTERS the name with the recorder — so before the
+/// gateway's `/admin` route exists and nothing sends a key here, this metric
+/// is ABSENT from `/metrics` entirely, never present-and-zero. The day that
+/// route lands, the gateway forwards a key on EVERY `IssueEnrolment`, and the
+/// series comes into existence and STAYS, forever. **The series appearing —
+/// not a number moving — is the entire signal.** A steady non-zero RATE after
+/// that day is the CORRECT and PERMANENT reading — never an incident, and
+/// never evidence this fixes the idempotency defect. It proves the clock
+/// started; it does not stop it.
 pub const ENROLMENT_IDEMPOTENCY_DISCARDED: &str =
     "yadgar_iamdb_enrolment_idempotency_discarded_total";
 

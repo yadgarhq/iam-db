@@ -1110,8 +1110,15 @@ fn a_non_empty_idempotency_key_on_create_enrolment_trips_the_sensor() {
 #[test]
 fn an_empty_idempotency_key_on_create_enrolment_does_not_trip_the_sensor() {
     // THE OTHER DIRECTION, so a counter that increments unconditionally cannot
-    // pass the test above. `enrol()` below sends no key, which is every caller
-    // of this RPC today (§7.0: nothing sends a key until `/admin` lands).
+    // pass the test above. TWO cases, not one: an ABSENT `idempotency` (every
+    // caller of this RPC today — §7.0: nothing sends a key until `/admin`
+    // lands) and a PRESENT-BUT-EMPTY key. The second is the boundary §7.0 is
+    // most emphatic about — "sending an EMPTY idempotency key would suppress
+    // the sensor and look like prudence" — and it is a DIFFERENT code path
+    // through the handler's `is_some_and(|k| !k.key.is_empty())` guard than
+    // the absent case is. Proved distinct by a mutation: `if
+    // r.idempotency.is_some()` (firing on an empty-string key too) left a
+    // version of this test that checked only the absent case GREEN.
     let recorder = metrics_util::debugging::DebuggingRecorder::new();
     let snapshotter = recorder.snapshotter();
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -1122,8 +1129,22 @@ fn an_empty_idempotency_key_on_create_enrolment_does_not_trip_the_sensor() {
     metrics::with_local_recorder(&recorder, || {
         rt.block_on(async {
             let svc = fresh("iam_db_test_enrol_idempotency_sensor_quiet").await;
+
+            // ABSENT.
             let user_id = enrolee(&svc, 61, b"c").await;
             enrol(&svc, &user_id, 61, 3600).await;
+
+            // PRESENT AND EMPTY.
+            let user_id = enrolee(&svc, 62, b"c").await;
+            svc.create_enrolment(Request::new(CreateEnrolmentRequest {
+                user_id,
+                secret_hash: vec![62u8; 32],
+                expires_at: Some(at(3600)),
+                idempotency: Some(Idempotency { key: String::new() }),
+                ..Default::default()
+            }))
+            .await
+            .expect("create enrolment must still succeed on an empty key");
         });
     });
 
@@ -1135,6 +1156,21 @@ fn an_empty_idempotency_key_on_create_enrolment_does_not_trip_the_sensor() {
         !fired,
         "an empty (or absent) idempotency key must not trip the sensor — a \
          one-directional counter that fires unconditionally proves nothing"
+    );
+}
+
+#[test]
+fn the_enrolment_idempotency_discarded_counter_is_named_the_thing_an_operator_queries() {
+    // AS A LITERAL, never through the constant — ADR-0599, and the precedent
+    // `gateway` sets for its own bespoke counters
+    // (`attest.rs::the_cache_counter_is_named_the_thing_an_operator_queries`,
+    // `limit.rs`'s equivalent for `DEGRADED`). Routing this assertion through
+    // `ENROLMENT_IDEMPOTENCY_DISCARDED` would make a later edit to the
+    // constant's VALUE pass every test while silently orphaning anything a
+    // dashboard or alert already built on the old name.
+    assert_eq!(
+        yadgar_iam_db::service::ENROLMENT_IDEMPOTENCY_DISCARDED,
+        "yadgar_iamdb_enrolment_idempotency_discarded_total"
     );
 }
 
