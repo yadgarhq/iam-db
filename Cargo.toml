@@ -19,7 +19,7 @@ description = "The identity module's -db twin: the only writer of its store, ser
 # perform: it accepted any publicly-trusted certificate for any name. Nothing in
 # this estate runs it, so the refusal changes no deployment; `verify_identity`
 # is the mode that binds the connection to the engine it names.
-yadgar-store = { git = "https://github.com/yadgarhq/store.git", tag = "v0.2.5" }
+yadgar-store = { git = "https://github.com/yadgarhq/store.git", tag = "v0.2.6" }
 # In tonic 0.14 prost codegen moved out to tonic-prost; there is no "prost"
 # feature on tonic itself.
 #
@@ -50,7 +50,7 @@ prost-types = "0.14"
 # The shared instrumentation seam (D67), pinned by release tag like every in-org
 # crate. This repository sat one commit behind every other consumer until now —
 # a bare revision in five files has nothing that notices one falling behind.
-yadgar-telemetry = { git = "https://github.com/yadgarhq/telemetry.git", tag = "v0.1.9", features = ["grpc"] }
+yadgar-telemetry = { git = "https://github.com/yadgarhq/telemetry.git", tag = "v0.1.10", features = ["grpc"] }
 # The metrics facade, DIRECTLY rather than through yadgar-telemetry. D67's three
 # signals go through that seam and still do; `create_enrolment`'s idempotency
 # sensor is a fourth, belonging to this one handler — the same reasoning
@@ -81,7 +81,7 @@ metrics = "0.24"
 # signal handler, so once the rotation arm wins the `select!` a later SIGTERM is
 # swallowed and only SIGKILL remains — the watcher WITHOUT `drain_within` is the
 # bug, not half the fix.
-yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle.git", tag = "v0.2.9" }
+yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle.git", tag = "v0.2.10" }
 sqlx = { version = "0.9", default-features = false, features = [
   "runtime-tokio",
   "tls-rustls-ring",
