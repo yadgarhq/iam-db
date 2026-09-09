@@ -191,8 +191,17 @@ spec:
             - name: LISTEN
               value: "0.0.0.0:50051"
             # The metrics exporter's address. It has no containerPort: nothing
-            # scrapes it through the Service, and the PodMonitor that will scrape
-            # it addresses the pod directly.
+            # scrapes it through the Service. Ledger 779 corrects an earlier
+            # revision of this comment, which named a PodMonitor — this cluster
+            # has no Prometheus Operator and no `monitoring.coreos.com` CRD
+            # (`yadgarhq/deploy`'s `infra/prometheus.yaml` says so directly).
+            # Scraping is annotation-based instead: this pod's own
+            # `prometheus.io/scrape` and `prometheus.io/port` annotations above
+            # are what Prometheus's `kubernetes-pods` discovery job (shipped by
+            # the prometheus-community chart's own defaults — `yadgarhq/deploy`'s
+            # `infra/prometheus.yaml` deploys that chart but adds no custom
+            # scrape_configs of its own) reads to find and scrape it directly,
+            # bypassing the Service same as before.
             - name: METRICS_LISTEN
               value: "0.0.0.0:9090"
             # THE FILE THE DATABASE PASSWORD IS READ FROM, and its directory is
