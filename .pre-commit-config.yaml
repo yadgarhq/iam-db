@@ -22,7 +22,7 @@ repos:
   # at first install and never re-resolves it, so a moving tag would silently
   # freeze each machine at whatever it meant the day it first ran.
   - repo: https://github.com/yadgarhq/actions
-    rev: v1.18.2
+    rev: v1.18.3
     hooks:
       - id: gitleaks
       - id: prettier
@@ -54,3 +54,35 @@ repos:
       # ADR-0523-WATCHED naming a src/rotate.rs material, or ADR-0523-UNWATCHED
       # with a reason. This repository had never run it before this PR.
       - id: boot-reads-watched
+      # LEDGER 719. Two ceilings, and they measure different things. `complexity`
+      # is the line count — 500 per file, 120 per function — which catches a flat
+      # file that grew rather than a tangled one. `cargo-clippy-complexity` is
+      # clippy's `cognitive_complexity` and `too_many_arguments`, which catch the
+      # nesting a line count cannot see. Neither is a substitute for the other,
+      # which is why both ids are here rather than one.
+      #
+      # ADOPTED ONLY NOW BECAUSE THIS REPOSITORY DID NOT PASS THE FIRST OF THEM.
+      # Measured on afcb246: `src/service.rs` was 2400 lines, `src/boot.rs` 616
+      # and `src/schema.rs` 557, with five functions over the 120 — `main` at
+      # 221, `set_inherited_setting` at 328, `redeem_enrolment` at 233,
+      # `resolve_credential` at 163 and `set_rate_limit_override` at 122.
+      # Referencing the gate before the refactor would have meant an exemption
+      # list, which is how a ceiling stops meaning anything (`complexity.py` says
+      # so in as many words). The refactor came first; these two lines are what
+      # make it hold. `cargo-clippy-complexity` was already clean on that same
+      # commit and refuses nothing new today.
+      #
+      # THE REV MOVES FROM v1.18.2 TO v1.18.3, and the whole block comes with it
+      # because pre-commit resolves one rev per repository entry. THE TREE PASSES
+      # UNDER BOTH SCRIPTS — measured, not assumed — so the bump is about what
+      # happens NEXT rather than about making this branch green. v1.18.2's
+      # `complexity.py` predates actions#69: it has no `TEST_FILE_NAMES`, no
+      # `TEST_ATTR` and no `_is_test_fn`, and exempts a test DIRECTORY only, so it
+      # measures the newly created `src/boot/tests.rs` as production code. That
+      # file is 405 lines, which is the trap rather than the reassurance: the next
+      # unit test added to it counts against a PRODUCTION ceiling, and the refusal
+      # would name a line count nobody could act on. `git diff --stat v1.18.2
+      # v1.18.3` is `hooks/complexity.py` and its own test file and nothing else,
+      # so no other hook in this block changes behaviour.
+      - id: complexity
+      - id: cargo-clippy-complexity
