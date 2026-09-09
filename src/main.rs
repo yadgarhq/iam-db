@@ -21,10 +21,12 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use sqlx::Connection;
+use sqlx::{Connection, MySqlPool};
+use tonic::transport::Server;
 use yadgar_lifecycle::{drain_within, Drain, DRAIN_BUDGET};
 use yadgar_store::capability::{Capability, CapabilitySet};
 use yadgar_store::credentials::{CredentialSource, Secret};
+use yadgar_store::pool::PoolConfig;
 use yadgar_store::{migrate, probe};
 
 use yadgar_iam_db::pb::yadgar::iamdb::v1::iam_db_service_server::IamDbServiceServer;
@@ -72,8 +74,12 @@ fn env_required(key: &str) -> Result<String, String> {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// The JSON subscriber, and the default that keeps this process observable.
+///
+/// Extracted from `main` for the file-and-function ceilings, and it is the one
+/// step of the boot that is not a decision about this service: every binary in
+/// the estate installs the same thing before it reads anything.
+fn install_logging() {
     tracing_subscriber::fmt()
         .json()
         // A DEFAULT, because from_default_env() with RUST_LOG unset enables
@@ -89,87 +95,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+}
 
-    // Every default, every refusal and the transport mode live in `boot`, which
-    // a test can reach. This line is the whole of the configuration decision.
-    let config = boot::pool_config(|key| std::env::var(key).ok())?;
-
-    // 0. THE TRANSPORT THIS SERVICE LISTENS ON, before anything else runs. A
-    //    missing certificate, an unreadable one, a file holding no certificate
-    //    at all and a key belonging to a different certificate are all refused
-    //    HERE — never downgraded to the plaintext listener, because a listener
-    //    that quietly stayed in the clear is the one failure an operator who
-    //    asked for TLS cannot see.
-    //
-    //    `.to_string()` on the way out, and not decoration: `main` returns
-    //    `Box<dyn Error>`, which Rust prints with DEBUG — so a bare `?` would
-    //    put `CertUnreadable { .. }` on the operator's terminal instead of the
-    //    sentence naming the file and saying why cleartext is not the answer.
-    let listen_tls = serve::ServerTls::from_env(serve::LISTEN).map_err(|e| e.to_string())?;
-    let mut server = serve::builder(listen_tls.as_ref()).map_err(|e| e.to_string())?;
-
-    // The credential never arrives as an environment variable — it is a mounted
-    // Secret the operator issued (D58), read through the seam so this module has
-    // no idea which deployment target it is on.
-    //
-    // THE PATH IS HOISTED INTO A VARIABLE because two things need it: the read
-    // below, and the rotation watch set. `Secret` deliberately holds the VALUE
-    // and not where it came from, so the path has to be named once here rather
-    // than recovered from the secret afterwards.
-    //
-    // NO COMPILED-IN DEFAULT any more (ADR-0569). The path used to be
-    // `/var/run/secrets/iam-db/password` in this line AND the mount path
-    // `/var/run/secrets/iam-db` in the chart's `volumeMounts` — one path written
-    // twice, in two repositories' worth of reader attention, with nothing making
-    // them move together. The chart now renders the variable next to the mount
-    // that supplies the directory, so both copies sit in one file where a reader
-    // sees them at once.
-    let db_password_file: PathBuf = env_required("DB_PASSWORD_FILE")?.into();
-    let secret: Secret = CredentialSource::SecretFile(db_password_file.clone()).resolve()?;
-
-    // STEP 2A OF THE ROTATION-KNOB CUT-OVER (ADR-0569, ADR-0570). The document
-    // `yadgarhq/config` renders into the `shared` ConfigMap, mounted at
-    // `/etc/yadgar/config/shared/shared.yaml`. There is no compiled-in default
-    // behind it any more: an absent, empty, or half-written document refuses the
-    // boot and names the file. The chart still sets TLS_ROTATION_POLL_SECS and
-    // TLS_ROTATION_SPLAY_MAX_SECS — this binary no longer reads either, but they
-    // stay so a rollout that lands this chart before this binary's digest still
-    // resolves a schedule on the old one. The runbook is `yadgarhq/deploy`'s
-    // MIGRATION_NOTES.md, steps 2a and 2b — NOT this repository's, which has no
-    // such section.
-    let rotation_config = rotate::Configuration::mounted();
-
-    // THE WATCH SET, ASSEMBLED FROM THE RESOLVED CONFIGURATION AND HASHED AS THE
-    // PROCESS READS IT (ADR-0523). It is built HERE, immediately after the last
-    // of its members is read, rather than at the point the watcher is spawned:
-    // deferring the first reading to the watcher's first poll would put the whole
-    // of probe-migrate-serve inside a window where a kubelet swap quietly becomes
-    // the baseline, and the real rotation would never be noticed.
-    //
-    // FOUR MATERIALS, THREE OF WHICH ARE NOT THE CERTIFICATE. ADR-0523's rule is
-    // about provenance rather than payload — the database password is read once
-    // and baked into a pool that outlives every reconnect, the engine's CA is
-    // mounted the same way, and the mounted configuration document joins the same
-    // set (step 2a) — so all three are watched exactly as the leaf is.
-    //
-    // ONE CALL, AND THE SAME ONE `tests/assembly.rs` MAKES. Nothing in a binary
-    // entry point is reachable from a test, so a member deleted from a list built
-    // HERE would compile, pass everything, and ship a process blind to that file.
-    // The list lives in `rotate::watch_set`.
-    let watch_inputs = rotate::watch_set(
-        listen_tls.as_ref(),
-        &db_password_file,
-        config.ssl_ca.as_deref(),
-        &rotation_config,
-    );
-
-    // READ FROM THE SAME DOCUMENT THE WATCH SET JUST JOINED. A value the
-    // document names and this binary cannot use is a mistake to refuse, not one
-    // to paper over with a default nobody chose — and refusing it here means it
-    // is refused on a cleartext deployment too, which is where it would
-    // otherwise sit unnoticed until the cut-over.
-    let schedule = rotation_config.schedule().map_err(|e| e.to_string())?;
-
+/// D7's capability probe, on a connection of its own and before the pool exists.
+///
+/// Step 1 of the boot, whole: the options, the connection, the probe, the
+/// verdict against [`required`], and the close. It is one function because a
+/// caller that could run any part of it without the verdict would be the defect
+/// D7 exists to refuse.
+async fn probe_engine(
+    config: &PoolConfig,
+    secret: &Secret,
+) -> Result<(), Box<dyn std::error::Error>> {
     // 1. PROBE, on a connection of its own and before the pool exists. Refusing
     //    here is the whole point of D7.
     //
@@ -184,34 +121,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    paragraph naming the mode to use instead. A bare `?` would Debug-print
     //    `SslModeCannotVerify { .. }` into the crash loop and throw the sentence
     //    away.
-    let options = boot::probe_connect_options(&config, &secret).map_err(|e| e.to_string())?;
+    let options = boot::probe_connect_options(config, secret).map_err(|e| e.to_string())?;
     let mut conn = sqlx::MySqlConnection::connect_with(&options).await?;
     let report = probe::run(&mut conn).await?;
     report.satisfies(&required())?;
     conn.close().await?;
     tracing::info!("engine satisfies the required capabilities");
+    Ok(())
+}
 
-    // 2. MIGRATE. Refuses outright if the database is ahead of this binary.
-    let pool = yadgar_store::pool::connect(&config, &secret).await?;
-    let applied = migrate::apply(&pool, &schema::migrations()?).await?;
-    tracing::info!(applied, "schema at migration {applied}");
-
-    // 3. SERVE. Only now.
-    // The BINARY installs the exporter, never the library — a library that
-    // installs one picks the backend for every service linking it. A failure here
-    // is logged and ignored: a service that cannot export metrics should still
-    // serve traffic, which is D25's rule applied to the metrics path too.
-    let metrics_addr: SocketAddr = env_required("METRICS_LISTEN")?.parse()?;
-    if let Err(e) = yadgar_telemetry::metrics::install_prometheus(metrics_addr) {
-        tracing::warn!(error = %e, "metrics endpoint unavailable; continuing without it");
-    }
-
-    // AFTER THE EXPORTER, NEVER BEFORE IT: a value recorded while there is no
-    // recorder is a value nobody ever sees. This is the half of the rotation work
-    // that makes a failure LOUD — if the watcher below dies, this gauge still
-    // shows the loaded leaf ageing out.
-    watch_inputs.export_not_after();
-
+/// Step 3, from the listener address to the last in-flight call.
+///
+/// The boot log, the signal handlers, the spawned server, the two things that
+/// end it and the drain budget are ONE function because they are one ordering,
+/// and the ordering is what this file is about: the handlers arm BEFORE the
+/// server is spawned, and the budget's clock starts when shutdown is REQUESTED.
+/// Splitting them would let a later edit move one without the others.
+///
+/// The listener itself arrives LAST and by value, because the boot log is the
+/// only thing left that asks whether it is there. Everything that needed to
+/// borrow it — the server builder and the watch set — has already run.
+async fn serve_until_drained(
+    mut server: Server,
+    pool: MySqlPool,
+    watch_inputs: rotate::Inputs,
+    schedule: rotate::Schedule,
+    listen_tls: Option<serve::ServerTls>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let addr: SocketAddr = env_required("LISTEN")?.parse()?;
     // `tls` is recorded because "is this listener encrypted?" must be answerable
     // from the boot log rather than inferred from which variables somebody
@@ -291,6 +227,119 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              flight. A request blocked this long is the thing to look at"
         ),
     }
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    install_logging();
+
+    // Every default, every refusal and the transport mode live in `boot`, which
+    // a test can reach. This line is the whole of the configuration decision.
+    let config = boot::pool_config(|key| std::env::var(key).ok())?;
+
+    // 0. THE TRANSPORT THIS SERVICE LISTENS ON, before anything else runs. A
+    //    missing certificate, an unreadable one, a file holding no certificate
+    //    at all and a key belonging to a different certificate are all refused
+    //    HERE — never downgraded to the plaintext listener, because a listener
+    //    that quietly stayed in the clear is the one failure an operator who
+    //    asked for TLS cannot see.
+    //
+    //    `.to_string()` on the way out, and not decoration: `main` returns
+    //    `Box<dyn Error>`, which Rust prints with DEBUG — so a bare `?` would
+    //    put `CertUnreadable { .. }` on the operator's terminal instead of the
+    //    sentence naming the file and saying why cleartext is not the answer.
+    let listen_tls = serve::ServerTls::from_env(serve::LISTEN).map_err(|e| e.to_string())?;
+    let server = serve::builder(listen_tls.as_ref()).map_err(|e| e.to_string())?;
+
+    // The credential never arrives as an environment variable — it is a mounted
+    // Secret the operator issued (D58), read through the seam so this module has
+    // no idea which deployment target it is on.
+    //
+    // THE PATH IS HOISTED INTO A VARIABLE because two things need it: the read
+    // below, and the rotation watch set. `Secret` deliberately holds the VALUE
+    // and not where it came from, so the path has to be named once here rather
+    // than recovered from the secret afterwards.
+    //
+    // NO COMPILED-IN DEFAULT any more (ADR-0569). The path used to be
+    // `/var/run/secrets/iam-db/password` in this line AND the mount path
+    // `/var/run/secrets/iam-db` in the chart's `volumeMounts` — one path written
+    // twice, in two repositories' worth of reader attention, with nothing making
+    // them move together. The chart now renders the variable next to the mount
+    // that supplies the directory, so both copies sit in one file where a reader
+    // sees them at once.
+    let db_password_file: PathBuf = env_required("DB_PASSWORD_FILE")?.into();
+    let secret: Secret = CredentialSource::SecretFile(db_password_file.clone()).resolve()?;
+
+    // STEP 2A OF THE ROTATION-KNOB CUT-OVER (ADR-0569, ADR-0570). The document
+    // `yadgarhq/config` renders into the `shared` ConfigMap, mounted at
+    // `/etc/yadgar/config/shared/shared.yaml`. There is no compiled-in default
+    // behind it any more: an absent, empty, or half-written document refuses the
+    // boot and names the file. The chart still sets TLS_ROTATION_POLL_SECS and
+    // TLS_ROTATION_SPLAY_MAX_SECS — this binary no longer reads either, but they
+    // stay so a rollout that lands this chart before this binary's digest still
+    // resolves a schedule on the old one. The runbook is `yadgarhq/deploy`'s
+    // MIGRATION_NOTES.md, steps 2a and 2b — NOT this repository's, which has no
+    // such section.
+    let rotation_config = rotate::Configuration::mounted();
+
+    // THE WATCH SET, ASSEMBLED FROM THE RESOLVED CONFIGURATION AND HASHED AS THE
+    // PROCESS READS IT (ADR-0523). It is built HERE, immediately after the last
+    // of its members is read, rather than at the point the watcher is spawned:
+    // deferring the first reading to the watcher's first poll would put the whole
+    // of probe-migrate-serve inside a window where a kubelet swap quietly becomes
+    // the baseline, and the real rotation would never be noticed.
+    //
+    // FOUR MATERIALS, THREE OF WHICH ARE NOT THE CERTIFICATE. ADR-0523's rule is
+    // about provenance rather than payload — the database password is read once
+    // and baked into a pool that outlives every reconnect, the engine's CA is
+    // mounted the same way, and the mounted configuration document joins the same
+    // set (step 2a) — so all three are watched exactly as the leaf is.
+    //
+    // ONE CALL, AND THE SAME ONE `tests/assembly.rs` MAKES. Nothing in a binary
+    // entry point is reachable from a test, so a member deleted from a list built
+    // HERE would compile, pass everything, and ship a process blind to that file.
+    // The list lives in `rotate::watch_set`.
+    let watch_inputs = rotate::watch_set(
+        listen_tls.as_ref(),
+        &db_password_file,
+        config.ssl_ca.as_deref(),
+        &rotation_config,
+    );
+
+    // READ FROM THE SAME DOCUMENT THE WATCH SET JUST JOINED. A value the
+    // document names and this binary cannot use is a mistake to refuse, not one
+    // to paper over with a default nobody chose — and refusing it here means it
+    // is refused on a cleartext deployment too, which is where it would
+    // otherwise sit unnoticed until the cut-over.
+    let schedule = rotation_config.schedule().map_err(|e| e.to_string())?;
+
+    // 1. PROBE. The connection it opens, and every reason it opens its own,
+    //    are in `probe_engine`.
+    probe_engine(&config, &secret).await?;
+
+    // 2. MIGRATE. Refuses outright if the database is ahead of this binary.
+    let pool = yadgar_store::pool::connect(&config, &secret).await?;
+    let applied = migrate::apply(&pool, &schema::migrations()?).await?;
+    tracing::info!(applied, "schema at migration {applied}");
+
+    // 3. SERVE. Only now.
+    // The BINARY installs the exporter, never the library — a library that
+    // installs one picks the backend for every service linking it. A failure here
+    // is logged and ignored: a service that cannot export metrics should still
+    // serve traffic, which is D25's rule applied to the metrics path too.
+    let metrics_addr: SocketAddr = env_required("METRICS_LISTEN")?.parse()?;
+    if let Err(e) = yadgar_telemetry::metrics::install_prometheus(metrics_addr) {
+        tracing::warn!(error = %e, "metrics endpoint unavailable; continuing without it");
+    }
+
+    // AFTER THE EXPORTER, NEVER BEFORE IT: a value recorded while there is no
+    // recorder is a value nobody ever sees. This is the half of the rotation work
+    // that makes a failure LOUD — if the watcher below dies, this gauge still
+    // shows the loaded leaf ageing out.
+    watch_inputs.export_not_after();
+
+    serve_until_drained(server, pool, watch_inputs, schedule, listen_tls).await?;
 
     Ok(())
 }
