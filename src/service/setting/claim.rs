@@ -39,6 +39,36 @@ pub(super) struct Claim {
 }
 
 impl Claim {
+    /// Whether this key has ALREADY recorded this same request.
+    ///
+    /// `false` when there is no key — the empty string is not one — and when the
+    /// key has recorded nothing yet. `Err(INVALID_ARGUMENT)` when it recorded a
+    /// DIFFERENT request, which is D9's amended half: a repeated key carrying
+    /// another payload is refused rather than silently overwriting the first.
+    ///
+    /// A PLAIN READ, deliberately NOT `FOR UPDATE`. This catches a retry that
+    /// arrives after the first attempt COMMITTED, which is the ordinary case. It
+    /// cannot serialise two deliveries that arrive together, and no lock taken
+    /// here could: an InnoDB gap lock on an absent row is purely inhibitive — it
+    /// blocks an INSERT into the gap and does NOT exclude another transaction's
+    /// gap lock on the same gap, so taking it turns the race into a deadlock
+    /// rather than preventing it (ADR-0513). The serialisation point is the
+    /// ledger INSERT [`Claim::record`] performs last, which takes a REAL record
+    /// lock.
+    pub(super) async fn already_recorded(
+        &self,
+        tx: &mut sqlx::MySqlTransaction<'_>,
+    ) -> Result<bool, Status> {
+        if self.key.is_empty() {
+            return Ok(false);
+        }
+        let Some(prior) = recorded(tx, &self.key, Lock::No).await? else {
+            return Ok(false);
+        };
+        self.agrees_with(&prior)?;
+        Ok(true)
+    }
+
     pub(super) fn of(r: &SetInheritedSettingRequest) -> Self {
         Self {
             // THE EMPTY STRING IS NOT A KEY, the rule `RedeemEnrolment` already

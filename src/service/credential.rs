@@ -102,54 +102,7 @@ impl IamDb {
         .collect::<Result<_, sqlx::Error>>()
         .map_err(db)?;
 
-        // THE INPUTS, NOT THE ANSWER. The organisation's value, its lock and
-        // EVERY team's override go back unresolved, because the resolution
-        // depends on the team of the ROW being read — which neither this module
-        // nor `iam` nor the gateway knows. Resolving it here would hand down a
-        // decision made against the wrong team, and nothing about the answer
-        // would look wrong.
-        //
-        // AN ABSENT ROW IS SETTING_VALUE_UNSPECIFIED AND IS NEVER OFF. A store
-        // that states no policy must reach the enforcing `-db` as a refusal,
-        // rather than as this module quietly choosing the strict one.
-        let org = sqlx::query("SELECT value, locked FROM iam_org_setting WHERE name = ?")
-            .bind(OWNER_READS_OWN_RECORD)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(db)?;
-        let (org_value, org_locked) = match org {
-            Some(row) => (
-                row.try_get::<i32, _>("value").map_err(db)?,
-                row.try_get::<bool, _>("locked").map_err(db)?,
-            ),
-            None => (SettingValue::Unspecified as i32, false),
-        };
-
-        // NOT FILTERED BY `user_id`, unlike every other query in this RPC, and
-        // the difference is deliberate: the override that matters is the one
-        // belonging to the team of the RECORD, and the owner this setting exists
-        // for has LEFT that team. Narrowing to the caller's teams would make the
-        // setting evaporate in exactly the case it is for.
-        //
-        // UNBOUNDED ON PURPOSE, on the hottest path, and the bound is SPARSITY
-        // rather than a clause: at most one row per team that states something,
-        // and a team states something only when an operator writes one. It does
-        // not grow with users, credentials or requests. A bare LIMIT would be
-        // worse than the unboundedness rather than a mitigation of it — the
-        // teams that fell off the end get a WRONG answer instead of a slow one,
-        // and nothing says which. Bounding this for real means a cache, or
-        // narrowing to the team of the row being read, and that team is not in
-        // this request.
-        let team_override =
-            sqlx::query("SELECT team_id, value FROM iam_team_setting_override WHERE name = ?")
-                .bind(OWNER_READS_OWN_RECORD)
-                .fetch_all(&mut *tx)
-                .await
-                .map_err(db)?
-                .into_iter()
-                .map(|r| Ok((r.try_get("team_id")?, r.try_get("value")?)))
-                .collect::<Result<_, sqlx::Error>>()
-                .map_err(db)?;
+        let owner_reads_own_record = owner_reads_own_record(&mut tx).await?;
 
         tx.commit().await.map_err(db)?;
 
@@ -159,11 +112,7 @@ impl IamDb {
             credential_id,
             is_admin,
             rate_limit_overrides,
-            owner_reads_own_record: Some(InheritedSetting {
-                org_value,
-                org_locked,
-                team_override,
-            }),
+            owner_reads_own_record: Some(owner_reads_own_record),
         };
         call.finish(Outcome {
             status: "OK",
@@ -393,4 +342,75 @@ impl IamDb {
 /// Epoch seconds back into the contract's timestamp.
 fn epoch(seconds: i64) -> prost_types::Timestamp {
     prost_types::Timestamp { seconds, nanos: 0 }
+}
+
+/// The setting ADR-0522 puts in every `ResolveCredential` answer, at both levels
+/// and unresolved.
+///
+/// Lifted out of [`IamDb::resolve`] whole, and it is one function because it is
+/// one value: the organisation's row, its lock, and every team's override are
+/// the three inputs the enforcing `-db` needs, and an answer carrying two of
+/// them is not a smaller answer but a wrong one.
+///
+/// **STILL THIS MODULE'S OWN COPY, deliberately.** `setting::inherited` holds a
+/// function that reads the same two rows for the write path's read-back, and the
+/// duplication is what keeps a later change to that read-back from silently
+/// changing what every credential resolution answers.
+async fn owner_reads_own_record(
+    tx: &mut sqlx::MySqlTransaction<'_>,
+) -> Result<InheritedSetting, Status> {
+    // THE INPUTS, NOT THE ANSWER. The organisation's value, its lock and
+    // EVERY team's override go back unresolved, because the resolution
+    // depends on the team of the ROW being read — which neither this module
+    // nor `iam` nor the gateway knows. Resolving it here would hand down a
+    // decision made against the wrong team, and nothing about the answer
+    // would look wrong.
+    //
+    // AN ABSENT ROW IS SETTING_VALUE_UNSPECIFIED AND IS NEVER OFF. A store
+    // that states no policy must reach the enforcing `-db` as a refusal,
+    // rather than as this module quietly choosing the strict one.
+    let org = sqlx::query("SELECT value, locked FROM iam_org_setting WHERE name = ?")
+        .bind(OWNER_READS_OWN_RECORD)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(db)?;
+    let (org_value, org_locked) = match org {
+        Some(row) => (
+            row.try_get::<i32, _>("value").map_err(db)?,
+            row.try_get::<bool, _>("locked").map_err(db)?,
+        ),
+        None => (SettingValue::Unspecified as i32, false),
+    };
+
+    // NOT FILTERED BY `user_id`, unlike every other query in this RPC, and
+    // the difference is deliberate: the override that matters is the one
+    // belonging to the team of the RECORD, and the owner this setting exists
+    // for has LEFT that team. Narrowing to the caller's teams would make the
+    // setting evaporate in exactly the case it is for.
+    //
+    // UNBOUNDED ON PURPOSE, on the hottest path, and the bound is SPARSITY
+    // rather than a clause: at most one row per team that states something,
+    // and a team states something only when an operator writes one. It does
+    // not grow with users, credentials or requests. A bare LIMIT would be
+    // worse than the unboundedness rather than a mitigation of it — the
+    // teams that fell off the end get a WRONG answer instead of a slow one,
+    // and nothing says which. Bounding this for real means a cache, or
+    // narrowing to the team of the row being read, and that team is not in
+    // this request.
+    let team_override =
+        sqlx::query("SELECT team_id, value FROM iam_team_setting_override WHERE name = ?")
+            .bind(OWNER_READS_OWN_RECORD)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(db)?
+            .into_iter()
+            .map(|r| Ok((r.try_get("team_id")?, r.try_get("value")?)))
+            .collect::<Result<_, sqlx::Error>>()
+            .map_err(db)?;
+
+    Ok(InheritedSetting {
+        org_value,
+        org_locked,
+        team_override,
+    })
 }
