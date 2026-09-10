@@ -210,7 +210,10 @@ impl IamDb {
 /// Lifted out of [`IamDb::redeem`] whole, with every clause it carries. A caller
 /// that could run the check without the write would be the race this statement
 /// exists to close, so what comes back is the row count and nothing else.
-async fn spend(tx: &mut sqlx::MySqlConnection, r: &RedeemEnrolmentRequest) -> Result<u64, Status> {
+async fn spend(
+    tx: &mut sqlx::MySqlTransaction<'_>,
+    r: &RedeemEnrolmentRequest,
+) -> Result<u64, Status> {
     // CHECK AND SPEND IN ONE STATEMENT. A SELECT followed by an UPDATE is
     // the same race with a longer window: two concurrent redemptions of one
     // single-use secret both read it unspent and both succeed.
@@ -242,7 +245,7 @@ async fn spend(tx: &mut sqlx::MySqlConnection, r: &RedeemEnrolmentRequest) -> Re
             AND user_id IN (SELECT id FROM iam_user WHERE deleted_at IS NULL)",
     )
     .bind(&r.secret_hash)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(db)?;
 
