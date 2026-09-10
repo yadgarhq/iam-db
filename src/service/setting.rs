@@ -155,7 +155,7 @@ fn record_actor(r: &SetInheritedSettingRequest) {
 /// rather than turning every error out of this function into a recorded failure —
 /// `live_team`'s NOT_FOUND below is deliberately not one.
 async fn write_at_scope(
-    tx: &mut sqlx::MySqlConnection,
+    tx: &mut sqlx::MySqlTransaction<'_>,
     r: &SetInheritedSettingRequest,
     scope: SettingScope,
     call: Call,
@@ -177,7 +177,7 @@ async fn write_at_scope(
             // before anything reaches here.
             .bind(r.value.expect("validated present at organisation scope"))
             .bind(r.locked.expect("validated present at organisation scope"))
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(db)?
         }
@@ -197,7 +197,7 @@ async fn write_at_scope(
             sqlx::query("DELETE FROM iam_team_setting_override WHERE name = ? AND team_id = ?")
                 .bind(&r.name)
                 .bind(team_id_of(r))
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await
                 .map_err(db)?
         }
@@ -224,7 +224,7 @@ async fn write_at_scope(
 /// the row liveness is read from the row written against, and the re-read is
 /// only what turns a zero into a message.
 async fn set_team_override(
-    tx: &mut sqlx::MySqlConnection,
+    tx: &mut sqlx::MySqlTransaction<'_>,
     r: &SetInheritedSettingRequest,
 ) -> Result<sqlx::mysql::MySqlQueryResult, Status> {
     // THE FOREIGN KEY IS NOT THE ERROR MESSAGE. Left to fire, an
@@ -294,7 +294,7 @@ async fn set_team_override(
     .bind(r.value.expect("validated present unless clear is set"))
     .bind(team_id_of(r))
     .bind(r.value.expect("validated present unless clear is set"))
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(db)?;
 
@@ -316,7 +316,7 @@ async fn set_team_override(
     // matches the committed delete and this line correctly finds
     // none. Neither path lets a gone team come back as OK.
     if done.rows_affected() == 0 {
-        live_team(&mut *tx, team_id_of(r)).await?;
+        live_team(&mut **tx, team_id_of(r)).await?;
     }
 
     Ok(done)
