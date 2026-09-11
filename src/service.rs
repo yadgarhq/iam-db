@@ -78,6 +78,7 @@ use crate::pb::yadgar::telemetry::v1::Kind as ContractKind;
 mod credential;
 mod enrolment;
 mod handlers;
+pub use enrolment::DEMAND_INSERT;
 mod identity;
 mod password;
 mod policy;
@@ -122,6 +123,27 @@ const OWNER_READS_OWN_RECORD: &str = "owner_reads_own_record";
 /// started; it does not stop it.
 pub const ENROLMENT_IDEMPOTENCY_DISCARDED: &str =
     "yadgar_iamdb_enrolment_idempotency_discarded_total";
+
+/// A `CreateEnrolment` carrying the bootstrap demand was REFUSED, labelled with
+/// the conjunct that refused it.
+///
+/// **THE LABEL IS THE WHOLE POINT, AND ADR-0657 IS WHY IT IS HERE RATHER THAN IN
+/// THE RESPONSE.** That ruling gives a refusal on this path ONE status code and
+/// ONE constant body whichever conjunct failed, because a per-conjunct message
+/// would let a holder of a leaked bootstrap token tell "not an administrator"
+/// from "administrator who already holds a credential" — learning the
+/// administrator set, and specifically which administrators have never logged
+/// in, which is exactly the set this grant can still take over. So the operator's
+/// only distinguishing signal is this series and the warn beside it.
+///
+/// `conjunct` is `not_admin` or `held_credential` and nothing else. The set is
+/// CLOSED and chosen by this store from its own re-read: an open label mints a
+/// Prometheus series from caller-influenced data, which D67 forbids.
+///
+/// It counts REFUSALS, not acceptances, so it does not replace the gateway's
+/// `yadgar_gateway_bootstrap_accepted_total` — that one counts every bootstrap
+/// acceptance including this verb's, and the two answer different questions.
+pub const ENROLMENT_DEMAND_REFUSED: &str = "yadgar_iamdb_enrolment_demand_refused_total";
 
 pub struct IamDb {
     pool: MySqlPool,
