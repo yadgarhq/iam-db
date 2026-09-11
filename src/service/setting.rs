@@ -24,7 +24,7 @@ impl IamDb {
         r: SetInheritedSettingRequest,
         call: Call,
     ) -> Result<Response<SetInheritedSettingResponse>, Status> {
-        record_actor(&r);
+        record_actor(r.unverified_actor.as_ref(), "SetInheritedSetting", &r.name);
 
         let scope = match check_inherited_setting(&r) {
             Ok(scope) => scope,
@@ -114,37 +114,6 @@ impl IamDb {
 
         answer(tx, &r.name, call, done.rows_affected() as u32).await
     }
-}
-
-/// ADR-0534's RECORDING HALF, and the whole of what this boundary does with
-/// `unverified_actor`.
-///
-/// A function of its own so that the field has ONE reader in this crate, and a
-/// grep for it lands on the paragraph saying why it decides nothing.
-fn record_actor(r: &SetInheritedSettingRequest) {
-    // ADR-0534's RECORDING HALF, and the whole of what this boundary does
-    // with the field. It is written to the log and reaches nothing else: no
-    // WHERE clause, no branch, no refusal. A request carrying an actor and
-    // one carrying none take the identical path.
-    //
-    // THERE IS NO AUDIT STORE ON THIS BOUNDARY, so the structured log is
-    // where an attribution can land today. Said plainly rather than implied:
-    // the durable audit record ADR-0534 imagines does not exist here yet.
-    //
-    // ABSENT AND PRESENT-HOLDING-EMPTY ARE ONE CASE and are recorded as
-    // unattributed, NEVER as an actor whose id is the empty string —
-    // ADR-0512's collapse, pointed at the audit trail. `filter` is what keeps
-    // them together; `unwrap_or_default` would write "" as an actor.
-    tracing::info!(
-        unverified_actor = r
-            .unverified_actor
-            .as_ref()
-            .map(|a| a.user_id.as_str())
-            .filter(|id| !id.is_empty())
-            .unwrap_or("<unattributed>"),
-        setting = %r.name,
-        "an administrative write to an inheritable setting"
-    );
 }
 
 /// The write the validated scope names, and the only one it names.

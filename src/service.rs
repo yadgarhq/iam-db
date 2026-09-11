@@ -58,7 +58,9 @@ use yadgar_telemetry::grpc::status_name;
 use yadgar_telemetry::observe::{Call, Outcome};
 use yadgar_telemetry::pb::yadgar::telemetry::v1::Kind;
 
-use crate::pb::yadgar::common::v1::{InheritedSetting, Meta, SettingScope, SettingValue};
+use crate::pb::yadgar::common::v1::{
+    InheritedSetting, Meta, SettingScope, SettingValue, UnverifiedActor,
+};
 use crate::pb::yadgar::iamdb::v1::iam_db_service_server::IamDbService;
 use crate::pb::yadgar::iamdb::v1::*;
 /// D67's `Kind` AS THE CONTRACT DECLARES IT, aliased because `Kind` above is
@@ -194,6 +196,64 @@ fn tel(request_id: String, user_id: &str) -> yadgar_telemetry::observe::Scope {
         user_id: user_id.to_string(),
         project_id: String::new(),
     }
+}
+
+/// ADR-0534's RECORDING HALF, and the whole of what this boundary does with
+/// `unverified_actor` — for every RPC that carries one.
+///
+/// **IT IS WRITTEN TO THE LOG AND REACHES NOTHING ELSE: no WHERE clause, no
+/// branch, no refusal.** A request carrying an actor and one carrying none take
+/// the identical path. The field is self-asserted, this service cannot verify it,
+/// and it MUST NOT be an authorisation input.
+///
+/// **ONE READER OF THE FIELD IN THIS CRATE**, so a grep for `unverified_actor`
+/// lands on this paragraph rather than on four copies of it, and so a later verb
+/// that starts carrying an actor gets the absent-and-empty handling for free
+/// instead of re-deriving it.
+///
+/// **IT SITS DIRECTLY BELOW [`tel`] BECAUSE OF WHAT MUST NEVER PASS BETWEEN
+/// THEM.** The actor goes here and NEVER into the telemetry `Scope`: every other
+/// record in the estate carries an ATTESTED `Scope.user_id`, so putting a
+/// self-asserted id in that field would make a dashboard join an unverifiable
+/// string to a verified one. `handlers` builds the `Scope`; the operations call
+/// this. The two are in different files on purpose.
+///
+/// **`target` NAMES WHAT WAS ACTED ON AND NEVER WHO ASKED.** On `CreateEnrolment`
+/// and `SetUserAdmin` the request's `user_id` is the person the act was done TO,
+/// and it is already that record's telemetry scope; recording it as the actor
+/// would attribute every promotion to the person promoted. An attribution with no
+/// object is also useless during an incident, which is why both are on one line.
+///
+/// **ABSENT AND PRESENT-HOLDING-EMPTY ARE ONE CASE** and are recorded as
+/// unattributed, NEVER as an actor whose id is the empty string — ADR-0512's
+/// collapse, pointed at the audit trail. `prost` cannot tell an absent message
+/// from a default one, so `filter` is what keeps the two together;
+/// `unwrap_or_default` would write "" as an actor.
+///
+/// **FOUR OF THE NINE RPCs THAT CARRY THE FIELD CALL THIS, AND THE OTHER FIVE ARE
+/// A GAP RATHER THAN A MECHANISM.** Stated here for the reason the module header
+/// states the same thing about `Idempotency`: a reader who greps
+/// `unverified_actor` and finds five handlers that accept one and never mention it
+/// cannot tell an omission from a decision. `CreateUser`, `CreateEnrolment`,
+/// `SetUserAdmin` and `SetInheritedSetting` record. `CreateCredential`,
+/// `RevokeCredential`, `SetRateLimitOverride`, `AddTeamMember` and
+/// `RemoveTeamMember` do not, and nothing about them argues they should not —
+/// wiring them is additive and wants the same test per verb. Booked as follow-on
+/// work rather than done here.
+///
+/// **THERE IS NO AUDIT STORE ON THIS BOUNDARY**, so the structured log is where an
+/// attribution can land today (ADR-0620). Said plainly rather than implied: the
+/// durable audit record ADR-0534 imagines does not exist here yet.
+fn record_actor(actor: Option<&UnverifiedActor>, rpc: &str, target: &str) {
+    tracing::info!(
+        unverified_actor = actor
+            .map(|a| a.user_id.as_str())
+            .filter(|id| !id.is_empty())
+            .unwrap_or("<unattributed>"),
+        rpc = rpc,
+        target = target,
+        "an administrative write carrying a self-asserted actor"
+    );
 }
 
 fn db(e: sqlx::Error) -> Status {
