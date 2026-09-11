@@ -23,6 +23,14 @@ impl IamDb {
         // answers only for a user who already has a password row. `iam` forwards
         // a key on this hop today. See the module header.
         let id = format!("yadgar:user:{}", uuid::Uuid::now_v7());
+
+        // ADR-0534's RECORDING HALF. AFTER the id rather than first, which is the
+        // only ordering difference from the other verbs: this RPC is the one whose
+        // target does not exist until it runs, and an attribution naming no object
+        // answers half the question an incident asks. Generating the id cannot
+        // fail, so nothing is recorded that the request did not reach.
+        record_actor(r.unverified_actor.as_ref(), "CreateUser", &id);
+
         sqlx::query(
             // is_admin is set AT CREATION rather than by a follow-up
             // SetUserAdmin, because D73's first admin has to exist before there

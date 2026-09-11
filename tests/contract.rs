@@ -4061,3 +4061,293 @@ async fn two_simultaneous_deliveries_of_one_setting_key_agree() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0534's RECORDING HALF, on the three administrative writes that carried the
+// field and never read it.
+//
+// **A CARRIED FIELD THAT NOTHING READS IS THE FALSE GREEN THIS SECTION EXISTS
+// FOR.** `iam` forwards a real actor onto `SetUserAdmin` today and this boundary
+// ignored it, so an attested id crossed the wire and produced no record
+// anywhere. Nothing about that is visible in a behavioural test: the write
+// succeeds, the state is right, and the attribution is gone. The only way to
+// pin it is to READ THE LOG the recording half writes, so these tests install a
+// subscriber and assert on what it rendered.
+//
+// **THE ACTOR AND THE TARGET ARE DIFFERENT PEOPLE AND ARE NEVER INTERCHANGEABLE.**
+// `CreateEnrolment` and `SetUserAdmin` both carry a `user_id` naming WHO THE ACT
+// WAS DONE TO, and both already hand that id to telemetry as the record's scope.
+// Logging it as the actor would attribute every promotion to the person promoted
+// — green, plausible, and wrong in the most misleading direction available. So
+// every fixture below gives the actor and the target DIFFERENT ids, and asserts
+// both fields.
+//
+// **ABSENT AND PRESENT-HOLDING-EMPTY ARE ONE CASE.** `prost` cannot tell an
+// absent message from a default one, so "the field is set" and "the field is set
+// to something meaningful" are different claims and each verb pins both.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Capture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .expect("the capture buffer")
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+    type Writer = Capture;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// Collect this thread's `tracing` output for as long as the guard lives.
+///
+/// THREAD-LOCAL RATHER THAN GLOBAL, which is what lets these tests run beside
+/// every other test in this binary: `set_default` installs a subscriber for the
+/// calling thread only, and `#[tokio::test]` polls the future on that same
+/// thread. A global `set_global_default` would be installed once per process and
+/// captured whichever test got there first.
+///
+/// INSTALLED AROUND THE ONE CALL UNDER TEST, never around `fresh` or the seeding
+/// — a migration run and a pool's own statements would otherwise fill the buffer
+/// with lines no assertion here is about.
+fn capturing() -> (
+    tracing::subscriber::DefaultGuard,
+    std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+) {
+    let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(Capture(buf.clone()))
+        .finish();
+    (tracing::subscriber::set_default(subscriber), buf)
+}
+
+fn rendered(buf: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>) -> String {
+    String::from_utf8(buf.lock().expect("the capture buffer").clone()).expect("the log is utf-8")
+}
+
+#[tokio::test]
+async fn create_user_records_the_actor_that_asked_for_the_person_to_exist() {
+    let svc = fresh("iam_db_test_actor_create_user").await;
+
+    let (created, log) = {
+        let (_guard, buf) = capturing();
+        let created = svc
+            .create_user(Request::new(CreateUserRequest {
+                external_id_blind_index: vec![71u8; 32],
+                external_id_ciphertext: b"ciphertext".to_vec(),
+                display_name_ciphertext: b"ciphertext".to_vec(),
+                unverified_actor: Some(UnverifiedActor {
+                    user_id: "yadgar:user:actor-one".into(),
+                }),
+                ..Default::default()
+            }))
+            .await
+            .expect("create user")
+            .into_inner();
+        (created, rendered(&buf))
+    };
+
+    assert!(
+        log.contains(r#"unverified_actor="yadgar:user:actor-one""#),
+        "the actor `iam` forwarded must reach the log: {log}"
+    );
+    // THE TARGET IS THE PERSON CREATED, and it is asserted so that an
+    // implementation logging the actor into this field — or this field's value
+    // into the actor — cannot pass.
+    let id = created.meta.expect("meta").id;
+    assert!(
+        log.contains(&format!(r#"target="{id}""#)),
+        "the record must name the person created: {log}"
+    );
+}
+
+#[tokio::test]
+async fn create_user_without_a_usable_actor_records_it_as_unattributed() {
+    let svc = fresh("iam_db_test_actor_create_user_none").await;
+
+    // ABSENT, then PRESENT-HOLDING-EMPTY. Both are unattributed and NEITHER is an
+    // actor whose id is the empty string — ADR-0512's collapse, pointed at the
+    // audit trail.
+    for (i, actor) in [None, Some(UnverifiedActor::default())]
+        .into_iter()
+        .enumerate()
+    {
+        let log = {
+            let (_guard, buf) = capturing();
+            svc.create_user(Request::new(CreateUserRequest {
+                external_id_blind_index: vec![80u8 + i as u8; 32],
+                external_id_ciphertext: b"ciphertext".to_vec(),
+                display_name_ciphertext: b"ciphertext".to_vec(),
+                unverified_actor: actor,
+                ..Default::default()
+            }))
+            .await
+            .expect("an actor decides nothing, including whether this succeeds");
+            rendered(&buf)
+        };
+
+        assert!(
+            log.contains(r#"unverified_actor="<unattributed>""#),
+            "round {i}: an unusable actor is recorded as unattributed: {log}"
+        );
+        assert!(
+            !log.contains(r#"unverified_actor="""#),
+            "round {i}: the empty string must never be written as an actor: {log}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn create_enrolment_records_the_actor_and_never_the_person_enrolled() {
+    let svc = fresh("iam_db_test_actor_create_enrolment").await;
+    let (target, _) = seed(&svc, &[21u8; 32], &[22u8; 32]).await;
+
+    let log = {
+        let (_guard, buf) = capturing();
+        svc.create_enrolment(Request::new(CreateEnrolmentRequest {
+            user_id: target.clone(),
+            secret_hash: vec![23u8; 32],
+            expires_at: Some(at(3600)),
+            unverified_actor: Some(UnverifiedActor {
+                user_id: "yadgar:user:actor-two".into(),
+            }),
+            ..Default::default()
+        }))
+        .await
+        .expect("create enrolment");
+        rendered(&buf)
+    };
+
+    assert!(
+        log.contains(r#"unverified_actor="yadgar:user:actor-two""#),
+        "the actor must reach the log: {log}"
+    );
+    // THE TRAP, ASSERTED RATHER THAN TRUSTED. `r.user_id` is already this RPC's
+    // telemetry scope; if it were logged as the actor this line would read
+    // `unverified_actor="{target}"` and every enrolment would be attributed to
+    // the person enrolled.
+    assert!(
+        !log.contains(&format!(r#"unverified_actor="{target}""#)),
+        "the person enrolled must never be recorded as the actor: {log}"
+    );
+    assert!(
+        log.contains(&format!(r#"target="{target}""#)),
+        "the record must name the person enrolled: {log}"
+    );
+}
+
+#[tokio::test]
+async fn create_enrolment_without_a_usable_actor_records_it_as_unattributed() {
+    let svc = fresh("iam_db_test_actor_create_enrolment_none").await;
+    let (target, _) = seed(&svc, &[24u8; 32], &[25u8; 32]).await;
+
+    for (i, actor) in [None, Some(UnverifiedActor::default())]
+        .into_iter()
+        .enumerate()
+    {
+        let log = {
+            let (_guard, buf) = capturing();
+            svc.create_enrolment(Request::new(CreateEnrolmentRequest {
+                user_id: target.clone(),
+                secret_hash: vec![26u8 + i as u8; 32],
+                expires_at: Some(at(3600)),
+                unverified_actor: actor,
+                ..Default::default()
+            }))
+            .await
+            .expect("an actor decides nothing, including whether this succeeds");
+            rendered(&buf)
+        };
+
+        assert!(
+            log.contains(r#"unverified_actor="<unattributed>""#),
+            "round {i}: an unusable actor is recorded as unattributed: {log}"
+        );
+        assert!(
+            !log.contains(r#"unverified_actor="""#),
+            "round {i}: the empty string must never be written as an actor: {log}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn set_user_admin_records_the_actor_and_never_the_person_promoted() {
+    // **THE ONE RPC WHERE THE FALSE GREEN WAS MEASURED.** `iam` forwards a real
+    // attested id onto this hop and `set_admin` never looked at it, so granting
+    // administrator authority produced no attribution at all.
+    let svc = fresh("iam_db_test_actor_set_user_admin").await;
+    let (target, _) = seed(&svc, &[31u8; 32], &[32u8; 32]).await;
+
+    let log = {
+        let (_guard, buf) = capturing();
+        svc.set_user_admin(Request::new(SetUserAdminRequest {
+            user_id: target.clone(),
+            is_admin: true,
+            unverified_actor: Some(UnverifiedActor {
+                user_id: "yadgar:user:actor-three".into(),
+            }),
+            ..Default::default()
+        }))
+        .await
+        .expect("promote");
+        rendered(&buf)
+    };
+
+    assert!(
+        log.contains(r#"unverified_actor="yadgar:user:actor-three""#),
+        "the actor must reach the log: {log}"
+    );
+    assert!(
+        !log.contains(&format!(r#"unverified_actor="{target}""#)),
+        "the person promoted must never be recorded as the actor: {log}"
+    );
+    assert!(
+        log.contains(&format!(r#"target="{target}""#)),
+        "the record must name the person promoted: {log}"
+    );
+}
+
+#[tokio::test]
+async fn set_user_admin_without_a_usable_actor_records_it_as_unattributed() {
+    let svc = fresh("iam_db_test_actor_set_user_admin_none").await;
+    let (target, _) = seed(&svc, &[33u8; 32], &[34u8; 32]).await;
+
+    for (i, actor) in [None, Some(UnverifiedActor::default())]
+        .into_iter()
+        .enumerate()
+    {
+        let log = {
+            let (_guard, buf) = capturing();
+            svc.set_user_admin(Request::new(SetUserAdminRequest {
+                user_id: target.clone(),
+                is_admin: true,
+                unverified_actor: actor,
+                ..Default::default()
+            }))
+            .await
+            .expect("an actor decides nothing, including whether this succeeds");
+            rendered(&buf)
+        };
+
+        assert!(
+            log.contains(r#"unverified_actor="<unattributed>""#),
+            "round {i}: an unusable actor is recorded as unattributed: {log}"
+        );
+        assert!(
+            !log.contains(r#"unverified_actor="""#),
+            "round {i}: the empty string must never be written as an actor: {log}"
+        );
+    }
+}

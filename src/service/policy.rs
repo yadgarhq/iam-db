@@ -15,6 +15,17 @@ impl IamDb {
         r: SetUserAdminRequest,
         call: Call,
     ) -> Result<Response<SetUserAdminResponse>, Status> {
+        // ADR-0534's RECORDING HALF, AND THE ONE HOP WHERE THE FIELD ALREADY
+        // ARRIVES POPULATED. `iam` forwards a real attested id onto this RPC and
+        // this operation read nothing, so granting administrator authority
+        // produced no attribution anywhere — a field carried and never read, which
+        // is indistinguishable from a field nobody sends until someone looks.
+        //
+        // `r.user_id` is the TARGET — the person promoted or demoted — and is
+        // passed as such. It is also this record's telemetry scope; recording it
+        // as the actor would attribute every promotion to the person promoted.
+        record_actor(r.unverified_actor.as_ref(), "SetUserAdmin", &r.user_id);
+
         // `deleted_at IS NULL` for the reason every clause like it exists here:
         // promoting a soft-deleted person grants authority to an account nobody
         // expects to still act.
