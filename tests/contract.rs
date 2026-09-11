@@ -1174,6 +1174,582 @@ fn the_enrolment_idempotency_discarded_counter_is_named_the_thing_an_operator_qu
     );
 }
 
+// ---------------------------------------------------------------------------
+// THE BOOTSTRAP ENROLMENT PREDICATE (ADR-0655, amended by ADR-0656; refusal
+// taxonomy ADR-0657).
+//
+// **WHAT MAKES THIS BLOCK DISCRIMINATING, AND WHY A HAPPY-PATH TEST WOULD NOT
+// BE.** A suite that only enrols a fresh zero-credential administrator passes
+// identically on ADR-0655's narrow grant and on a store with NO predicate at
+// all. The discrimination is carried by the FIXTURES and by the conjunct label,
+// and never by the message: ADR-0657 gives both conjuncts ONE code and ONE
+// sentence deliberately, so no assertion on the response can tell them apart.
+//
+// Each test below is red on exactly one deletion from `demand::INSERT`:
+//
+//   - drop `p.user_id IS NULL`  → the password-holder test reds;
+//   - drop the `iam_credential` join, or add `AND c.revoked_at IS NULL` to it
+//     → the REVOKED-credential test reds, and only that one. On a fresh account
+//     the rows-of-any-liveness reading and the live-rows widening agree, so
+//     that test is the single place in this suite where they diverge. ADR-0656
+//     demands it by name;
+//   - drop `u.is_admin = 1`     → the non-administrator test reds;
+//   - label every refusal the same → the two label assertions red, which is the
+//     false green ADR-0657's consequences name.
+// ---------------------------------------------------------------------------
+
+/// An ADMINISTRATOR with no password and no credential of any liveness.
+///
+/// `is_admin` at creation rather than by a follow-up `SetUserAdmin`, which is
+/// D73's own shape: the first administrator has to exist before anyone can log
+/// in to promote one.
+async fn admin(svc: &IamDb, blind: u8) -> String {
+    svc.create_user(Request::new(CreateUserRequest {
+        external_id_blind_index: vec![blind; 32],
+        external_id_ciphertext: b"encrypted-admin".to_vec(),
+        display_name_ciphertext: b"display".to_vec(),
+        is_admin: true,
+        ..Default::default()
+    }))
+    .await
+    .expect("create an administrator")
+    .into_inner()
+    .meta
+    .expect("meta")
+    .id
+}
+
+/// `CreateEnrolment` CARRYING THE DEMAND — the only caller shape that reaches
+/// the predicate. Every other test in this file leaves the field at proto3's
+/// default and takes the ordinary path.
+async fn demand(
+    svc: &IamDb,
+    user_id: &str,
+    secret: u8,
+) -> Result<CreateEnrolmentResponse, tonic::Status> {
+    svc.create_enrolment(Request::new(CreateEnrolmentRequest {
+        user_id: user_id.into(),
+        secret_hash: vec![secret; 32],
+        expires_at: Some(at(3600)),
+        require_zero_credential_admin: true,
+        ..Default::default()
+    }))
+    .await
+    .map(tonic::Response::into_inner)
+}
+
+/// A local metrics recorder around a current-thread runtime, and the
+/// `conjunct` labels the refusal counter recorded inside it.
+///
+/// LOCAL rather than `metrics::install()`, for the reason the idempotency sensor
+/// test already gives: a global recorder is process-wide and this binary's tests
+/// run in parallel, so installing one would race every other test that emits a
+/// metric.
+fn under_recorder<T>(body: impl FnOnce(&tokio::runtime::Runtime) -> T) -> (T, Vec<String>) {
+    let recorder = metrics_util::debugging::DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    let out = metrics::with_local_recorder(&recorder, || body(&rt));
+
+    // THE LABEL, NOT MERELY THE NAME. A build that emitted this counter with no
+    // `conjunct` label at all, or with one constant value for both conjuncts,
+    // would satisfy every assertion on the metric's NAME — and that build is
+    // exactly the one ADR-0657's consequences say a test must refuse, because
+    // the label is the operator's only signal for which half of the predicate
+    // refused.
+    let emitted = snapshotter.snapshot().into_vec();
+    let mut labels = Vec::new();
+    for (key, _, _, value) in &emitted {
+        let counted = key.key().name() == yadgar_iam_db::service::ENROLMENT_DEMAND_REFUSED
+            && matches!(
+                value,
+                metrics_util::debugging::DebugValue::Counter(n) if *n >= 1
+            );
+        if counted {
+            labels.extend(
+                key.key()
+                    .labels()
+                    .filter(|l| l.key() == "conjunct")
+                    .map(|l| l.value().to_string()),
+            );
+        }
+    }
+    (out, labels)
+}
+
+/// The ONE sentence, as a literal. ADR-0657 gives both conjuncts the same body,
+/// so this is asserted on every refusal below and discriminates none of them —
+/// which is the point of asserting it.
+const DEMAND_REFUSAL: &str =
+    "the bootstrap token may only enrol an administrator who has never held a credential";
+
+fn assert_refused(err: &tonic::Status, rows_before: i64, rows_after: i64) {
+    assert_eq!(
+        err.code(),
+        tonic::Code::PermissionDenied,
+        "the demand is refused with PERMISSION_DENIED (ADR-0655)"
+    );
+    assert_eq!(
+        err.message(),
+        DEMAND_REFUSAL,
+        "ONE body for both conjuncts (ADR-0657) — a per-conjunct message is an \
+         administrator-set enumeration oracle"
+    );
+    // AND IT WROTE NOTHING. A refusal that inserted the enrolment anyway would
+    // pass a status assertion and still have handed out the grant.
+    assert_eq!(
+        rows_after, rows_before,
+        "a refused demand must leave no new iam_enrolment row"
+    );
+}
+
+const ENROLMENTS_OF: &str = "SELECT COUNT(*) FROM iam_enrolment WHERE user_id = ?";
+
+#[tokio::test]
+async fn a_zero_credential_administrator_is_enrolled_on_the_demand() {
+    // THE POSITIVE HALF, and on its own it proves nothing about the predicate —
+    // it passes identically on a store with no predicate at all. It is here
+    // because without it the refusals below could all be satisfied by a store
+    // that refuses everything, and because ADR-0655 exists to make exactly this
+    // call succeed: it is the one that mints the first administrator's
+    // enrolment.
+    let svc = fresh("iam_db_test_demand_admin").await;
+    let user_id = admin(&svc, 120).await;
+
+    let minted = demand(&svc, &user_id, 120)
+        .await
+        .expect("a zero-credential administrator is what this grant is for");
+    assert!(!minted.enrolment_id.is_empty());
+
+    // AND IT REDEEMS. An enrolment the store reports and the person cannot spend
+    // is the failure `CreateEnrolment`'s liveness predicate already exists to
+    // prevent, and the demand arm is a second statement that could reintroduce
+    // it.
+    let got = redeem(&svc, 120, GOOD_HASH, "").await;
+    assert_eq!(got.outcome, RedeemOutcome::Redeemed as i32);
+    assert_eq!(got.user_id, user_id);
+}
+
+#[test]
+fn an_administrator_who_already_holds_a_password_is_refused_the_demand() {
+    // MUTATION THIS CATCHES: deleting `p.user_id IS NULL` from
+    // `demand::INSERT`. `iam_password` is half of ADR-0656's definition and is
+    // named separately from the credential table for a reason this fixture
+    // reproduces: a redemption's write IS the password upsert, so a predicate
+    // reading only `iam_credential` would not close the race ADR-0655 gives as
+    // its own justification — and re-enrolling a person who has chosen a
+    // password OVERWRITES it, which is takeover of an enrolled administrator
+    // rather than the creation of a new one.
+    let ((err, before, after), labels) = under_recorder(|rt| {
+        rt.block_on(async {
+            let svc = fresh("iam_db_test_demand_password").await;
+            let user_id = admin(&svc, 121).await;
+            enrol(&svc, &user_id, 121, 3600).await;
+            redeem(&svc, 121, GOOD_HASH, "").await;
+
+            let before = count(&svc, ENROLMENTS_OF, &user_id).await;
+            let err = demand(&svc, &user_id, 122)
+                .await
+                .expect_err("an administrator holding a password has held a credential");
+            let after = count(&svc, ENROLMENTS_OF, &user_id).await;
+            (err, before, after)
+        })
+    });
+
+    assert_refused(&err, before, after);
+    assert_eq!(
+        labels,
+        vec!["held_credential".to_string()],
+        "the conjunct reaches the operator through the label and nowhere else"
+    );
+}
+
+#[test]
+fn a_revoked_credential_still_refuses_the_bootstrap_demand() {
+    // **THE ROW ADR-0656 DEMANDS BY NAME, AND THE ONLY TEST IN THIS FILE THAT
+    // SEPARATES THIS BUILD FROM THE WIDENED ONE.** On a fresh account "no
+    // credential row" and "no LIVE credential row" agree, so every other test
+    // here passes under both readings. This one does not.
+    //
+    // MUTATION THIS CATCHES: adding `AND c.revoked_at IS NULL` to the credential
+    // join — the tidy-up every other liveness predicate on this boundary invites,
+    // and the reason ADR-0656 had to rule it a defect explicitly. Under that
+    // reading an established administrator who revoked their own credential
+    // presents as holding zero, the bootstrap token mints them an enrolment, and
+    // redeeming it sets a password on an established account: account takeover
+    // with an unattributable credential.
+    //
+    // `RevokeCredential` tombstones rather than deletes (D26), which is what
+    // makes counting rows a PROPERTY of the predicate rather than a fact about
+    // the estate — once a user has ever held a credential the row is there
+    // forever, and no commit in another repository can take it away.
+    let ((err, before, after), labels) = under_recorder(|rt| {
+        rt.block_on(async {
+            let svc = fresh("iam_db_test_demand_revoked").await;
+            let user_id = admin(&svc, 123).await;
+            let cred = svc
+                .create_credential(Request::new(CreateCredentialRequest {
+                    user_id: user_id.clone(),
+                    token_hash: vec![123u8; 32],
+                    label: "the laptop they no longer have".into(),
+                    ..Default::default()
+                }))
+                .await
+                .expect("create credential")
+                .into_inner()
+                .credential_id;
+            svc.revoke_credential(Request::new(RevokeCredentialRequest {
+                credential_id: cred,
+                ..Default::default()
+            }))
+            .await
+            .expect("revoke");
+
+            // AND NO PASSWORD ROW, deliberately: this fixture isolates the
+            // credential conjunct, so the refusal cannot be the password half
+            // passing for it.
+            assert_eq!(
+                count(
+                    &svc,
+                    "SELECT COUNT(*) FROM iam_password WHERE user_id = ?",
+                    &user_id
+                )
+                .await,
+                0,
+                "this fixture must hold a revoked credential and nothing else"
+            );
+
+            let before = count(&svc, ENROLMENTS_OF, &user_id).await;
+            let err = demand(&svc, &user_id, 124)
+                .await
+                .expect_err("a revoked credential is a credential the person once held");
+            let after = count(&svc, ENROLMENTS_OF, &user_id).await;
+            (err, before, after)
+        })
+    });
+
+    assert_refused(&err, before, after);
+    assert_eq!(labels, vec!["held_credential".to_string()]);
+}
+
+#[test]
+fn a_zero_credential_non_administrator_is_refused_the_demand() {
+    // MUTATION THIS CATCHES: deleting `u.is_admin = 1`. Without it the bootstrap
+    // token enrols any account nobody has logged into yet, which is the
+    // unrestricted grant ADR-0492 refused and ADR-0655 narrowed rather than
+    // opened.
+    //
+    // AND IT IS THE SECOND LABEL. Two conjuncts, two tests, two label values —
+    // so a build that emitted one constant label, or no label, cannot pass both.
+    let ((err, before, after), labels) = under_recorder(|rt| {
+        rt.block_on(async {
+            let svc = fresh("iam_db_test_demand_not_admin").await;
+            let user_id = enrolee(&svc, 125, b"encrypted-ordinary").await;
+
+            let before = count(&svc, ENROLMENTS_OF, &user_id).await;
+            let err = demand(&svc, &user_id, 125)
+                .await
+                .expect_err("the demand admits administrators only");
+            let after = count(&svc, ENROLMENTS_OF, &user_id).await;
+            (err, before, after)
+        })
+    });
+
+    assert_refused(&err, before, after);
+    assert_eq!(labels, vec!["not_admin".to_string()]);
+}
+
+#[tokio::test]
+async fn the_absent_demand_still_enrols_an_administrator_who_holds_a_password() {
+    // THE INVERSE OF THE PASSWORD TEST, BESIDE IT SO THE PAIR CANNOT DRIFT
+    // APART. Re-enrolment IS the documented recovery for a forgotten password
+    // (`iam.proto`: a fresh enrolment for an existing user, redeemed, sets the
+    // password unconditionally), and `a_spent_enrolment_blocks_no_fresh_one`
+    // already guards it for an ordinary person. This guards it for an
+    // ADMINISTRATOR, which is the account the predicate above refuses — so it is
+    // the test that reds if the predicate ever leaks onto the absent-field arm.
+    let svc = fresh("iam_db_test_demand_absent").await;
+    let user_id = admin(&svc, 126).await;
+    enrol(&svc, &user_id, 126, 3600).await;
+    redeem(&svc, 126, GOOD_HASH, "").await;
+
+    let second = enrol(&svc, &user_id, 127, 3600).await;
+    assert!(
+        !second.is_empty(),
+        "the ordinary path is byte-identical to what it was before the demand \
+         field existed — proto3 defaults the field to false for every caller \
+         that predates it"
+    );
+    let got = redeem(&svc, 127, GOOD_HASH, "").await;
+    assert_eq!(got.outcome, RedeemOutcome::Redeemed as i32);
+}
+
+#[test]
+fn the_enrolment_demand_refused_counter_is_named_the_thing_an_operator_queries() {
+    // AS A LITERAL, never through the constant — ADR-0599, the same argument the
+    // idempotency sensor's name test above carries. This counter is load-bearing
+    // in a way that one is not: ADR-0657 keeps the conjunct out of the response
+    // entirely, so this series and the warn beside it are the operator's ONLY
+    // path to which half of the predicate refused.
+    assert_eq!(
+        yadgar_iam_db::service::ENROLMENT_DEMAND_REFUSED,
+        "yadgar_iamdb_enrolment_demand_refused_total"
+    );
+}
+
+#[tokio::test]
+async fn the_servers_default_isolation_is_repeatable_read() {
+    // THE ASSUMPTION THE PROBE BELOW RESTS ON, PINNED RATHER THAN ASSUMED.
+    // `mint_enrolment` runs autocommit on the pool and pins no isolation level,
+    // so `demand::INSERT`'s locking read takes a next-key lock only because the
+    // server's default is REPEATABLE READ. `deploy/infra/databases/iam-db.yaml`
+    // runs `mariadb:11.8.8` with no configuration of its own and nothing in this
+    // crate issues `SET SESSION`, so the engine default is what the deployment
+    // gets. If a future server default changes, this reds and names the reason
+    // rather than leaving the next test failing mysteriously.
+    let svc = fresh("iam_db_test_demand_isolation").await;
+    let level: String = sqlx::query_scalar("SELECT @@transaction_isolation")
+        .fetch_one(svc.pool())
+        .await
+        .expect("read the isolation level");
+    assert_eq!(
+        level, "REPEATABLE-READ",
+        "the demand statement's gap lock is what serialises it against a \
+         concurrent redemption, and READ COMMITTED takes none"
+    );
+}
+
+/// Insert the password row a redemption would write, on its own connection,
+/// with a short lock wait so a block fails fast rather than sitting on
+/// `innodb_lock_wait_timeout`'s 50 seconds.
+async fn contend_for_the_password(
+    pool: &sqlx::MySqlPool,
+    user_id: &str,
+) -> Result<(), sqlx::Error> {
+    let mut conn = pool.acquire().await.expect("a second connection");
+    sqlx::query("SET SESSION innodb_lock_wait_timeout = 2")
+        .execute(&mut *conn)
+        .await
+        .expect("shorten the wait");
+    sqlx::query("INSERT INTO iam_password (user_id, argon2id_hash) VALUES (?, ?)")
+        .bind(user_id)
+        .bind(GOOD_HASH)
+        .execute(&mut *conn)
+        .await
+        .map(|_| ())
+}
+
+/// One arm of the lock probe, start to finish: run `demand::INSERT` ITSELF in a
+/// held transaction, contend for the password row while it is open, commit, and
+/// contend again. Answers `(blocked while open, landed after the commit)`.
+///
+/// `read_committed` pins the level for this transaction only, the way ADR-0513
+/// requires it to be pinned — `pool.acquire()` then `Acquire::begin`, never
+/// `pool.begin()`, because `SET TRANSACTION` without SESSION applies to the next
+/// transaction and then reverts, leaving a pooled connection clean for its next
+/// borrower.
+async fn probe_the_lock(
+    pool: &sqlx::MySqlPool,
+    user_id: &str,
+    id: &str,
+    secret: u8,
+    read_committed: bool,
+) -> (bool, bool) {
+    let mut conn = pool.acquire().await.expect("the demand's connection");
+    if read_committed {
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+            .execute(&mut *conn)
+            .await
+            .expect("pin READ COMMITTED for the next transaction only");
+    }
+    let mut tx = sqlx::Acquire::begin(&mut *conn).await.expect("begin");
+    let done = sqlx::query(yadgar_iam_db::service::DEMAND_INSERT)
+        .bind(id)
+        .bind(vec![secret; 32])
+        .bind(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_secs() as i64
+                + 3600,
+        )
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .expect("the demand statement must run");
+    assert_eq!(
+        done.rows_affected(),
+        1,
+        "the probe's fixture is a zero-credential administrator, so the \
+         statement must insert — a zero here would leave the lock untested"
+    );
+
+    let blocked = contend_for_the_password(pool, user_id).await.is_err();
+    tx.commit().await.expect("commit the demand");
+    // THE POSITIVE CONTROL. Only meaningful when the first attempt was blocked,
+    // and asserted by the caller for that arm.
+    let landed = match blocked {
+        true => contend_for_the_password(pool, user_id).await.is_ok(),
+        false => true,
+    };
+    (blocked, landed)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_demand_statement_blocks_a_concurrent_password_insert() {
+    // **THE LOAD-BEARING MEASUREMENT OF THIS WHOLE CHANGE, AND IT RUNS THE
+    // HANDLER'S OWN SQL** (`service::DEMAND_INSERT`) rather than a copy. ADR-0655
+    // bought "true at the moment it is used", and that is only true if the
+    // locking read in that statement MATERIALISES a lock the concurrent
+    // redemption's `iam_password` insert has to wait for. Whether it does is a
+    // property of the engine and the isolation level, not of the SQL text, so it
+    // is measured rather than argued.
+    //
+    // BOTH ARMS ARE HERE because the answer differs between them, and the
+    // handler's arm is the first one: `mint_enrolment` runs autocommit on the
+    // pool and pins nothing, so it inherits the server's default —
+    // `the_servers_default_isolation_is_repeatable_read` above is what pins that
+    // assumption, and `deploy/infra/databases/iam-db.yaml` runs `mariadb:11.8.8`
+    // with no configuration of its own.
+    //
+    // MEASURED 2026-09-11 on MariaDB 11.8.9, the digest CI's `services:` block
+    // pins; the deployment runs 11.8.8 of the same series:
+    //
+    //   - AT THE SERVER DEFAULT (REPEATABLE READ) the password insert BLOCKS and
+    //     fails on the 2-second wait, then COMPLETES once the transaction
+    //     commits. That is the shape the handler gets.
+    //   - WITH THE DEMAND'S OWN TRANSACTION PINNED TO READ COMMITTED the insert
+    //     LANDS IMMEDIATELY: no gap lock is taken, and the enrolment still
+    //     commits — the one-statement-wide window §6.3 of
+    //     `plans/the-bootstrap-enrolment-predicate.md` describes. Asserted here
+    //     too, so a future engine that starts blocking at READ COMMITTED reds
+    //     this and says so; the answer to that red is to re-measure the
+    //     reasoning, never to "fix" the assertion.
+    //
+    // THE POSITIVE CONTROL IS WHAT MAKES THE FIRST ARM PROOF. A probe that
+    // cannot tell "blocked by the lock" from "hung for an unrelated reason"
+    // passes on a broken engine, a wrong DSN or a deadlock. Blocked-THEN-RELEASED
+    // is the proof; blocked-forever is a red.
+    let svc = fresh("iam_db_test_demand_lock").await;
+    let user_id = admin(&svc, 128).await;
+
+    let (blocked, landed) = probe_the_lock(
+        svc.pool(),
+        &user_id,
+        "yadgar:enrolment:probe-rr",
+        128,
+        false,
+    )
+    .await;
+    assert!(
+        blocked,
+        "at the server's default isolation a redemption's password insert must \
+         WAIT on the demand statement's lock — if it lands, the predicate was \
+         evaluated against a state that changed before the enrolment committed, \
+         which is the race ADR-0655 put the predicate inside the write to close"
+    );
+    assert!(
+        landed,
+        "the control: the same insert, once the lock is released, must land — \
+         blocked-forever would mean the assertion above passed for a reason with \
+         nothing to do with the lock"
+    );
+
+    // THE SECOND ARM, on a second person so the first arm's password row is not
+    // the thing being measured.
+    let other = admin(&svc, 129).await;
+    let (blocked_at_rc, _) =
+        probe_the_lock(svc.pool(), &other, "yadgar:enrolment:probe-rc", 129, true).await;
+    assert!(
+        !blocked_at_rc,
+        "READ COMMITTED takes no gap lock, so the insert lands while the demand \
+         statement's transaction is still open. This is the measurement, not a \
+         requirement: a red here means the engine's gap-lock behaviour changed, \
+         so re-measure §6.3's reasoning rather than editing this assertion"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_demand_and_a_redemption_racing_never_enrol_a_person_who_gained_a_password() {
+    // THE SMOKE OVER THE TOP OF THE PROBE ABOVE, and it is honestly the weaker
+    // of the two: outcome assertions cannot distinguish the legal both-succeed
+    // interleaving from the illegal one, which is exactly why the lock probe is
+    // the load-bearing gate. What this catches is a demand arm that answers
+    // something OTHER than success-or-the-one-refusal under contention — an
+    // `ER_CHECKREAD` rendered as UNAVAILABLE, a deadlock, a duplicate-key error
+    // — none of which any sequential test in this file can reach.
+    let svc = std::sync::Arc::new(fresh("iam_db_test_demand_race").await);
+
+    for round in 0..5u8 {
+        let user_id = admin(&svc, 130 + round).await;
+        let live = 140 + round;
+        enrol(&svc, &user_id, live, 3600).await;
+
+        let gate = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let minting = {
+            let svc = std::sync::Arc::clone(&svc);
+            let gate = std::sync::Arc::clone(&gate);
+            let user_id = user_id.clone();
+            tokio::spawn(async move {
+                gate.wait().await;
+                svc.create_enrolment(Request::new(CreateEnrolmentRequest {
+                    user_id,
+                    secret_hash: vec![150 + round; 32],
+                    expires_at: Some(at(3600)),
+                    require_zero_credential_admin: true,
+                    ..Default::default()
+                }))
+                .await
+            })
+        };
+        let redeeming = {
+            let svc = std::sync::Arc::clone(&svc);
+            let gate = std::sync::Arc::clone(&gate);
+            tokio::spawn(async move {
+                gate.wait().await;
+                svc.redeem_enrolment(Request::new(RedeemEnrolmentRequest {
+                    secret_hash: vec![live; 32],
+                    argon2id_hash: GOOD_HASH.into(),
+                    idempotency: None,
+                }))
+                .await
+            })
+        };
+
+        let redeemed = redeeming
+            .await
+            .expect("the redemption task")
+            .expect("the redemption must not error")
+            .into_inner();
+        assert_eq!(
+            redeemed.outcome,
+            RedeemOutcome::Redeemed as i32,
+            "round {round}: the redemption holds a live secret and must succeed \
+             whichever way the race falls"
+        );
+
+        // TWO OUTCOMES ARE LEGAL AND NOTHING ELSE IS. Either the demand
+        // committed before the password existed, or it saw the password and
+        // refused with ADR-0657's single sentence.
+        match minting.await.expect("the minting task") {
+            Ok(_) => {}
+            Err(err) => {
+                assert_eq!(
+                    err.code(),
+                    tonic::Code::PermissionDenied,
+                    "round {round}: the only legal refusal here is the \
+                     predicate's — UNAVAILABLE would be an ER_CHECKREAD or a \
+                     deadlock reported as the store being broken"
+                );
+                assert_eq!(err.message(), DEMAND_REFUSAL);
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn a_soft_deleted_persons_enrolment_is_not_redeemable() {
     // MUTATION THIS CATCHES: dropping the JOIN's `u.deleted_at IS NULL`. An

@@ -219,12 +219,13 @@ message SetPasswordResponse {}
 message CreateEnrolmentRequest {
   // WHICH FIELDS COUNT AS THE PAYLOAD, stated per RPC as
   // yadgar.common.v1.Idempotency requires rather than left to a reader:
-  // `user_id`, `secret_hash` AND `expires_at` — every field of this request but
-  // two. `idempotency` itself carries the key the comparison is keyed on, and
-  // `unverified_actor` is EXCLUDED because it is inert by construction: see
-  // yadgar.common.v1.UnverifiedActor, which states that exclusion once for every
-  // RPC that carries the field. A repeated key carrying a different one of the
-  // three named above is REFUSED with INVALID_ARGUMENT by that org-wide rule.
+  // `user_id`, `secret_hash`, `expires_at` AND `require_zero_credential_admin`
+  // — every field of this request but two. `idempotency` itself carries the
+  // key the comparison is keyed on, and `unverified_actor` is EXCLUDED because
+  // it is inert by construction: see yadgar.common.v1.UnverifiedActor, which
+  // states that exclusion once for every RPC that carries the field. A
+  // repeated key carrying a different one of the four named above is REFUSED
+  // with INVALID_ARGUMENT by that org-wide rule.
   //
   // `secret_hash` IS THE FIELD THAT MAKES THE REFUSAL BITE, and it is why this
   // enumeration is load-bearing rather than tidy. A caller reading the payload
@@ -234,6 +235,19 @@ message CreateEnrolmentRequest {
   // retried yadgar.iam.v1.IssueEnrolment ALWAYS arrives here with a differing
   // `secret_hash`; the refusal is therefore structural rather than a rule an
   // implementation has to remember to apply.
+  //
+  // `require_zero_credential_admin` JOINS THIS ENUMERATION rather than sitting
+  // beside it as inert, and the `unverified_actor` exclusion rationale does
+  // NOT transfer to it: `unverified_actor` is excluded because it is recorded
+  // and never authorised on, while this field is authorised on directly —
+  // `iam-db` REFUSES the write on it (ADR-0655, amended by ADR-0656). A
+  // repeated key carrying a different demand value is a DIFFERENT REQUEST,
+  // not a retry: one of them demands the predicate below be evaluated inside
+  // the write and the other does not, so replaying either as the other would
+  // answer a request nobody made. `iam` mints a fresh `secret_hash` per
+  // attempt regardless, so the refusal is structural either way — but this
+  // enumeration is the CONTRACT the comparison is written against, and it
+  // must be right independently of that.
   //
   // The hash is deterministic — an enrolment is looked up by it — so this
   // boundary can compare the one presented now against the one the key
@@ -251,6 +265,33 @@ message CreateEnrolmentRequest {
   // service cannot verify it and MUST NOT authorise on it. The rule is stated
   // once, on yadgar.common.v1.UnverifiedActor, rather than restated here.
   yadgar.common.v1.UnverifiedActor unverified_actor = 5;
+
+  // THE BOOTSTRAP-ENROLMENT DEMAND (ADR-0655, amended by ADR-0656). Set true,
+  // this service refuses the insert unless the target user is an
+  // administrator AND holds "zero credentials" in ADR-0656's sense: no
+  // `iam_password` row, AND no `iam_credential` row OF ANY LIVENESS — revoked
+  // rows count. A `revoked_at IS NULL` qualifier anywhere in the enforcing
+  // predicate is the widening ADR-0656 exists to refuse: `RevokeCredential`
+  // (`iam-db/src/service.rs:614`) tombstones rather than deletes (D26), so a
+  // live-rows reading would let a revoked administrator present as holding
+  // zero and become enrollable again — account takeover of an established
+  // account.
+  //
+  // A DEMAND, NOT A HINT. This service enforces it inside the same
+  // transaction as the insert; the caller cannot set it and then have it
+  // ignored. Absent (the default) means the ordinary administrator-authorized
+  // path, byte-identical to today — which is what keeps re-enrolment
+  // available as the recovery for a forgotten password.
+  //
+  // ONE REFUSAL, ONE BODY, FOR BOTH CONJUNCTS. Whichever conjunct fails — the
+  // target is not an administrator, or the target already holds a credential
+  // — this service answers `PERMISSION_DENIED` with the SAME constant
+  // sentence either way, by ruling: a per-conjunct message would hand a
+  // leaked bootstrap token an oracle for administrator-set enumeration. The
+  // conjunct that actually failed is recorded ONLY where the operator reads
+  // it — this service's own log line and a closed-set `conjunct` telemetry
+  // label — and never in the response.
+  bool require_zero_credential_admin = 6;
 }
 message CreateEnrolmentResponse {
   string enrolment_id = 1;
