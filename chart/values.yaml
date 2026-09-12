@@ -187,6 +187,11 @@ autoscaling:
   threshold: "10"
   prometheusAddress: http://prometheus-server.observability.svc.cluster.local
 
+networkPolicy:
+  enabled: false
+  clients: [iam]
+  scrapeFrom: {}
+
 # ADR-0523's ROTATION WATCHER: how often this pod re-hashes the files it read at
 # boot, and how long it waits before exiting on a change.
 #

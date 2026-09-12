@@ -1,0 +1,142 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- /*
+  `compact` BEFORE THE EMPTINESS TEST, and that is not defensive noise. Helm
+  parses `--set networkPolicy.clients={}` into a list holding ONE EMPTY STRING,
+  not an empty list — measured, not assumed — so a bare truthiness test passes
+  and the range below renders `podSelector: {matchLabels: {app: ""}}`. That
+  selector is accepted and matches no pod, which denies 50051 to every caller.
+  `compact` drops empty and nil entries so both shapes reach the refusal below,
+  and a blank entry beside a real one is dropped rather than rendered for the
+  same reason.
+*/}}
+{{- $clients := compact (.Values.networkPolicy.clients | default list) }}
+{{- if not $clients }}
+{{- fail "networkPolicy.enabled is true but networkPolicy.clients names no workload. This template refuses to render rather than emit a rule with an empty `from`, because an empty or missing `from` does NOT deny — the Kubernetes API defines it as matching ALL sources, so the rendered policy would open port 50051 to every pod in the cluster while still listing and describing as a control. Name the workloads that may reach iam-db (default: [iam]), or set networkPolicy.enabled to false." }}
+{{- end }}
+# ONE INGRESS POLICY FOR `iam-db` (ledger 511, stage 4). It admits the module's
+# gRPC callers on 50051 and, when a scrape source is named, Prometheus on 9090.
+# Everything else that reaches these pods is dropped.
+#
+# THIS IS ONE OF SIX COPIES OF ONE TEMPLATE. The canonical copy is held in
+# `yadgarhq/iam`; `iam-db`, `task`, `task-db`, `project` and `project-db` each
+# carry their own, differing only in the port and the default client list;
+# the comments here are the shared reasoning and are not re-derived per chart.
+#
+# WHY THIS DEFAULTS OFF, AND IT IS NOT THE REASON `autoscaling.enabled` IS OFF.
+# That default exists because KEDA's CRD may be absent and the chart would then
+# not install at all. A NetworkPolicy is core API and installs everywhere, so
+# that arm of D80 does not reach it; D80's fail-closed rule, read alone, argues
+# for `true`. The reason is ASYMMETRIC COST: a wrong policy on an enforcing CNI
+# is an outage, and an absent one is no worse than today. The allow-list below
+# is correct for THIS deployment and is an assertion about somebody else's
+# topology anywhere else. An adopter with an enforcing CNI turns it on with one
+# value and gets the whole baseline; an adopter whose topology differs is not
+# handed a silent partition on first install.
+#
+# THE ALLOW-LIST IS A VALUE, NEVER A PATCH (D80 — configuration is the seam).
+# `networkPolicy.clients` holds workload names and each becomes a
+# `podSelector` on `app: <name>`, so an operator with another caller overrides a
+# list instead of post-processing rendered YAML.
+#
+# NO EGRESS RULE, AND `policyTypes` IS WRITTEN OUT. Module egress policies are
+# declined: nothing here constrains this pod's own outbound traffic to its own
+# database or kube-dns. `policyTypes: [Ingress]` is stated rather than inferred
+# because an omitted `policyTypes` derives the type set from which rule blocks
+# happen to be present — behaviour that changes when somebody adds a block, and
+# exactly the kind of implicit rule that makes a policy hard to reason about a
+# year later.
+#
+# THIS ADDS NO NAMESPACE-WIDE DEFAULT-DENY, and none is coming from this plan.
+# Each policy covers only the pods its own `podSelector` matches; a pod matched
+# by no policy stays fully reachable. That is what makes the rollout stageable
+# one module at a time.
+#
+# THERE IS NO RULE FOR THE READINESS PROBE, AND THAT IS NOT AN OMISSION.
+# Kubelet probe traffic originates on the node rather than from a pod, so a
+# pod-selector ingress rule never applies to it (ADR-0592). Measured in the
+# reference cluster: valkey ran thirteen hours at `restartCount: 0` under an
+# ingress policy the kubelet matches no rule in. An adopter on a CNI that does
+# subject the kubelet to policy sees the LOUDEST failure on the list — every
+# replica goes NotReady and the EndpointSlice empties within seconds — which is
+# why it is the least dangerous way for this to be wrong.
+#
+# BEFORE YOU LABEL A PROBE POD TO TEST THIS, READ THE SERVICE SELECTOR. A label
+# this policy permits is frequently ALSO a Service's selector: `svc/gateway`
+# selects exactly `{"app":"gateway"}`. A throwaway pod wearing `app=gateway` is
+# therefore ADDED AS A LIVE ENDPOINT of the gateway Service — with no
+# readinessProbe it is Ready at once — and starts taking real front-door
+# traffic, which is not a denial test but an outage. Check
+# `kubectl get svc/<name> -o jsonpath='{.spec.selector}'` first and pick a label
+# no Service selects.
+#
+# HOW A WRONG POLICY SHOWS UP: as a TIMEOUT, never a refusal. A drop logs
+# nothing, moves no counter and changes no object's state. A `clients` list that
+# is too narrow leaves every pod `1/1 Running` at restart count 0 and the Argo
+# Application Healthy while the hop fails. `yadgar_dial_upstream_never_resolved`
+# does not catch it either: that gauge is keyed on resolution, and DNS still
+# resolves — the policy drops the TCP connect, not the lookup. A real request
+# through the edge is the only check that sees it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  # `<chart>-ingress`, matching the two policies the reference namespace already
+  # carries (`nats-ingress`, `valkey-ingress`) and colliding with neither. Those
+  # two select on `app.kubernetes.io/name` and this one on `app`, so no policy
+  # here selects another's pods.
+  name: {{ .Chart.Name }}-ingress
+  labels:
+    app: {{ .Chart.Name }}
+spec:
+  # WHOSE INGRESS THIS GOVERNS. `app: iam-db` is exactly what this chart's Service
+  # selects, so the policy and the Service cannot come to cover different pods.
+  # A typo here produces a policy that is accepted, listed and described while
+  # matching NO pod — everything keeps working and nothing is protected, which
+  # is the quietest way for this file to be wrong.
+  podSelector:
+    matchLabels:
+      app: {{ .Chart.Name }}
+  policyTypes:
+    - Ingress
+  ingress:
+    # THE CALLERS, ON THE gRPC PORT. 50051 is pinned by a literal here for the
+    # same reason `templates/service.yaml` and the container's `containerPort`
+    # pin it: it is this module's fixed contract, not a knob.
+    - ports:
+        - protocol: TCP
+          port: 50051
+      # A `podSelector` WITH NO `namespaceSelector` BESIDE IT MATCHES THIS
+      # NAMESPACE ONLY. A caller labelled `app: gateway` in another namespace is
+      # dropped, silently, whatever this list says — unlike the scrape rule
+      # below, where a lone `namespaceSelector` deliberately reaches out of this
+      # namespace. Every client in the reference deployment is a namespace-mate,
+      # so this is correct here and stated because nothing else states it. A
+      # cross-namespace caller needs a `namespaceSelector` in the SAME list item
+      # as its `podSelector`; two separate items are an OR and admit far more
+      # than intended.
+      from:
+        {{- range $clients }}
+        - podSelector:
+            matchLabels:
+              app: {{ . }}
+        {{- end }}
+    {{- if .Values.networkPolicy.scrapeFrom.namespace }}
+    # THE SCRAPE, ON THE METRICS PORT. Omitted entirely unless a source is
+    # named, because the source is deployment-specific and no chart default
+    # could be right. Getting this wrong is the quietest failure in the set:
+    # Prometheus targets for this module simply go down, nothing else changes,
+    # and KEDA's queries then return no data and its ScaledObjects stop
+    # tracking. Assert `up{...}` after enabling — a series COUNT of 2, each
+    # value 1. An empty result set has no zeros in it either.
+    - ports:
+        - protocol: TCP
+          port: 9090
+      from:
+        # A `namespaceSelector` on the label Kubernetes sets on every namespace
+        # itself, so nothing has to be labelled by hand. This admits EVERY pod
+        # in that namespace to 9090, which is the trade for not coupling this
+        # chart to the pod labels of whatever runs the scrape.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.scrapeFrom.namespace }}
+    {{- end }}
+{{- end }}
