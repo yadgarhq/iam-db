@@ -33,3 +33,25 @@ updates:
       # Patch and minor together; a major is worth its own PR and its own read.
       minor-and-patch:
         update-types: [minor, patch]
+    # ADR-0690: Dependabot orders these four crates' git tags LEXICALLY, not
+    # by semver. "v0.2.9" > "v0.2.10" on a character comparison, so once a
+    # patch number reached two digits every proposal from these names became
+    # a downgrade wearing the word "bump" — verified on nineteen closed pull
+    # requests, one by diff (gateway#85 rewrote both Cargo.toml's tag and
+    # Cargo.lock's locked commit sha to the older release).
+    #
+    # A `dependency-name` entry with no `versions`/`update-types` ignores
+    # ALL versions for that name — dependabot-core's own IgnoreCondition
+    # returns ">= 0" in that case, checked against source rather than
+    # assumed — so this is a full stop for these four names, not a filtered
+    # subset. Third-party registry crates in this ecosystem are unaffected;
+    # `dependency-name` matches only these literal names.
+    #
+    # This is not a version-update pause. The pins are frozen behind the
+    # semver-greatest tags, and closing that gap is a deliberate re-pin round
+    # with tests, tracked separately — not a Dependabot bump.
+    ignore:
+      - dependency-name: "yadgar-telemetry"
+      - dependency-name: "yadgar-lifecycle"
+      - dependency-name: "yadgar-dial"
+      - dependency-name: "yadgar-store"
