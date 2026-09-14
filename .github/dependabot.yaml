@@ -33,19 +33,32 @@ updates:
       # Patch and minor together; a major is worth its own PR and its own read.
       minor-and-patch:
         update-types: [minor, patch]
-    # ADR-0690: Dependabot orders these four crates' git tags LEXICALLY, not
-    # by semver. "v0.2.9" > "v0.2.10" on a character comparison, so once a
-    # patch number reached two digits every proposal from these names became
-    # a downgrade wearing the word "bump" — verified on nineteen closed pull
-    # requests, one by diff (gateway#85 rewrote both Cargo.toml's tag and
-    # Cargo.lock's locked commit sha to the older release).
+    # ADR-0690: these four crates' git tags got proposed as downgrades
+    # wearing the word "bump" once a patch number reached two digits — ADR-0690
+    # attributes this to Dependabot ordering the tags lexically rather than by
+    # semver ("v0.2.9" > "v0.2.10" on a character comparison). Observed as
+    # nineteen closed reversal pull requests, one confirmed by diff
+    # (gateway#85 rewrote both Cargo.toml's tag and Cargo.lock's locked
+    # commit sha to the older release). The exclusion below does not depend
+    # on that attribution being the whole story; it stops the channel for
+    # these four names regardless of cause.
     #
-    # A `dependency-name` entry with no `versions`/`update-types` ignores
-    # ALL versions for that name — dependabot-core's own IgnoreCondition
-    # returns ">= 0" in that case, checked against source rather than
-    # assumed — so this is a full stop for these four names, not a filtered
-    # subset. Third-party registry crates in this ecosystem are unaffected;
-    # `dependency-name` matches only these literal names.
+    # A `dependency-name` entry with no `versions`/`update-types` ignores ALL
+    # versions for that name — dependabot-core's own IgnoreCondition returns
+    # ">= 0" in that case, checked against source rather than assumed — so
+    # this is a full stop for these four names, not a filtered subset. Third-
+    # party registry crates in this ecosystem are unaffected; `dependency-
+    # name` matches only these literal names.
+    #
+    # Checked against the `groups:` block above, not just the ungrouped
+    # path: dependabot-core issue #10122 (open) reports partial ignores
+    # (major/minor-only) leaking through group semver-classification.
+    # `updater/lib/dependabot/updater/group_update_creation.rb`'s
+    # `compile_updates_for` builds the checker with the same
+    # `ignore_conditions_for(dependency)`, and a bare `dependency-name` match
+    # (all versions ignored) exits at `all_versions_ignored?` before
+    # `semver_rules_allow_grouping?` ever runs — the code path #10122
+    # concerns. A full ignore is unaffected by that bug.
     #
     # This is not a version-update pause. The pins are frozen behind the
     # semver-greatest tags, and closing that gap is a deliberate re-pin round
