@@ -19,7 +19,7 @@ description = "The identity module's -db twin: the only writer of its store, ser
 # perform: it accepted any publicly-trusted certificate for any name. Nothing in
 # this estate runs it, so the refusal changes no deployment; `verify_identity`
 # is the mode that binds the connection to the engine it names.
-yadgar-store = { git = "https://github.com/yadgarhq/store.git", tag = "v0.2.6" }
+yadgar-store = { git = "https://github.com/yadgarhq/store.git", tag = "v0.2.5" }
 # In tonic 0.14 prost codegen moved out to tonic-prost; there is no "prost"
 # feature on tonic itself.
 #

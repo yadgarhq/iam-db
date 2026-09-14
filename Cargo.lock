@@ -2029,7 +2029,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -2738,7 +2738,7 @@ dependencies = [
 [[package]]
 name = "yadgar-store"
 version = "0.1.0"
-source = "git+https://github.com/yadgarhq/store.git?tag=v0.2.6#d6abe3e26c1cff4b4df9956a30f2dd8923710b8f"
+source = "git+https://github.com/yadgarhq/store.git?tag=v0.2.5#db1a28b2df91a50e9457cf9061a28a1ab54e024e"
 dependencies = [
  "sqlx",
  "thiserror",
