@@ -22,7 +22,15 @@ repos:
   # at first install and never re-resolves it, so a moving tag would silently
   # freeze each machine at whatever it meant the day it first ran.
   - repo: https://github.com/yadgarhq/actions
-    rev: v1.20.1
+    # THE REV MOVES FROM v1.20.1 TO v1.22.0 FOR THE TWO IDS BELOW, and the whole
+    # block comes with it because pre-commit resolves one rev per repository
+    # entry. `git diff --stat v1.20.1 v1.22.0 -- hooks/ .pre-commit-hooks.yaml`
+    # is 1901 insertions and 0 deletions, touching only the new
+    # `hooks/chart_baseline.py` and the two manifest entries that publish it — so
+    # no hook already in this block changes behaviour. A second `repo:` entry
+    # pinning the same repository at a second rev was the alternative, and it is
+    # the drift the shared manifest exists to prevent.
+    rev: v1.22.0
     hooks:
       - id: gitleaks
       - id: prettier
@@ -99,3 +107,28 @@ repos:
       # `observe-coverage` hook enforces. See the PR body for the
       # measurement.
       - id: no-test-skips
+      # LEDGER 511, adopted as BOTH halves ADR-0685 split that gate into.
+      # ADR-0577 makes a published hook inert until a repository references it,
+      # and both halves were published at v1.22.0 and referenced by nobody — so
+      # these two lines are what enforce the four baseline fields here for the
+      # first time.
+      #
+      # `chart-baseline` asserts the three fields that are properties of the
+      # chart's own pod spec: the grace period against ADR-0601's floor, a
+      # dedicated ServiceAccount with no API token, and a hostname topology
+      # spread carrying `ScheduleAnyway` so it cannot hang a roll.
+      # `chart-network-policy` asserts the fourth, that a template declares
+      # `kind: NetworkPolicy`. The split is not an exemption mechanism for this
+      # repository: it exists because `yadgarhq/gateway`'s ingress policy
+      # legitimately lives in `yadgarhq/deploy`, and that repository therefore
+      # references the first id only. This one references both, so its charts
+      # are covered whole.
+      #
+      # Measured on this tree at v1.22.0: chart-baseline 1 chart, 1 judged, 29
+      # assertions evaluated, 0 findings; chart-network-policy 1 chart, 1
+      # judged, 1 assertion evaluated, 0 findings. 29 + 1 is the 30 the gate
+      # reported before the split. Both halves carry floors —
+      # `MINIMUM_CHARTS`, `MINIMUM_ASSERTIONS` and a `judged == charts`
+      # check — so a half that examined nothing is red rather than green.
+      - id: chart-baseline
+      - id: chart-network-policy
