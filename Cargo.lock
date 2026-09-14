@@ -2722,7 +2722,7 @@ dependencies = [
 [[package]]
 name = "yadgar-lifecycle"
 version = "0.1.0"
-source = "git+https://github.com/yadgarhq/lifecycle.git?tag=v0.2.10#68136a31f1a652c536a7c97eb579e6746e9f2500"
+source = "git+https://github.com/yadgarhq/lifecycle.git?tag=v0.2.17#45789e8d3f7374b2c3d4e5d0b7e7f17603de1a34"
 dependencies = [
  "metrics",
  "rustls-pki-types",
@@ -2738,7 +2738,7 @@ dependencies = [
 [[package]]
 name = "yadgar-store"
 version = "0.1.0"
-source = "git+https://github.com/yadgarhq/store.git?tag=v0.2.6#d6abe3e26c1cff4b4df9956a30f2dd8923710b8f"
+source = "git+https://github.com/yadgarhq/store.git?tag=v0.2.13#7dc913bbd0f4b05c4595e4fb2d07c1bc76f09062"
 dependencies = [
  "sqlx",
  "thiserror",
@@ -2749,7 +2749,7 @@ dependencies = [
 [[package]]
 name = "yadgar-telemetry"
 version = "0.1.0"
-source = "git+https://github.com/yadgarhq/telemetry.git?tag=v0.1.10#2c684cdaa53aa52ccaff4a2e32dff444b10e0fc8"
+source = "git+https://github.com/yadgarhq/telemetry.git?tag=v0.1.17#d0a882ff791e47c8abdb245032eba9408fde4afd"
 dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
