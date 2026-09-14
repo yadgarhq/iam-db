@@ -81,7 +81,7 @@ metrics = "0.24"
 # signal handler, so once the rotation arm wins the `select!` a later SIGTERM is
 # swallowed and only SIGKILL remains — the watcher WITHOUT `drain_within` is the
 # bug, not half the fix.
-yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle.git", tag = "v0.2.10" }
+yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle.git", tag = "v0.2.9" }
 sqlx = { version = "0.9", default-features = false, features = [
   "runtime-tokio",
   "tls-rustls-ring",
