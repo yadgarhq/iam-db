@@ -292,11 +292,10 @@ spec:
             - name: REPLICAS
               value: {{ if .Values.autoscaling.enabled }}{{ .Values.autoscaling.maxReplicas | quote }}{{ else }}{{ .Values.replicaCount | quote }}{{ end }}
           volumeMounts:
-            # THE CONFIGURATION REPOSITORY'S TWO CONFIGMAPS (ADR-0569, ADR-0570,
-            # step 2a): the knobs every service reads, and this service's own —
-            # empty today, mounted anyway so it is ready the day it is not.
+            # THE CONFIGURATION REPOSITORY'S CONFIGMAP (ADR-0569, ADR-0570,
+            # step 2a): the knobs every service reads.
             #
-            # DIRECTORIES, NEVER `subPath`. A subPath mount is copied once at
+            # A DIRECTORY, NEVER `subPath`. A subPath mount is copied once at
             # container start and kubelet never updates it, so the file would be
             # frozen for the life of the pod while the ConfigMap moved underneath
             # it — the rotation watcher would see nothing and an edited knob
@@ -304,31 +303,20 @@ spec:
             #
             # NO `optional: true`, unlike every Secret mount below. The default,
             # `false`, is what makes kubelet refuse to start this pod at all
-            # while `shared` or `iam-db` is absent — `ContainerCreating` naming
+            # while `shared` is absent — `ContainerCreating` naming
             # the missing ConfigMap — rather than starting it with an empty
             # directory the binary would then refuse to read from anyway
             # (ScheduleError::Absent).
             #
-            # **`iam-db` IS MOUNTED, AND TODAY IT IS NEITHER READ NOR WATCHED.**
+            # ADR-0740: `config` keeps a document only when MORE THAN ONE service
+            # reads it. `iam-db.yaml` held zero knobs and had zero readers —
             # `yadgar-lifecycle`'s `Configuration::under(root)` yields exactly one
-            # path, `root/shared/shared.yaml`; the crate has no API for a
-            # per-service document, so `config-iam-db` is in no process's
-            # ADR-0523 watch set. Two things follow and both are deliberate. The
-            # `optional: false` reasoning above is true of `shared` and NOT of
-            # this one — an absent `iam-db` ConfigMap blocks the pod for no
-            # functional benefit, which is accepted so that both mounts are
-            # governed by one rule rather than two. And the day this file gains
-            # its first knob, Argo will sync it and kubelet will swap it and NO
-            # POD WILL RESTART, so the new value never takes effect and nothing
-            # reports that — the exact failure ADR-0570 names for `envFrom`,
-            # reproduced through a file mount. THE MOUNT IS READY; JOINING THIS
-            # DOCUMENT TO THE WATCH SET IS A FURTHER CHANGE, and it belongs in
-            # the same pull request as the first iam-db-only knob.
+            # path, `root/shared/shared.yaml`, with no per-service document API, so
+            # no process in this repository ever read `config-iam-db`. The mount is
+            # deleted rather than kept ready, since nothing here reads it and no
+            # other service does either.
             - name: config-shared
               mountPath: /etc/yadgar/config/shared
-              readOnly: true
-            - name: config-iam-db
-              mountPath: /etc/yadgar/config/iam-db
               readOnly: true
             - name: db-password
               mountPath: /var/run/secrets/iam-db
@@ -491,14 +479,11 @@ spec:
             capabilities:
               drop: [ALL]
       volumes:
-        # The two ConfigMaps `yadgarhq/config` renders, same reasoning as the
-        # mounts above: unconditional, a directory each, never optional.
+        # The ConfigMap `yadgarhq/config` renders, same reasoning as the mount
+        # above: unconditional, a directory, never optional.
         - name: config-shared
           configMap:
             name: shared
-        - name: config-iam-db
-          configMap:
-            name: iam-db
         - name: db-password
           secret:
             secretName: {{ .Values.database.passwordSecret }}

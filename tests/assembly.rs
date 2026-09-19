@@ -226,9 +226,9 @@ fn watched(inputs: &rotate::Inputs) -> Vec<String> {
 }
 
 /// The mounted document `yadgarhq/config` renders into the `shared` ConfigMap
-/// (step 2a) — under its OWN root, never [`Mount`]'s, because the two
-/// ConfigMaps land in separate directories in the real deployment and nothing
-/// here should suggest otherwise.
+/// (step 2a) — under its OWN root, never [`Mount`]'s, because the ConfigMap
+/// lands in a directory separate from `Mount`'s in the real deployment and
+/// nothing here should suggest otherwise.
 fn configuration(body: &str) -> Configuration {
     let root = std::env::temp_dir().join(unique_name("yadgar-iam-db-assembly-config"));
     std::fs::create_dir_all(root.join("shared")).unwrap();
