@@ -138,13 +138,15 @@ fn presented(fingerprint: &[u8], version: u32) -> Result<(), Status> {
 /// A loser's refused INSERT already leaves a SHARED lock on the duplicate
 /// primary-key row, so `FOR UPDATE` here asks to upgrade that share to an
 /// exclusive, and with two or more losers holding the share the upgrade cycles.
-/// Five callers, five fingerprints, one version, one fresh store: 1213 in 10
-/// runs out of 10, raised HERE and never by the INSERT, and `db()` renders 1213
-/// as the TRANSIENT UNAVAILABLE where the contract requires a permanent
-/// MISMATCH. Re-requesting the share is granted at once, because the loser
-/// already holds it: 0 deadlocks in 25 runs. RETRYING THE WHOLE TRANSACTION
-/// ONCE ON 1213 WAS MEASURED FIRST AND IS NOT ENOUGH — the losers retry
-/// together and cycle again, 13 runs in 25.
+/// Five callers, five fingerprints, one version, one fresh store: at least one
+/// of them met 1213 in 10 runs out of 10, raised HERE and never by the INSERT,
+/// and `db()` renders 1213 as the TRANSIENT UNAVAILABLE where the contract
+/// requires a permanent MISMATCH. Restoring `FOR UPDATE` against the fix
+/// reddens the test in 4 runs out of 5, so the race is near-certain rather than
+/// certain and neither figure is the rate on its own. Re-requesting the share
+/// is granted at once, because the loser already holds it: 0 deadlocks in 55
+/// runs. RETRYING THE WHOLE TRANSACTION ONCE ON 1213 WAS MEASURED FIRST AND IS
+/// NOT ENOUGH — the losers retry together and cycle again, 13 runs in 25.
 ///
 /// A locking read of EITHER kind is a CURRENT read, so the loser still sees the
 /// winner's committed row at REPEATABLE READ. A snapshot re-read would use the

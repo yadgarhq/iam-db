@@ -4773,10 +4773,13 @@ async fn five_concurrent_recordings_answer_one_recorded_and_four_mismatch() {
     // callers produce one loser, one shared lock on the duplicate row, and
     // nothing to cycle with; three or more produce two or more losers that each
     // hold that share and then contend for the same upgrade. Measured against
-    // MariaDB 11.8 at REPEATABLE READ with a `FOR UPDATE` re-read: one or two
-    // callers were answered UNAVAILABLE in 10 runs out of 10, raised by the
-    // locking re-read and never by the INSERT, which returned a clean 1062 on
-    // every loser in every run.
+    // MariaDB 11.8 at REPEATABLE READ with a `FOR UPDATE` re-read and no retry:
+    // at least one caller — one or two of them per run — was answered
+    // UNAVAILABLE in 10 runs out of 10, raised by the locking re-read and never
+    // by the INSERT, which returned a clean 1062 on every loser in every run. A
+    // later re-measurement, restoring `FOR UPDATE` against the committed fix,
+    // reddened this test in 4 runs out of 5. THE RACE IS NEAR-CERTAIN RATHER
+    // THAN CERTAIN, and neither figure is the rate on its own.
     //
     // AND UNAVAILABLE IS THE DAMAGE, not a cosmetic status. ADR-0764 and the
     // contract make it TRANSIENT, so a third replica in a split rollout retries
