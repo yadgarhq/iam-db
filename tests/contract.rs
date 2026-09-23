@@ -4351,3 +4351,474 @@ async fn set_user_admin_without_a_usable_actor_records_it_as_unattributed() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// THE KEY-IDENTITY MARKER (ADR-0764, ADR-0765).
+//
+// **THREE OBLIGATIONS NOTHING IN EITHER REPOSITORY ENFORCES, AND THIS BLOCK IS
+// WHERE THEY ARE ENFORCED.** The contract states them in prose, the compiler
+// sees none of them, and each has a one-character-class implementation that
+// answers a legal member on every arm while being wrong:
+//
+//  1. RECORDING IS REFUSED WHEN THE STORE ALREADY HOLDS ROWS. ABSENT means "no
+//     marker is stored", never "this installation is empty", and only this
+//     service can tell the two apart.
+//  2. WRITE-ONCE. The shape SQL habit produces is `ON DUPLICATE KEY UPDATE
+//     key_fingerprint = VALUES(key_fingerprint)`, and a pod holding the wrong
+//     key then records its own fingerprint and agrees with itself for ever.
+//  3. THE SINGLETON IS LOCATED AS THE SINGLETON. `WHERE key_fingerprint = ?`
+//     can never answer MISMATCH; `WHERE derivation_version = ?` reads a skew as
+//     an empty store and earns a second marker.
+//
+// Each test below names the assertion that reddens when its property breaks.
+// ---------------------------------------------------------------------------
+
+/// A distinct opaque fingerprint. The derivation is `iam`'s and this boundary
+/// reads no structure in these bytes, so any distinct values will do.
+fn fingerprint(tag: u8) -> Vec<u8> {
+    vec![tag; 32]
+}
+
+async fn get_marker(svc: &IamDb, fp: &[u8], version: u32) -> KeyIdentityOutcome {
+    svc.get_key_identity(Request::new(GetKeyIdentityRequest {
+        key_fingerprint: fp.to_vec(),
+        derivation_version: version,
+    }))
+    .await
+    .expect("GetKeyIdentity puts no refusal about the marker on the status channel")
+    .into_inner()
+    .outcome()
+}
+
+fn set_request(fp: &[u8], version: u32, key: &str) -> SetKeyIdentityRequest {
+    SetKeyIdentityRequest {
+        idempotency: match key.is_empty() {
+            true => None,
+            false => Some(Idempotency { key: key.into() }),
+        },
+        key_fingerprint: fp.to_vec(),
+        derivation_version: version,
+    }
+}
+
+/// The marker AS STORED. The RPCs deliberately never return it — the comparison
+/// happens in the service — so the only way to assert that a refused call wrote
+/// nothing is to read the row.
+async fn stored_marker(svc: &IamDb) -> Option<(u32, Vec<u8>)> {
+    sqlx::query_as::<_, (u32, Vec<u8>)>(
+        "SELECT derivation_version, key_fingerprint FROM iam_key_identity",
+    )
+    .fetch_optional(svc.pool())
+    .await
+    .expect("read the marker back")
+}
+
+#[tokio::test]
+async fn a_store_with_no_marker_is_absent() {
+    let svc = fresh("iam_db_test_key_absent").await;
+
+    assert_eq!(
+        get_marker(&svc, &fingerprint(1), 1).await,
+        KeyIdentityOutcome::Absent
+    );
+}
+
+#[tokio::test]
+async fn recording_a_marker_reports_recorded_and_the_same_pair_then_matches() {
+    // RECORDED and MATCH name different WRITERS, not different installations:
+    // RECORDED says this call wrote the marker, MATCH says one was already
+    // there. An implementation that collapsed them would lose the distinction
+    // the contract requires it to preserve.
+    let svc = fresh("iam_db_test_key_recorded").await;
+
+    let first = svc
+        .set_key_identity(Request::new(set_request(&fingerprint(1), 1, "")))
+        .await
+        .expect("an empty store with no marker records")
+        .into_inner()
+        .outcome();
+    assert_eq!(first, KeyIdentityOutcome::Recorded);
+
+    assert_eq!(
+        get_marker(&svc, &fingerprint(1), 1).await,
+        KeyIdentityOutcome::Match
+    );
+    // A SECOND CALLER under a FRESH key, presenting the same pair, finds the
+    // marker the first attempt wrote — the contract's own words.
+    assert_eq!(
+        svc.set_key_identity(Request::new(set_request(&fingerprint(1), 1, "")))
+            .await
+            .expect("a repeat of the same pair is not a refusal")
+            .into_inner()
+            .outcome(),
+        KeyIdentityOutcome::Match
+    );
+}
+
+#[tokio::test]
+async fn a_wrong_fingerprint_is_a_mismatch_and_never_absent() {
+    // **OBLIGATION 3, THE `WHERE key_fingerprint = ?` HALF.** Locating the
+    // singleton by the fingerprint presented finds NOTHING whenever the key is
+    // wrong — which is the only case that matters — so that implementation
+    // answers ABSENT here, the caller takes the first-boot branch, and the gate
+    // can never fail. THE ASSERTION THAT REDDENS: both `assert_eq!`s below,
+    // each reading `Absent` where the contract requires `Mismatch`.
+    let svc = fresh("iam_db_test_key_mismatch").await;
+    svc.set_key_identity(Request::new(set_request(&fingerprint(1), 1, "")))
+        .await
+        .expect("record");
+
+    assert_eq!(
+        get_marker(&svc, &fingerprint(2), 1).await,
+        KeyIdentityOutcome::Mismatch,
+        "a wrong key must be told apart from an unwritten marker"
+    );
+    assert_eq!(
+        svc.set_key_identity(Request::new(set_request(&fingerprint(2), 1, "")))
+            .await
+            .expect("a mismatch is a finding on an OK response, never a status")
+            .into_inner()
+            .outcome(),
+        KeyIdentityOutcome::Mismatch
+    );
+}
+
+#[tokio::test]
+async fn a_different_derivation_version_is_a_skew_on_both_arms_and_writes_nothing() {
+    // **OBLIGATION 3, THE `WHERE derivation_version = ?` HALF, AND THE WHOLE OF
+    // ADR-0765.** Locating the singleton by the version presented reads a skew
+    // as an empty store: the Get answers ABSENT, the Set records a SECOND
+    // marker, and that is ADR-0753's silent healthy start rebuilt inside the
+    // field added to prevent it.
+    //
+    // THE ASSERTIONS THAT REDDEN, and they fail for different reasons: the two
+    // `KeyIdentityOutcome::DerivationSkew` comparisons redden when the version
+    // is dropped from the comparison or from the lookup, and `stored_marker`
+    // reddens when the skewed Set writes anything at all.
+    let svc = fresh("iam_db_test_key_skew").await;
+    svc.set_key_identity(Request::new(set_request(&fingerprint(1), 1, "")))
+        .await
+        .expect("record under version 1");
+
+    assert_eq!(
+        get_marker(&svc, &fingerprint(1), 2).await,
+        KeyIdentityOutcome::DerivationSkew,
+        "the SAME fingerprint under another version is not comparable, so not MATCH"
+    );
+    assert_eq!(
+        get_marker(&svc, &fingerprint(2), 2).await,
+        KeyIdentityOutcome::DerivationSkew,
+        "a DIFFERENT fingerprint under another version is not MISMATCH either"
+    );
+    assert_eq!(
+        svc.set_key_identity(Request::new(set_request(&fingerprint(2), 2, "")))
+            .await
+            .expect("a skew is an outcome on an OK response, never a status")
+            .into_inner()
+            .outcome(),
+        KeyIdentityOutcome::DerivationSkew
+    );
+
+    assert_eq!(
+        stored_marker(&svc).await,
+        Some((1, fingerprint(1))),
+        "nothing is written on a skew, on either arm"
+    );
+}
+
+#[tokio::test]
+async fn recording_is_refused_when_the_store_already_holds_rows() {
+    // **OBLIGATION 1, AND IT IS THE FAILURE WINDOW EVERY EXISTING INSTALLATION
+    // IS ALREADY IN.** A live cluster holds `iam_user` rows encrypted under a
+    // key set that was later lost, and no marker table existed when they were
+    // written. Get answers ABSENT — correctly, no marker IS stored — `iam`
+    // takes the first-boot branch, and a Set that recorded here would assert an
+    // identity about every row in the store on no evidence at all.
+    //
+    // THE ASSERTIONS THAT REDDEN: `FailedPrecondition` below, which reads
+    // `Recorded` the moment the refusal is dropped, and `stored_marker`, which
+    // reads `Some(..)` where the refusal must leave nothing behind.
+    let svc = fresh("iam_db_test_key_populated").await;
+    seed(&svc, &[41u8; 32], &[42u8; 32]).await;
+
+    assert_eq!(
+        get_marker(&svc, &fingerprint(1), 1).await,
+        KeyIdentityOutcome::Absent,
+        "ABSENT says only that no marker is stored; it never says the store is empty"
+    );
+
+    let refusal = svc
+        .set_key_identity(Request::new(set_request(&fingerprint(1), 1, "")))
+        .await
+        .expect_err("a populated store with no marker is an incident, not a first boot");
+    assert_eq!(refusal.code(), tonic::Code::FailedPrecondition);
+
+    assert_eq!(
+        stored_marker(&svc).await,
+        None,
+        "the refusal writes nothing, so a later operator still sees an unwritten marker"
+    );
+}
+
+#[tokio::test]
+async fn a_second_recording_under_a_different_fingerprint_does_not_overwrite() {
+    // **OBLIGATION 2, SEQUENTIALLY.** The property that prevents the
+    // second-marker failure is the REFUSAL TO OVERWRITE, not the enum: every
+    // arm of an upserting implementation still answers a legal member.
+    //
+    // THE ASSERTION THAT REDDENS UNDER `ON DUPLICATE KEY UPDATE key_fingerprint
+    // = VALUES(key_fingerprint)`: `stored_marker` below, which then reads the
+    // SECOND caller's fingerprint. The outcome assertion above it reddens too,
+    // reading `Recorded` where the winner's marker requires `Mismatch`.
+    let svc = fresh("iam_db_test_key_write_once").await;
+    svc.set_key_identity(Request::new(set_request(&fingerprint(1), 1, "")))
+        .await
+        .expect("the first call records");
+
+    assert_eq!(
+        svc.set_key_identity(Request::new(set_request(&fingerprint(2), 1, "")))
+            .await
+            .expect("a second key set is a finding, not a status")
+            .into_inner()
+            .outcome(),
+        KeyIdentityOutcome::Mismatch
+    );
+
+    assert_eq!(
+        stored_marker(&svc).await,
+        Some((1, fingerprint(1))),
+        "the marker is the FIRST writer's; a pod with the wrong key may not record its own"
+    );
+    assert_eq!(
+        get_marker(&svc, &fingerprint(1), 1).await,
+        KeyIdentityOutcome::Match,
+        "and the original key set still matches afterwards"
+    );
+}
+
+#[tokio::test]
+async fn two_concurrent_recordings_produce_exactly_one_recorded_and_one_mismatch() {
+    // **OBLIGATION 2, CONCURRENTLY — THE TEST THIS BLOCK EXISTS FOR.** Two
+    // replicas rolling out under different key sets BOTH read ABSENT before
+    // either writes, which the two `get_marker` calls below establish
+    // literally rather than assume. One write must win and the other MUST be
+    // told so; a loser that silently succeeded would run on under a key the
+    // store no longer agrees with.
+    //
+    // WHAT THIS TEST PROVES IS NOT THE SINGLE-STATEMENT FORM. A naive
+    // SELECT-then-INSERT would still reach the duplicate on the singleton
+    // primary key and still answer MISMATCH, so for the MARKER it is the
+    // PRIMARY KEY doing that work and not D5's one statement. What the
+    // `INSERT ... SELECT` adds, and what nothing else in either repository
+    // asserts, is that the emptiness predicate is evaluated under the locks of
+    // the write it decides — `iam_user` is read inside the INSERT's own SELECT
+    // and is therefore next-key locked, so a user created concurrently WAITS
+    // rather than slipping between a check and a write. See the INSERT's own
+    // comment for the measurement.
+    //
+    // THE ASSERTIONS THAT REDDEN, in the order a defect reaches them. The
+    // sorted-pair `assert_eq!` reddens when both calls report `Recorded` — the
+    // upsert — or when the loser is answered on the status channel.
+    // `stored_marker` reddens when the loser's fingerprint is what ends up
+    // stored, which is the upsert's actual damage.
+    let svc = fresh("iam_db_test_key_concurrent").await;
+
+    // BOTH READ ABSENT FIRST, which is the precondition the race needs: two
+    // pods that each decided this was a first boot.
+    assert_eq!(
+        get_marker(&svc, &fingerprint(1), 1).await,
+        KeyIdentityOutcome::Absent
+    );
+    assert_eq!(
+        get_marker(&svc, &fingerprint(2), 1).await,
+        KeyIdentityOutcome::Absent
+    );
+
+    let (one, two) = tokio::join!(
+        svc.set_key_identity(Request::new(set_request(&fingerprint(1), 1, "pod-one"))),
+        svc.set_key_identity(Request::new(set_request(&fingerprint(2), 1, "pod-two"))),
+    );
+    let one = one.expect("a split rollout is a finding about the marker that won");
+    let two = two.expect("a split rollout is a finding about the marker that won");
+
+    let mut outcomes = [one.into_inner().outcome(), two.into_inner().outcome()];
+    outcomes.sort_by_key(|o| *o as i32);
+    assert_eq!(
+        outcomes,
+        [KeyIdentityOutcome::Mismatch, KeyIdentityOutcome::Recorded],
+        "exactly one call wrote the marker and exactly one was refused it"
+    );
+
+    // AND THE STORED MARKER IS THE WINNER'S. Which pod won is genuinely
+    // undecided, so this asserts the SET rather than an order: whichever
+    // fingerprint is stored, the other one must read MISMATCH afterwards.
+    let (version, stored) = stored_marker(&svc).await.expect("a marker was written");
+    assert_eq!(version, 1);
+    assert!(
+        stored == fingerprint(1) || stored == fingerprint(2),
+        "the stored marker must be one of the two presented, never a blend"
+    );
+    let loser = match stored == fingerprint(1) {
+        true => fingerprint(2),
+        false => fingerprint(1),
+    };
+    assert_eq!(
+        get_marker(&svc, &stored, 1).await,
+        KeyIdentityOutcome::Match,
+        "the winner matches"
+    );
+    assert_eq!(
+        get_marker(&svc, &loser, 1).await,
+        KeyIdentityOutcome::Mismatch,
+        "and the loser is refused for ever, rather than agreeing with itself"
+    );
+}
+
+#[tokio::test]
+async fn an_empty_fingerprint_and_a_zero_version_are_refused_on_both_arms() {
+    // `bytes` and `uint32` have no presence in proto3, so a caller that
+    // populates nothing sends empty and 0. Were either storable, a marker with
+    // no key material would match itself for ever under a version nobody chose.
+    let svc = fresh("iam_db_test_key_presence").await;
+
+    for (fp, version, what) in [
+        (Vec::new(), 1u32, "an empty fingerprint"),
+        (fingerprint(1), 0u32, "a zero version"),
+        (Vec::new(), 0u32, "both absent"),
+    ] {
+        let got = svc
+            .get_key_identity(Request::new(GetKeyIdentityRequest {
+                key_fingerprint: fp.clone(),
+                derivation_version: version,
+            }))
+            .await
+            .expect_err(what);
+        assert_eq!(got.code(), tonic::Code::InvalidArgument, "Get: {what}");
+
+        let put = svc
+            .set_key_identity(Request::new(set_request(&fp, version, "")))
+            .await
+            .expect_err(what);
+        assert_eq!(put.code(), tonic::Code::InvalidArgument, "Set: {what}");
+    }
+
+    assert_eq!(
+        stored_marker(&svc).await,
+        None,
+        "a refused request writes nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_replayed_key_returns_the_original_outcome_and_a_changed_payload_is_refused() {
+    // D9, and the contract states the refusal on this arm rather than leaving
+    // it to the org-wide rule: two calls under one key claiming different key
+    // sets, or one key set under two derivations, are DIFFERENT requests. A
+    // replay answering the first one's outcome would report a marker the second
+    // caller does not hold.
+    let svc = fresh("iam_db_test_key_replay").await;
+    svc.set_key_identity(Request::new(set_request(&fingerprint(1), 1, "boot-1")))
+        .await
+        .expect("record");
+
+    assert_eq!(
+        svc.set_key_identity(Request::new(set_request(&fingerprint(1), 1, "boot-1")))
+            .await
+            .expect("a replay of the recording call")
+            .into_inner()
+            .outcome(),
+        KeyIdentityOutcome::Recorded,
+        "a replay returns the ORIGINAL outcome, not MATCH"
+    );
+
+    for (fp, version, what) in [
+        (fingerprint(2), 1u32, "a different fingerprint"),
+        (fingerprint(1), 2u32, "a different version"),
+    ] {
+        let refusal = svc
+            .set_key_identity(Request::new(set_request(&fp, version, "boot-1")))
+            .await
+            .expect_err(what);
+        assert_eq!(refusal.code(), tonic::Code::InvalidArgument, "{what}");
+    }
+
+    assert_eq!(
+        stored_marker(&svc).await,
+        Some((1, fingerprint(1))),
+        "and none of the refusals changed the marker"
+    );
+}
+
+#[tokio::test]
+async fn a_fingerprint_wider_than_the_column_is_refused_as_a_bad_request() {
+    // `fits_password_column`'s rule, on this column. Letting the engine refuse
+    // renders through `db()` as UNAVAILABLE — a retryable status for a request
+    // that can never succeed — and under a non-strict `sql_mode` it is worse
+    // than that: the value is TRUNCATED and a marker then matches a key set it
+    // was never derived from.
+    let svc = fresh("iam_db_test_key_width").await;
+
+    let refusal = svc
+        .set_key_identity(Request::new(set_request(&vec![7u8; 256], 1, "")))
+        .await
+        .expect_err("the column holds 255 bytes");
+    assert_eq!(refusal.code(), tonic::Code::InvalidArgument);
+    assert_eq!(stored_marker(&svc).await, None);
+}
+
+#[tokio::test]
+async fn five_concurrent_recordings_answer_one_recorded_and_four_mismatch() {
+    // **OBLIGATION 2 AT THE SMALLEST N THAT HAS MORE THAN ONE LOSER, AND THAT
+    // IS THE WHOLE REASON THIS TEST EXISTS BESIDE THE TWO-CALLER ONE.** Two
+    // callers produce one loser, one shared lock on the duplicate row, and
+    // nothing to cycle with; three or more produce two or more losers that each
+    // hold that share and then contend for the same upgrade. Measured against
+    // MariaDB 11.8 at REPEATABLE READ with a `FOR UPDATE` re-read and no retry:
+    // at least one caller — one or two of them per run — was answered
+    // UNAVAILABLE in 10 runs out of 10, raised by the locking re-read and never
+    // by the INSERT, which returned a clean 1062 on every loser in every run. A
+    // later re-measurement, restoring `FOR UPDATE` against the committed fix,
+    // reddened this test in 4 runs out of 5. THE RACE IS NEAR-CERTAIN RATHER
+    // THAN CERTAIN, and neither figure is the rate on its own.
+    //
+    // AND UNAVAILABLE IS THE DAMAGE, not a cosmetic status. ADR-0764 and the
+    // contract make it TRANSIENT, so a third replica in a split rollout retries
+    // for ever, stays Ready, and serves under a key that decrypts nothing —
+    // where MISMATCH is permanent and makes it exit non-zero, which is the
+    // outcome the whole gate exists to force.
+    //
+    // THE ASSERTIONS THAT REDDEN: the `panic!` on the status channel, which is
+    // what the deadlock reaches first, and the sorted five-outcome `assert_eq!`
+    // if a loser is ever answered anything but MISMATCH. Five is deliberate
+    // rather than arbitrary — the test pool holds ten connections, so a larger
+    // N would serialise the callers and stop reproducing the race.
+    let svc = fresh("iam_db_test_key_concurrent_five").await;
+    let fps: Vec<Vec<u8>> = (1..=5u8).map(fingerprint).collect();
+    let (a, b, c, d, e) = tokio::join!(
+        svc.set_key_identity(Request::new(set_request(&fps[0], 1, "pod-1"))),
+        svc.set_key_identity(Request::new(set_request(&fps[1], 1, "pod-2"))),
+        svc.set_key_identity(Request::new(set_request(&fps[2], 1, "pod-3"))),
+        svc.set_key_identity(Request::new(set_request(&fps[3], 1, "pod-4"))),
+        svc.set_key_identity(Request::new(set_request(&fps[4], 1, "pod-5"))),
+    );
+    let mut outcomes = Vec::new();
+    for r in [a, b, c, d, e] {
+        match r {
+            Ok(ok) => outcomes.push(ok.into_inner().outcome()),
+            Err(s) => panic!("a split rollout is a finding, never a status: {s:?}"),
+        }
+    }
+    outcomes.sort_by_key(|o| *o as i32);
+    assert_eq!(
+        outcomes,
+        vec![
+            KeyIdentityOutcome::Mismatch,
+            KeyIdentityOutcome::Mismatch,
+            KeyIdentityOutcome::Mismatch,
+            KeyIdentityOutcome::Mismatch,
+            KeyIdentityOutcome::Recorded,
+        ],
+        "exactly one call wrote the marker and the other four were told so, on \
+         the outcome channel rather than as a retryable status",
+    );
+}
