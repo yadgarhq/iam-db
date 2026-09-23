@@ -218,7 +218,13 @@ impl IamDb {
 
         call.finish(Outcome {
             status: "OK",
-            rows: 1,
+            // ZERO ON ABSENT, BECAUSE NO ROW WAS READ. `ResolveCredential`
+            // records a miss as OK with no rows and this arm's miss is the same
+            // event; a literal 1 here would be the false constant
+            // `SetPassword`'s own comment was written to delete. No hook checks
+            // a row count — `observe-coverage` says so in as many words — so it
+            // is stated rather than enforced.
+            rows: u32::from(outcome != KeyIdentityOutcome::Absent),
             ..Default::default()
         });
         Ok(Response::new(GetKeyIdentityResponse {
