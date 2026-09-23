@@ -125,9 +125,37 @@ fn presented(fingerprint: &[u8], version: u32) -> Result<(), Status> {
 /// for the second. Both read `Absent`.
 ///
 /// `Lock::Yes` is the re-read inside [`IamDb::store_key_identity`]'s
-/// transaction, where the row DOES exist and a locking read is therefore a
-/// record lock rather than the gap lock ADR-0513 forbids — `setting::claim`'s
-/// argument verbatim.
+/// transaction, and it is reached from BOTH arms of [`IamDb::outcome_of`]: the
+/// duplicate-key arm, where the row exists and the read takes a record lock,
+/// and the zero-matched-rows arm, where `iam_user` was non-empty and the marker
+/// may be ABSENT — there the read finds nothing and takes a next-key lock over
+/// an empty range, so ADR-0513 is NOT what licenses this lock and is no longer
+/// cited as though it were. That second path runs on every test run, in
+/// `recording_is_refused_when_the_store_already_holds_rows`, and it costs
+/// nothing: the arm refuses, so nothing ever inserts into that range.
+///
+/// **`LOCK IN SHARE MODE`, NOT `FOR UPDATE`, AND THE DIFFERENCE IS MEASURED.**
+/// A loser's refused INSERT already leaves a SHARED lock on the duplicate
+/// primary-key row, so `FOR UPDATE` here asks to upgrade that share to an
+/// exclusive, and with two or more losers holding the share the upgrade cycles.
+/// Five callers, five fingerprints, one version, one fresh store: 1213 in 10
+/// runs out of 10, raised HERE and never by the INSERT, and `db()` renders 1213
+/// as the TRANSIENT UNAVAILABLE where the contract requires a permanent
+/// MISMATCH. Re-requesting the share is granted at once, because the loser
+/// already holds it: 0 deadlocks in 25 runs. RETRYING THE WHOLE TRANSACTION
+/// ONCE ON 1213 WAS MEASURED FIRST AND IS NOT ENOUGH — the losers retry
+/// together and cycle again, 13 runs in 25.
+///
+/// A locking read of EITHER kind is a CURRENT read, so the loser still sees the
+/// winner's committed row at REPEATABLE READ. A snapshot re-read would use the
+/// read view the INSERT established, miss that row, and answer
+/// FAILED_PRECONDITION where the contract requires MISMATCH — which is why the
+/// lock is weakened rather than dropped.
+///
+/// THE TEST THAT REDDENS:
+/// `five_concurrent_recordings_answer_one_recorded_and_four_mismatch`.
+/// `two_concurrent_recordings_produce_exactly_one_recorded_and_one_mismatch`
+/// does NOT — one loser is one share, and one share has nothing to cycle with.
 async fn marker<'e, E>(executor: E, lock: Lock) -> Result<Option<Marker>, Status>
 where
     E: sqlx::Executor<'e, Database = sqlx::MySql>,
@@ -138,7 +166,7 @@ where
     // AUDIT: both arms are literals in this file; nothing is interpolated.
     let sql = match lock {
         Lock::No => BASE.to_string(),
-        Lock::Yes => format!("{BASE} FOR UPDATE"),
+        Lock::Yes => format!("{BASE} LOCK IN SHARE MODE"),
     };
 
     let Some(row) = sqlx::query(sqlx::AssertSqlSafe(sql))
@@ -264,10 +292,10 @@ impl IamDb {
     /// **NO ISOLATION LEVEL IS SET**, unlike `RedeemEnrolment` and
     /// `SetInheritedSetting`. Every statement here inherits the server's, so the
     /// answer must hold at READ COMMITTED and at REPEATABLE READ alike — which
-    /// is what the `FOR UPDATE` re-read buys: duplicate detection and a locking
-    /// read are both CURRENT reads, so the loser sees the winner's committed row
-    /// at either level. A snapshot re-read would miss it and answer
-    /// FAILED_PRECONDITION where the contract requires MISMATCH.
+    /// is what the `LOCK IN SHARE MODE` re-read buys: duplicate detection and a
+    /// locking read are both CURRENT reads, so the loser sees the winner's
+    /// committed row at either level. A snapshot re-read would miss it and
+    /// answer FAILED_PRECONDITION where the contract requires MISMATCH.
     pub(super) async fn store_key_identity(
         &self,
         r: SetKeyIdentityRequest,
@@ -320,6 +348,25 @@ impl IamDb {
         // could have encrypted. A literal "any row in any table" reading would
         // also refuse EVERY first boot, because migration 12 seeds a row into
         // `iam_org_setting` before a caller can reach this arm at all.
+        //
+        // **THIS INSERT MUST STAY THIS TRANSACTION'S FIRST STATEMENT, AND THE
+        // DUPLICATE-KEY BRANCH BELOW IS CORRECT ONLY WHILE IT IS.** Measured:
+        // with a `SELECT 1 FROM iam_user LIMIT 1` placed before a plain INSERT,
+        // the loser raised 1020 `ER_CHECKREAD` instead of 1062,
+        // `is_unique_violation()` did not classify it, and the answer became
+        // UNAVAILABLE — because at REPEATABLE READ any earlier read fixes the
+        // read view, so ANY read added here first, for validation, telemetry or
+        // a settings lookup, silently degrades the loser from the permanent
+        // MISMATCH to a transient UNAVAILABLE it retries for ever.
+        //
+        // **THIS STATEMENT LOCKS `iam_user` AND BLOCKS CONCURRENT USER
+        // CREATION, AND THAT IS THE MECHANISM HOLDING THE REFUSAL UP RATHER
+        // THAN A COST TO BE TUNED AWAY**: `INSERT ... SELECT` takes shared
+        // next-key locks on the source table, measured as a baseline `INSERT
+        // INTO iam_user` of 0.07s against 4.09s while another transaction held
+        // this statement open and releasing on that transaction's commit, and
+        // those locks are what make the emptiness predicate atomic rather than
+        // advisory.
         //
         // `FROM DUAL` because MariaDB requires a FROM when a WHERE is present.
         let attempt = sqlx::query(

@@ -4605,10 +4605,16 @@ async fn two_concurrent_recordings_produce_exactly_one_recorded_and_one_mismatch
     // told so; a loser that silently succeeded would run on under a key the
     // store no longer agrees with.
     //
-    // THE COMPARISON AND THE INSERT ARE ONE STATEMENT IN ONE TRANSACTION (D5),
-    // for the reason `RedeemEnrolment` gives: a read followed by a write is the
-    // same race with a longer window. This test is what proves that, and
-    // nothing else in either repository does.
+    // WHAT THIS TEST PROVES IS NOT THE SINGLE-STATEMENT FORM. A naive
+    // SELECT-then-INSERT would still reach the duplicate on the singleton
+    // primary key and still answer MISMATCH, so for the MARKER it is the
+    // PRIMARY KEY doing that work and not D5's one statement. What the
+    // `INSERT ... SELECT` adds, and what nothing else in either repository
+    // asserts, is that the emptiness predicate is evaluated under the locks of
+    // the write it decides — `iam_user` is read inside the INSERT's own SELECT
+    // and is therefore next-key locked, so a user created concurrently WAITS
+    // rather than slipping between a check and a write. See the INSERT's own
+    // comment for the measurement.
     //
     // THE ASSERTIONS THAT REDDEN, in the order a defect reaches them. The
     // sorted-pair `assert_eq!` reddens when both calls report `Recorded` — the
@@ -4758,4 +4764,58 @@ async fn a_fingerprint_wider_than_the_column_is_refused_as_a_bad_request() {
         .expect_err("the column holds 255 bytes");
     assert_eq!(refusal.code(), tonic::Code::InvalidArgument);
     assert_eq!(stored_marker(&svc).await, None);
+}
+
+#[tokio::test]
+async fn five_concurrent_recordings_answer_one_recorded_and_four_mismatch() {
+    // **OBLIGATION 2 AT THE SMALLEST N THAT HAS MORE THAN ONE LOSER, AND THAT
+    // IS THE WHOLE REASON THIS TEST EXISTS BESIDE THE TWO-CALLER ONE.** Two
+    // callers produce one loser, one shared lock on the duplicate row, and
+    // nothing to cycle with; three or more produce two or more losers that each
+    // hold that share and then contend for the same upgrade. Measured against
+    // MariaDB 11.8 at REPEATABLE READ with a `FOR UPDATE` re-read: one or two
+    // callers were answered UNAVAILABLE in 10 runs out of 10, raised by the
+    // locking re-read and never by the INSERT, which returned a clean 1062 on
+    // every loser in every run.
+    //
+    // AND UNAVAILABLE IS THE DAMAGE, not a cosmetic status. ADR-0764 and the
+    // contract make it TRANSIENT, so a third replica in a split rollout retries
+    // for ever, stays Ready, and serves under a key that decrypts nothing —
+    // where MISMATCH is permanent and makes it exit non-zero, which is the
+    // outcome the whole gate exists to force.
+    //
+    // THE ASSERTIONS THAT REDDEN: the `panic!` on the status channel, which is
+    // what the deadlock reaches first, and the sorted five-outcome `assert_eq!`
+    // if a loser is ever answered anything but MISMATCH. Five is deliberate
+    // rather than arbitrary — the test pool holds ten connections, so a larger
+    // N would serialise the callers and stop reproducing the race.
+    let svc = fresh("iam_db_test_key_concurrent_five").await;
+    let fps: Vec<Vec<u8>> = (1..=5u8).map(fingerprint).collect();
+    let (a, b, c, d, e) = tokio::join!(
+        svc.set_key_identity(Request::new(set_request(&fps[0], 1, "pod-1"))),
+        svc.set_key_identity(Request::new(set_request(&fps[1], 1, "pod-2"))),
+        svc.set_key_identity(Request::new(set_request(&fps[2], 1, "pod-3"))),
+        svc.set_key_identity(Request::new(set_request(&fps[3], 1, "pod-4"))),
+        svc.set_key_identity(Request::new(set_request(&fps[4], 1, "pod-5"))),
+    );
+    let mut outcomes = Vec::new();
+    for r in [a, b, c, d, e] {
+        match r {
+            Ok(ok) => outcomes.push(ok.into_inner().outcome()),
+            Err(s) => panic!("a split rollout is a finding, never a status: {s:?}"),
+        }
+    }
+    outcomes.sort_by_key(|o| *o as i32);
+    assert_eq!(
+        outcomes,
+        vec![
+            KeyIdentityOutcome::Mismatch,
+            KeyIdentityOutcome::Mismatch,
+            KeyIdentityOutcome::Mismatch,
+            KeyIdentityOutcome::Mismatch,
+            KeyIdentityOutcome::Recorded,
+        ],
+        "exactly one call wrote the marker and the other four were told so, on \
+         the outcome channel rather than as a retryable status",
+    );
 }
