@@ -257,4 +257,47 @@ impl IamDbService for IamDb {
         let call = Call::start(SERVICE, "SetInheritedSetting", Kind::Write, tel(rid, ""));
         self.store_setting(r, call).await
     }
+
+    /// Whether this store's rows were encrypted under the key set the caller
+    /// holds (ADR-0764, ADR-0765).
+    ///
+    /// **A READ, SO `Kind::Read`, AND IT WRITES NOTHING ON ANY ANSWER** —
+    /// including a version skew, where the marker exists, was read, and was
+    /// found to have been produced by a function this caller does not speak.
+    ///
+    /// `tel`'s `user_id` STAYS EMPTY. There is no person in this request: `iam`
+    /// calls it from its own startup task, against its own key material, with
+    /// no request in flight and no gateway involved.
+    async fn get_key_identity(
+        &self,
+        req: Request<GetKeyIdentityRequest>,
+    ) -> Result<Response<GetKeyIdentityResponse>, Status> {
+        let rid = request_id_of(&req);
+        let r = req.into_inner();
+        let call = Call::start(SERVICE, "GetKeyIdentity", Kind::Read, tel(rid, ""));
+        self.key_identity(r, call).await
+    }
+
+    /// Record the marker, ONCE, and only where this store holds neither a
+    /// marker nor any rows (ADR-0764, ADR-0765).
+    ///
+    /// **`Kind::Write` ON EVERY ANSWER, INCLUDING THE THREE THAT WRITE
+    /// NOTHING.** MISMATCH, DERIVATION_SKEW and the populated-store refusal all
+    /// leave the store untouched, and labelling them reads would put the same
+    /// verb under two `Kind`s depending on what it found — so a dashboard could
+    /// no longer count how often this verb was ATTEMPTED. The `Kind` names what
+    /// was asked for; the outcome names what happened.
+    ///
+    /// **NO `unverified_actor` TO RECORD**, and unlike `SetPassword` the absence
+    /// is not arguable: the contract does not carry the field on this arm,
+    /// because nobody asks for this write.
+    async fn set_key_identity(
+        &self,
+        req: Request<SetKeyIdentityRequest>,
+    ) -> Result<Response<SetKeyIdentityResponse>, Status> {
+        let rid = request_id_of(&req);
+        let r = req.into_inner();
+        let call = Call::start(SERVICE, "SetKeyIdentity", Kind::Write, tel(rid, ""));
+        self.store_key_identity(r, call).await
+    }
 }

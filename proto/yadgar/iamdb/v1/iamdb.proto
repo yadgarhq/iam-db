@@ -539,11 +539,12 @@ message SetRateLimitOverrideResponse {}
 // administrative RPC reaching this boundary. Only `iam` calls this service, so
 // nothing here re-derives that decision.
 //
-// **D73's BOOTSTRAP TOKEN DOES NOT REACH THIS VERB.** It reaches CreateUser and
-// SetUserAdmin and nothing else, which is how "it can do exactly one thing" is
-// enforced. Extending the bootstrap path here would let a token that exists to
-// create the FIRST admin rewrite the read policy for the whole deployment
-// before an admin exists to notice.
+// **D73's BOOTSTRAP TOKEN DOES NOT REACH THIS VERB.** It reaches CreateUser,
+// SetUserAdmin, and — since ADR-0655, amended by ADR-0656 — IssueEnrolment,
+// narrowly, for a target that is already an administrator and holds zero
+// credentials. Extending the bootstrap path here would let a token that
+// exists to create the FIRST admin rewrite the read policy for the whole
+// deployment before an admin exists to notice.
 //
 // **THE GAP, STATED RATHER THAN LEFT TO BE FOUND — AND HALF OF IT IS NOW
 // CLOSED.** This request carries no attested identity, in common with every
@@ -763,6 +764,432 @@ message RemoveTeamMemberRequest {
 }
 message RemoveTeamMemberResponse {}
 
+// HOW THE FINGERPRINT PRESENTED RELATES TO THE MARKER THIS STORE HOLDS
+// (ADR-0764). One vocabulary for both arms below, because both ask one
+// question — is the key set `iam` holds the key set these rows were encrypted
+// under — and two enums would make MATCH and MISMATCH two types meaning the
+// same thing, with a mapping between them for a caller to get wrong.
+//
+// THE ABSENT CASE AND THE MISMATCH CASE ARE MEMBERS RATHER THAN AN EMPTY
+// FIELD, AND THAT IS THE WHOLE REASON THIS ARM EXISTS. A key-derived lookup
+// answering "nothing found" for both collapses first boot into wrong key: the
+// caller takes the first-boot branch, writes a SECOND marker, and runs healthy
+// under a key that decrypts none of the rows already stored. That is the
+// silent-healthy-start failure ADR-0753 exists to prevent, rebuilt inside the
+// check written to prevent it. An outcome the server states cannot be read
+// that way; an empty result can. It is the shape RedeemOutcome above already
+// uses, for the reason stated there.
+//
+// THE CHECK PASSES ONLY ON AN EXPLICITLY POSITIVE MEMBER — MATCH or RECORDED —
+// AND NEVER ON THE ABSENCE OF A MISMATCH. KEY_IDENTITY_OUTCOME_UNSPECIFIED is
+// what a response that populated nothing carries, and a caller reading "not
+// MISMATCH" as a pass would pass on it, on DERIVATION_SKEW below, on a member
+// added later still, and on every transport failure besides. A gate that skips
+// itself when it cannot reach its answer is bypassable by timing, which
+// ADR-0764 rejects by name. DERIVATION_SKEW is why that rule is a WHITELIST
+// rather than a blacklist of MISMATCH: it is a NON-PASSING MEMBER PRESENT AT
+// THE TAG rather than a hypothetical later one, so a caller that got the rule
+// backwards fails open on the first day rather than on some future one.
+enum KeyIdentityOutcome {
+  // Never sent. A caller receiving it treats it as a fault and has NOT passed
+  // the check.
+  KEY_IDENTITY_OUTCOME_UNSPECIFIED = 0;
+
+  // A marker is stored UNDER THE DERIVATION VERSION PRESENTED, and it equals
+  // the fingerprint presented. From SetKeyIdentity it additionally means the
+  // row was already there, so that call wrote nothing.
+  KEY_IDENTITY_OUTCOME_MATCH = 1;
+
+  // A marker is stored UNDER THE DERIVATION VERSION PRESENTED, and it DIFFERS
+  // from the fingerprint presented. The key set in use cannot be the one these
+  // rows were encrypted under. Permanent: no restart, no retry and no wait
+  // changes it.
+  //
+  // UNDER ONE VERSION ONLY, AND THAT CONDITION IS THE WHOLE OF WHY
+  // `derivation_version` EXISTS. Two fingerprints computed by different
+  // functions differ for a reason that says nothing about the key set, so a
+  // server comparing across versions would answer MISMATCH to every `iam` in
+  // every installation on the day the derivation changed — each one correct
+  // about its keys, each one exiting. A version difference is a DIFFERENT
+  // EVENT and never this member: it yields KEY_IDENTITY_OUTCOME_DERIVATION_SKEW
+  // below, which is a sibling of this member rather than a separate channel.
+  KEY_IDENTITY_OUTCOME_MISMATCH = 2;
+
+  // NO MARKER IS STORED, AND THAT IS THE WHOLE OF WHAT THIS SERVER KNOWS.
+  // GetKeyIdentity ONLY.
+  //
+  // IT DOES NOT SAY THE INSTALLATION IS EMPTY, and reading it that way is how
+  // this arm defeats itself. ADR-0753's own words are that an empty DATABASE
+  // has nothing to compare against — and a store already holding rows
+  // encrypted under a lost key set, which no marker was ever written for,
+  // answers ABSENT in exactly the same bytes as a fresh install. Take the
+  // first-boot branch there and the marker is recorded, after which the gate
+  // passes for ever asserting an identity wrong about every row in the store.
+  // That is ADR-0753's silent healthy start, reached THROUGH the check written
+  // to prevent it.
+  //
+  // SO RECORDING CARRIES AN OBLIGATION THIS MEMBER CANNOT: SetKeyIdentity
+  // REFUSES TO RECORD WHEN THE STORE ALREADY HOLDS ROWS. That refusal is a
+  // gRPC status and needs no member here, because a non-OK status is
+  // not-passed by the rule stated above. SetKeyIdentity carries it, and it is
+  // the ONLY refusal ABOUT THE STORED MARKER that arm puts on the status
+  // channel — that arm also refuses a MALFORMED REQUEST with INVALID_ARGUMENT,
+  // which is a fact about the request rather than about the marker. A
+  // derivation skew is
+  // DERIVATION_SKEW below, an OK response carrying a member. The two are
+  // therefore told apart by CHANNEL before a caller looks at any value, which
+  // is the whole point of ADR-0765 moving one of them and not the other.
+  KEY_IDENTITY_OUTCOME_ABSENT = 3;
+
+  // The marker was absent and the recording call wrote it. SetKeyIdentity
+  // ONLY, and a REPLAY of that call under its original key answers RECORDED
+  // again rather than MATCH — D9's ordinary rule, that a replay returns the
+  // ORIGINAL outcome, exactly as RedeemEnrolment replays REDEEMED rather than
+  // reporting the secret it spent as SPENT.
+  //
+  // DISTINCT FROM MATCH BECAUSE THE TWO NAME DIFFERENT WRITERS, NOT DIFFERENT
+  // INSTALLATIONS. RECORDED says THIS CALL wrote the marker. MATCH says a
+  // marker was already there, so somebody else wrote it between this caller's
+  // read and its write — the replica that won a split rollout, or this pod's
+  // own earlier attempt. That distinction is real and an implementation must
+  // preserve it.
+  //
+  // IT IS NOT AN OPERATOR'S SIGNAL FOR "FRESH INSTALL", and it never was. A
+  // restored database that lost its marker answers ABSENT and then RECORDED.
+  // So does a fresh install, identically in every field. Nothing on this
+  // boundary separates those two, which is why ABSENT above puts the
+  // obligation on the store's own rows instead. RECORDED-versus-MATCH is
+  // unreliable for it besides: `idempotency` below states that a retry under a
+  // FRESH key finds the marker the first attempt wrote and answers MATCH, so
+  // which member an operator reads turns on whether a key survived rather than
+  // on what the store held.
+  KEY_IDENTITY_OUTCOME_RECORDED = 4;
+
+  // A MARKER IS STORED UNDER A DIFFERENT `derivation_version` FROM THE ONE
+  // PRESENTED. NO COMPARISON IS PERFORMED AND NOTHING IS WRITTEN, on either
+  // arm. The marker exists and was produced by a function this caller does not
+  // speak, so the fingerprints are not comparable and the store says so instead
+  // of guessing.
+  //
+  // IT IS AN OUTCOME AND NOT A gRPC STATUS, and ADR-0765 rules the distinction
+  // rather than leaving it to taste. This enum answers WHAT THE COMPARISON
+  // FOUND. A gRPC status answers that the comparison COULD NOT BE MADE. A skew
+  // is a finding about the stored pair — the marker is there, it was read, and
+  // what was read about it is that its version is not this caller's — so it
+  // belongs with the findings. A MEMBER ALSO FORCES EVERY `match` IN PR 2 AND
+  // PR 3 TO HANDLE IT, WHICH A COMMENT CANNOT. That is the property bought
+  // here, and it is why the earlier FAILED_PRECONDITION proposal was overturned
+  // on 2026-09-23 rather than kept for its revisability.
+  //
+  // THE ACCEPTED COST, STATED SO NOBODY LATER "SIMPLIFIES" IT BACK: member
+  // numbers freeze at the tag that publishes them (D15, D16), so member 5 can
+  // never be removed and never be renumbered. A status code would have stayed
+  // revisable. The exhaustive match in both consumers was ruled worth more.
+  //
+  // NOT MISMATCH, which is permanent and exits `iam` estate-wide — the very
+  // failure `derivation_version` exists to prevent. NOT MATCH, which would pass
+  // a gate that compared nothing. And NOT ABSENT, which is the worst of the
+  // three, because a caller told ABSENT takes the first-boot branch and records
+  // a SECOND marker: ADR-0753's silent healthy start rebuilt inside the field
+  // added to prevent a different instance of it.
+  //
+  // NOT-PASSED AND NOT-EXITING. It is neither MATCH nor RECORDED, so the
+  // whitelist above refuses it. It is not MISMATCH, so `iam` does not end its
+  // serve. ADR-0765 has it VISIBLE TO AN OPERATOR rather than only to a retry
+  // counter, because no retry mends it: it is mended by deploying a binary that
+  // carries the stored version, or by a migration that rewrites the marker on
+  // purpose, and never by editing the database by hand. Changing the derivation
+  // is from now on a MIGRATION rather than a release.
+  KEY_IDENTITY_OUTCOME_DERIVATION_SKEW = 5;
+}
+
+// Ask whether this store's rows were encrypted under the key set the caller
+// holds (ADR-0764). The marker behind ADR-0753's ordering rule: `iam-keys` is
+// generated automatically only once `iam` can refuse the wrong one.
+//
+// ONE MARKER FOR THE WHOLE INSTALLATION, never one per user and never one per
+// row. One key set encrypts every encrypted column in this store, so there is
+// one fact to record — and a per-row marker would make ABSENT a per-row answer
+// and fire the first-boot branch against a store that is not empty at all.
+//
+// THE ROW IS FOUND WITHOUT REFERENCE TO ANYTHING THE CALLER SENDS. It is the
+// singleton and it is located as the singleton: neither `key_fingerprint` nor
+// `derivation_version` belongs in the lookup. Both sentences above are
+// satisfied by a `WHERE fingerprint = ?`, and that implementation can never
+// answer MISMATCH — it finds nothing whenever the key is wrong, reports
+// ABSENT, and rebuilds the collapse this arm exists to delete. A `WHERE
+// derivation_version = ?` fails the same way, reading a version skew as an
+// empty store and earning it a SECOND marker. Read the row, THEN compare.
+//
+// THE COMPARISON HAPPENS HERE AND THE STORED MARKER NEVER LEAVES. Returning it
+// for the caller to compare would put the ABSENT case back on an empty field —
+// the shape KeyIdentityOutcome exists to delete — and the comparison is byte
+// equality, which needs nothing this boundary does not have. `GetPasswordHash`
+// returns its hash for the opposite reason: Argon2id verification needs the
+// plaintext, which lives only in `iam`.
+//
+// A READ, SO NO `Idempotency` (D9) and no outcome to replay.
+//
+// WHAT THE CALLER DOES WITH EACH ANSWER, stated here because the answer is
+// only half a gate without it, and EXHAUSTIVE over the members this arm sends.
+// MATCH passes. MISMATCH is permanent, and ADR-0764 has `iam` end its serve and
+// exit non-zero on it. ABSENT leads to SetKeyIdentity below, under the
+// conditions that arm states. DERIVATION_SKEW is not-passed and NOT-EXITING:
+// the stored marker was produced by a function this caller does not speak, so
+// nothing was compared and nothing may be inferred — `iam` neither passes nor
+// dies, and an operator is told. UNSPECIFIED is a fault and is not-passed.
+//
+// AN RPC FAILURE IS NONE OF THESE, AND ANY STATUS OTHER THAN OK IS
+// NOT-PASSED. An UNAVAILABLE twin is transient: the caller retries it forever
+// and the check never passes while that lasts. A PERMANENT status is the case
+// the retry loop cannot mend, and on THIS arm UNIMPLEMENTED is the only one to
+// expect — an `iam-db` deployed from an earlier tag does not carry this arm at
+// all and answers it to every call. This arm is a read and REFUSES NOTHING
+// ABOUT THE STORED MARKER — it still refuses a MALFORMED REQUEST, with
+// INVALID_ARGUMENT, by the two presence rules its fields state, and that is a
+// fact about the request rather than about the marker. The one refusal about
+// the marker on the whole key-identity pair belongs to SetKeyIdentity below,
+// which states it. A VERSION SKEW IS NOT AMONG THESE
+// STATUSES and never was a status: ADR-0765 makes it the member named above, on
+// an OK response, precisely so a caller separates "the comparison found
+// something" from "the comparison could not be made" by channel. Retrying a
+// permanent status forever is safe and is not sufficient: the pod stays Ready,
+// serving and unverified with nobody told. A permanent status means the twin
+// does not carry this arm yet, and it MUST be visible to an operator rather
+// than only to a retry counter. Boot is gated on none of it — ADR-0532 keeps
+// the dial to this service lazy and the check runs as a task afterwards.
+message GetKeyIdentityRequest {
+  // WHAT IDENTIFIES THE KEY SET, computed by `iam`, and OPAQUE TO THIS
+  // BOUNDARY. This service compares these bytes and stores them; it derives
+  // nothing from them and reads no structure in them. The derivation is
+  // `iam`'s, and changing it is a change there rather than here.
+  //
+  // NEVER THE KEY. It is derived one-way from the key set, so a stolen backup
+  // of this store yields nothing that decrypts a row — the same rule the token
+  // hash and the blind index already follow, and the rule that lets the marker
+  // live in the database the keys deliberately do not.
+  //
+  // EMPTY IS REFUSED, with INVALID_ARGUMENT, here and on SetKeyIdentity. THIS
+  // IS THE ONE VALIDATION AND IT IS LOAD-BEARING: `bytes` has no presence in
+  // proto3, so a caller that populates nothing sends empty — and were empty
+  // storable, it would be recorded as a marker and then match itself for ever,
+  // passing the gate with no key material involved at all. Non-empty is the
+  // whole of the rule, deliberately: a length or a format would fix PR 3's
+  // derivation into this contract, and the field is opaque precisely so it
+  // does not.
+  bytes key_fingerprint = 1;
+
+  // WHICH FUNCTION PRODUCED THE FINGERPRINT ABOVE. `iam` numbers its own
+  // derivations; this service reads no meaning into the number beyond
+  // equality, exactly as it reads none into the bytes.
+  //
+  // WITHOUT IT THE DERIVATION IS AN IMMORTAL, UNVERSIONED COMPATIBILITY
+  // SURFACE, which is why the field is here rather than added after the tag.
+  // The fingerprint is opaque and MISMATCH is permanent, so on the day a
+  // release changes the domain-separation string, adds a key to the input, or
+  // moves to another primitive, every `iam` pod in every installation compares
+  // a new fingerprint against an old marker, reads MISMATCH, ends its serve
+  // and exits. Keys correct, rows intact, `iam` gone estate-wide, and the way
+  // back a hand-written UPDATE against the marker table — because the gate is
+  // built to be un-bypassable.
+  //
+  // THE STORED MARKER IS THE PAIR, version and fingerprint together, and the
+  // comparison is defined only WITHIN one version. Two fingerprints from
+  // different functions differ for a reason that says nothing about the key
+  // set, so a comparison across versions answers a question nobody asked.
+  //
+  // WHAT A SERVER DOES WHEN THE STORED VERSION DIFFERS FROM THE ONE PRESENTED,
+  // on both arms. It is stated because a version difference and a fingerprint
+  // difference are DIFFERENT EVENTS, and answering them alike rebuilds the
+  // hazard this field removes. Same version and equal fingerprints — MATCH.
+  // Same version and different fingerprints — MISMATCH, permanent, `iam`
+  // exits. DIFFERENT VERSIONS — NEITHER, and no comparison is performed: the
+  // call answers OK carrying KEY_IDENTITY_OUTCOME_DERIVATION_SKEW and NOTHING
+  // IS WRITTEN. Not MISMATCH, which is the estate-wide exit above. Not MATCH,
+  // which passes a gate that compared nothing. And NOT ABSENT, which is the
+  // worst of the three, because the caller would then take the first-boot
+  // branch and record a second marker.
+  //
+  // A SKEW IS A MEMBER OF KeyIdentityOutcome RATHER THAN A gRPC STATUS, and
+  // ADR-0765 rules it so. The reasoning matters more than the choice, because
+  // it is what stops a later reader folding the case back into the status
+  // channel to save a member: THIS ENUM ANSWERS WHAT THE COMPARISON FOUND, A
+  // STATUS ANSWERS THAT THE COMPARISON COULD NOT BE MADE. A skew is a finding
+  // about the stored pair — the marker is there, it was read, and what was read
+  // is that its version is not this caller's — so it is a finding. A MEMBER
+  // ALSO FORCES EVERY `match` IN PR 2 AND PR 3 TO HANDLE IT, WHICH A COMMENT
+  // CANNOT; a status leaves the case to a default arm nobody writes. The
+  // ACCEPTED COST is the revisability given up: member numbers freeze at the
+  // tag (D15, D16) and status codes do not, so member 5 can never be removed
+  // and never be renumbered, and PR 2 and PR 3 have yet to meet the case. The
+  // exhaustive match was ruled worth more. It is not-passed by the whitelist
+  // KeyIdentityOutcome states, it is not-exiting because it is not MISMATCH,
+  // and it is permanent, so it reaches an operator by the rule GetKeyIdentity
+  // states above. It is mended by deploying a binary that carries the stored
+  // version, or by a migration written on purpose, and never by editing the
+  // database by hand.
+  //
+  // ZERO IS REFUSED, with INVALID_ARGUMENT, here and on SetKeyIdentity, for
+  // the reason an empty `key_fingerprint` is: `uint32` has no presence in
+  // proto3, so a caller that populates nothing sends 0. Were 0 storable, every
+  // caller that never learned of this field would agree with every other on a
+  // version none of them chose, which is the unversioned surface again one
+  // field further in. Versions start at 1.
+  uint32 derivation_version = 2;
+}
+message GetKeyIdentityResponse {
+  // MATCH, MISMATCH, ABSENT or DERIVATION_SKEW — a stored `derivation_version`
+  // that differs from the one presented is a member here rather than a status,
+  // so this arm answers OK and states the finding. Never RECORDED — this arm
+  // writes nothing. This arm puts NO REFUSAL ABOUT THE MARKER on the status
+  // channel, so a non-OK answer to it is never a finding: it is a malformed
+  // request refused with INVALID_ARGUMENT by the two presence rules the fields
+  // state, or a transport or deployment fault. None of the three is a fact
+  // about what the store holds.
+  KeyIdentityOutcome outcome = 1;
+}
+
+// Record the marker, ONCE, AND ONLY WHERE THIS STORE HOLDS NEITHER A MARKER
+// NOR ANY ROWS (ADR-0764). "The first boot of an empty installation" is the
+// intent and is deliberately not the wording: this service cannot see an
+// installation, it can see its own rows, and the gap between those two facts
+// is the whole of what the refusal below enforces.
+//
+// **WRITE-ONCE, AND THE REFUSAL TO OVERWRITE IS THE POINT.** A stored marker
+// whose fingerprint differs UNDER THE VERSION PRESENTED is answered with
+// MISMATCH; one stored under a DIFFERENT version is answered with
+// DERIVATION_SKEW. Either way NOTHING IS WRITTEN — the two answers name
+// different events, and the write-once rule is indifferent to which. An arm that
+// overwrote would hand a pod holding the wrong key the means to make itself
+// pass — record its own fingerprint, agree with itself for ever, and leave the
+// rows it cannot read behind an assertion that they are fine. The gate would
+// then exist and be unable to fail, which is the defect ADR-0764 names.
+//
+// THE COMPARISON AND THE INSERT ARE ONE STATEMENT, one transaction (D5), for
+// the reason RedeemEnrolment states: a read followed by a write is the same
+// race with a longer window. Two replicas rolling out under DIFFERENT key sets
+// can both read ABSENT before either writes. One write wins and the other MUST
+// be told so rather than silently succeeding, or the loser runs on under a key
+// the store no longer agrees with. The loser is answered by the same rules the
+// winning row is compared under: MISMATCH when both present the SAME
+// `derivation_version`, so exactly one key set survives the rollout and the
+// other pod exits; DERIVATION_SKEW when they present different ones, so a
+// rollout that changes the derivation does NOT exit the loser. The second case
+// is what the field is for, and answering it MISMATCH would be the estate-wide
+// exit in miniature. BOTH ARE OK RESPONSES CARRYING A MEMBER. A split rollout
+// is a finding about the marker that won, so neither half of it reaches the
+// status channel.
+//
+// RECORDING IS REFUSED WHEN THIS STORE ALREADY HOLDS ROWS, with
+// FAILED_PRECONDITION, and nothing is written. ABSENT says only that no marker
+// is stored; it does not say the installation is empty, and the window where
+// the two differ is reached by every store that existed before this arm did. A
+// first boot is an EMPTY store with no marker. A POPULATED store with no
+// marker is an incident: its rows were encrypted under a key set nobody can
+// now name, and recording whichever fingerprint arrives first would assert an
+// identity about all of them on no evidence at all.
+//
+// THIS IS THE ONLY REFUSAL ABOUT THE STORED MARKER THIS ARM PUTS ON THE STATUS
+// CHANNEL, and that is what makes FAILED_PRECONDITION unambiguous here. The
+// arm's other refusals are about the REQUEST rather than the marker and all
+// carry INVALID_ARGUMENT: an empty `key_fingerprint`, a zero
+// `derivation_version`, and D9's replay of a key under a different payload. A
+// caller that cannot tell a bad request from a bad store has a different
+// problem, and that separation is why one code can serve three request faults
+// while the store's own refusal keeps its own. An earlier round gave this
+// refusal and a version skew the SAME status on the argument that they are one
+// operational fact — this is not a first boot — with two detections. ADR-0765
+// OVERTURNS THAT. The two are now distinguished as far as this boundary can
+// distinguish anything: A VERSION SKEW IS AN OUTCOME ON AN OK RESPONSE, A
+// POPULATED STORE IS A NON-OK STATUS. A caller branches on the channel before
+// it reaches a value, and never by reading prose out of a message string.
+//
+// WHY FAILED_PRECONDITION AND NOT ANOTHER CODE. The store is not in the state
+// the operation requires, which is what that code means and what gRPC's own
+// canonical example — refusing to delete a directory that is not empty — names.
+// It is a fact about the SYSTEM rather than about the request. NOT
+// ALREADY_EXISTS: the marker does not exist, the rows do, so that code would
+// name the wrong entity and invite a caller to read it as a harmless replay.
+// NOT ABORTED: that implies a concurrency conflict a retry might clear, and
+// this condition is permanent until an operator acts. NOT INVALID_ARGUMENT:
+// nothing about the request is malformed, and this arm already spends that code
+// on the two presence rules and on D9's replay refusal, so reusing it would
+// merge three unrelated facts into one code. FAILED_PRECONDITION is free on
+// this arm precisely because the skew vacated it, which is the distinctness
+// ADR-0765 asks for rather than a coincidence.
+//
+// `iam` TREATS IT AS: do not pass, do not exit, be visible to an operator —
+// the same disposition DERIVATION_SKEW gets, reached down a different channel.
+// Identical handling is not an argument for identical encoding: the two are
+// separate so that a caller can TELL them apart, not so that it must act
+// differently on them.
+//
+// NO `unverified_actor`, AND UNLIKE SetPassword ABOVE THE EXCLUSION IS NOT
+// ARGUABLE. Every other writing arm on this boundary carries the field because
+// a person somewhere asked for the write and the audit record should say who.
+// Nobody asks for this one: `iam` calls it from its own startup task, against
+// its own key material, with no request in flight and no gateway involved.
+// There is no actor to record, and a field for one would invite an
+// implementation to put something in it.
+message SetKeyIdentityRequest {
+  // D9's key. THE PAYLOAD FOR THE COMPARISON IS `key_fingerprint` AND
+  // `derivation_version`, the other two fields of this message —
+  // `idempotency` carries the key that payload is keyed on. A key replayed
+  // carrying a DIFFERENT value in EITHER field is REFUSED with
+  // INVALID_ARGUMENT by that org-wide rule, and the refusal is right here: the
+  // two calls claim different key sets, or one key set under two derivations,
+  // so answering the second with the first's outcome would report a marker
+  // this caller does not hold.
+  //
+  // NOT A MEMBER OF ADR-0519's SINGLE-USE-SECRET CARVE-OUT, stated because
+  // `yadgar.common.v1.Idempotency` fixes membership as an ENUMERATION rather
+  // than a test a reader applies. This RPC mints nothing; its outcome is the
+  // stored marker, which the store keeps and can re-derive on demand.
+  //
+  // THE KEY IS THE BELT AND NOT THE BRACES. The verb converges without it: a
+  // retry under a FRESH key, presenting the same fingerprint under the same
+  // `derivation_version`, finds the marker the first attempt wrote and answers
+  // MATCH — so a lost key costs the RECORDED-versus-MATCH distinction and
+  // nothing else. A retry presenting a DIFFERENT version converges no better
+  // and no worse than a first call would, since it is answered
+  // DERIVATION_SKEW either way: the answer turns on the stored row rather
+  // than on the key. Write-once is what makes that true — the same way
+  // SetUserAdmin's shape rather than its key is what keeps its retry harmless.
+  yadgar.common.v1.Idempotency idempotency = 1;
+
+  // The same fingerprint GetKeyIdentityRequest carries, under the same rules:
+  // computed by `iam`, opaque here, never the key, and EMPTY IS REFUSED with
+  // INVALID_ARGUMENT.
+  bytes key_fingerprint = 2;
+
+  // The same discriminator GetKeyIdentityRequest carries, under the same
+  // rules: `iam`'s own numbering, ZERO IS REFUSED with INVALID_ARGUMENT, and a
+  // stored version differing from this one is answered OK carrying
+  // DERIVATION_SKEW, with nothing written, rather than MISMATCH. IT IS STORED
+  // WITH THE MARKER on the writing call, because a marker without the version
+  // that produced it is the unversioned surface this field exists to close.
+  uint32 derivation_version = 3;
+}
+message SetKeyIdentityResponse {
+  // RECORDED when this call wrote the marker, MATCH when one was already
+  // stored UNDER THE VERSION PRESENTED and agreed, MISMATCH when one was
+  // already stored under that version and differed, DERIVATION_SKEW when one
+  // was stored under a different version — and in the last two cases this call
+  // wrote nothing. Never ABSENT: once this arm has answered OK, a marker exists
+  // either way.
+  //
+  // THE ONE REFUSAL STATED ABOVE — a store that already holds rows — is
+  // FAILED_PRECONDITION and reaches no member of this enum. It is the only
+  // refusal ABOUT THE STORED MARKER on this arm's status channel; the arm's
+  // three request faults are INVALID_ARGUMENT and say nothing about the store.
+  // A version skew used to sit beside it
+  // there and no longer does: ADR-0765 makes it the member named above, so the
+  // two cases that both mean "this is not a first boot" are told apart BY
+  // CHANNEL, one an OK response and one a status, rather than by reading a
+  // message string.
+  KeyIdentityOutcome outcome = 1;
+}
+
 service IamDbService {
   rpc ResolveCredential(ResolveCredentialRequest) returns (ResolveCredentialResponse);
   rpc GetPasswordHash(GetPasswordHashRequest) returns (GetPasswordHashResponse);
@@ -778,4 +1205,6 @@ service IamDbService {
   rpc AddTeamMember(AddTeamMemberRequest) returns (AddTeamMemberResponse);
   rpc RemoveTeamMember(RemoveTeamMemberRequest) returns (RemoveTeamMemberResponse);
   rpc SetInheritedSetting(SetInheritedSettingRequest) returns (SetInheritedSettingResponse);
+  rpc GetKeyIdentity(GetKeyIdentityRequest) returns (GetKeyIdentityResponse);
+  rpc SetKeyIdentity(SetKeyIdentityRequest) returns (SetKeyIdentityResponse);
 }

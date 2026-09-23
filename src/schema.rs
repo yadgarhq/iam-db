@@ -40,7 +40,66 @@ pub fn migrations() -> Result<MigrationSet, MigrationError> {
         policy::team_setting_override(),
         policy::seed_owner_reads_own_record(),
         policy::inherited_setting_write(),
+        key_identity(),
     ])
+}
+
+fn key_identity() -> Migration {
+    Migration {
+        version: 14,
+        name: "create_key_identity".into(),
+        // ADR-0764's marker and ADR-0765's versioning of it: which key set
+        // encrypted the rows in this store, so a regenerated `iam-keys` fails
+        // loudly instead of starting healthy over rows it cannot read.
+        //
+        // ONE ROW FOR THE WHOLE INSTALLATION, AND THE ENGINE IS WHAT MAKES IT
+        // ONE. `singleton` is a constant column whose only legal value is 1, so
+        // the primary key admits exactly one row and the CHECK refuses any
+        // attempt to open a second slot. A second marker is the failure this
+        // table exists to prevent, and a UNIQUE on nothing in particular would
+        // not prevent it; `iam_org_setting` keys on `name` for the same reason —
+        // the discriminator is in the schema rather than in a convention.
+        //
+        // IT IS ALSO WHAT LETS THE ROW BE FOUND AS THE SINGLETON. The contract
+        // states that neither `key_fingerprint` nor `derivation_version` may
+        // appear in the lookup: `WHERE key_fingerprint = ?` finds nothing
+        // whenever the key is wrong and reports ABSENT, so that arm can never
+        // answer MISMATCH, and `WHERE derivation_version = ?` reads a version
+        // skew as an empty store and earns it a second marker. `WHERE singleton
+        // = 1` references nothing the caller sent.
+        //
+        // THE MARKER IS THE PAIR (ADR-0765), which is why the version is a
+        // COLUMN here rather than a fact recovered from the fingerprint. A
+        // marker without the version that produced it is the immortal,
+        // unversioned derivation surface that entry exists to close: every
+        // comparison this store makes is defined only WITHIN one version, and a
+        // stored version it cannot read is a skew rather than a mismatch.
+        //
+        // VARBINARY, not BINARY, and not a text column. The fingerprint is
+        // OPAQUE — the derivation is `iam`'s and this boundary reads no
+        // structure in it — so a fixed width would fix a digest length into the
+        // schema, which the contract refuses by name. Binary rather than text
+        // for the reason `external_id_blind_index` gives: a byte-for-byte
+        // comparison with no collation able to make two different fingerprints
+        // compare equal.
+        //
+        // `idempotency_key` IS ON THE MARKER ROW RATHER THAN IN A LEDGER OF ITS
+        // OWN. D9's amended half needs the prior REQUEST to refuse a repeated
+        // key carrying a different payload, and on this arm the prior request IS
+        // the stored marker — the two other columns are the whole payload. A
+        // second table would hold a copy of them. It defaults to the empty
+        // string because the empty string is not a key (`RedeemEnrolment`'s
+        // rule), so a marker written without one never replays.
+        sql: "CREATE TABLE iam_key_identity (
+                  singleton           TINYINT UNSIGNED NOT NULL PRIMARY KEY DEFAULT 1,
+                  derivation_version  INT UNSIGNED     NOT NULL,
+                  key_fingerprint     VARBINARY(255)   NOT NULL,
+                  idempotency_key     VARCHAR(255)     NOT NULL DEFAULT '',
+                  recorded_at         TIMESTAMP        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  CONSTRAINT ck_iam_key_identity_singleton CHECK (singleton = 1)
+              ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+            .into(),
+    }
 }
 
 fn user() -> Migration {

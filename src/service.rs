@@ -82,6 +82,7 @@ mod enrolment;
 mod handlers;
 pub use enrolment::DEMAND_INSERT;
 mod identity;
+mod key_identity;
 mod password;
 mod policy;
 mod setting;
