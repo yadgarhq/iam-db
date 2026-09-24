@@ -162,6 +162,92 @@ database:
   maxConnections: 8
   engineMaxConnections: 151
 
+  # ── THE ENGINE ITSELF, WHICH THIS CHART CAN NOW CREATE ─────────────────────
+  #
+  # OFF, AND THAT IS NOT A PREFERENCE. `k8s.mariadb.com/v1alpha1` is a CRD-backed
+  # group, so a chart that rendered this object by default would fail to install on
+  # every cluster that has not adopted mariadb-operator — the same reason
+  # `autoscaling.enabled` below defaults false for its ScaledObject. An adopter who
+  # runs the operator sets this true; one who brings their own engine — RDS, Aurora,
+  # Cloud SQL, Azure MySQL — leaves it false and points `host` above at it.
+  #
+  # TURNING IT ON WHILE `yadgarhq/deploy`'s `infra/databases/iam-db.yaml` still
+  # exists puts TWO OWNERS ON ONE OBJECT NAME. Retiring that copy is filed with its
+  # own ordering, and this organisation keeps this toggle false meanwhile.
+  #
+  # THE IDENTITY FIELDS ARE THE KEYS ABOVE, not a second set of their own: the
+  # instance's name is `host`, the database it bootstraps is `name`, its user is
+  # `user`, and the password it mints lands in `passwordSecret`. Two sources for one
+  # fact drift, and the drift shows up as a connection error rather than as a missing
+  # file.
+  create: false
+
+  # THE GROUP-AND-VERSION STRING THE RENDER CHECK NAMES, recorded here beside the
+  # toggle so an operator upgrade that moved the version turns the check red rather
+  # than silently weakening it. Read off mariadb-operator at the version the estate
+  # pins, `ghcr.io/mariadb-operator/mariadb-operator:26.6.0`.
+  # `chart/templates/render-checks.yaml` passes the same string as a literal, because
+  # the suite reads the invocation's arguments off the template;
+  # `test_mariadb.py::test_the_render_check_names_the_group_the_values_file_records`
+  # is the gate that keeps the two one.
+  mariadbOperator:
+    apiVersion: k8s.mariadb.com/v1alpha1
+
+  # THE ENGINE-SIDE KNOBS. Each is rendered into the MariaDB object, and
+  # `test_mariadb.py` asserts that each one reaches it — a knob offered here that the
+  # template dropped is ADR-0569's defect exactly: a value somebody can see that is
+  # not the value that applies.
+  instance:
+    # 11.8 OR NEWER IS REQUIRED, not preferred: the boot capability probe runs
+    # VEC_DISTANCE_EUCLIDEAN over VEC_FromText and fails the pod when the engine
+    # cannot answer it. An older image starts and then refuses to serve, which is the
+    # loud failure — but pinning avoids it entirely.
+    image: mariadb:11.8.8
+
+    # ONE replica. More than one MariaDB replica means Galera, which is a different
+    # topology with its own failure modes. The two-replica invariant in this estate
+    # is about the SERVICES rather than the engine: it exists so client-side
+    # balancing and the migration race are reachable, and this module's own
+    # `replicaCount` exercises both against one engine.
+    replicas: 1
+
+    tls:
+      # WRITTEN OUT THOUGH IT IS ALREADY THE OPERATOR'S DEFAULT. This engine served
+      # TLS for a long time before anything said so, and the silence is what hid that
+      # it was not ENFORCING it. A file that states its posture cannot be misread by
+      # the next reader who greps for `tls:` and finds nothing.
+      enabled: true
+      # `required: true` IS THE LINE THAT CHANGES BEHAVIOUR. It sets
+      # `require_secure_transport = ON`, so an unencrypted connection over TCP is
+      # REFUSED rather than accepted. Nothing here loses by it: `sslMode` above
+      # defaults to `required`, so this module already negotiates TLS. THE HEALTH
+      # PROBES ARE UNAFFECTED — `require_secure_transport` exempts unix-socket
+      # connections and the operator's probes carry no `-h`. The same exemption means
+      # `kubectl exec` into the engine pod is NOT a test of this control.
+      required: true
+
+    storage:
+      size: 1Gi
+      # NAMED rather than left to the cluster's default, so this file says what the
+      # volume binds to. `standard` is kind's bundled local-path-provisioner; an
+      # adopter names their own.
+      className: standard
+
+    # THE SECRET THE OPERATOR MINTS THE ROOT PASSWORD INTO, and it is not the one the
+    # pod mounts — that is `passwordSecret` above. Nothing in this estate reads this
+    # one from a pod; it exists so the credential is created in-cluster and never
+    # passes through a commit (ADR-0517).
+    rootPasswordSecret: iam-db-mariadb-root
+
+    # Development sizing. The ceiling on the reference machine is the NUMBER of
+    # database instances, which is why each one is kept small.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 768Mi
+
 # D68: scale on CONCURRENCY, not CPU. A -db waits on MariaDB and a logic service
 # waits on its -db, so both saturate at low CPU — a CPU-driven HPA stays quiet
 # exactly when the system is in trouble.

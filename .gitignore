@@ -5,3 +5,9 @@ target
 # that cover exists on one machine and reaches no other clone, no CI, and no
 # other contributor.
 .local-review/
+
+# Python bytecode and pytest's cache, which `scripts/tests/` produces the first
+# time it runs. The suite is the only Python here and it is not packaged.
+__pycache__/
+*.pyc
+.pytest_cache/
