@@ -1,0 +1,37 @@
+{{/*
+EVERY RENDER CHECK THIS CHART DECLARES, IN ONE FILE, AND THE FILE RENDERS NOTHING.
+
+ONE CHECK PER OPERATOR, NOT ONE PER KIND. `database.create` renders one kind today,
+so the two counts happen to be equal here — they are not the same rule, and the
+number this chart asserts is the number of CHECKS.
+`scripts/tests/test_render_checks.py` counts the checks DECLARED here and asserts
+that number, so a check deleted from this file reddens the suite on the count rather
+than letting it quietly exercise one fewer.
+
+THE FILENAME DOES NOT BEGIN WITH AN UNDERSCORE, AND THAT IS LOAD-BEARING. helm
+treats `templates/_*` as partials and never renders them, so a `fail` that lived
+only in `_require_api.tpl` would never fire. The definition is a partial; the CALL
+has to sit in a rendered template. Do not tidy the two into one file.
+
+THE GROUP IS THE OPERATOR'S OWN, and here that needs no argument the way Envoy
+Gateway's did in `yadgarhq/platform`: `k8s.mariadb.com/v1alpha1` is registered by
+mariadb-operator and by nothing else, so there is no sibling specification a check
+could name by mistake. The string is a LITERAL here because
+`scripts/tests/test_render_checks.py` reads these arguments off the template to
+count and exercise the checks; it is RECORDED a second time in `values.yaml` under
+`database.mariadbOperator.apiVersion`, beside the toggle, and the gate that keeps
+the two one is
+`test_mariadb.py::test_the_render_check_names_the_group_the_values_file_records`.
+
+THE TOGGLE IS OPT-IN, which is what makes this check legal at all. A render check
+may only ever sit behind a default-false toggle: `Has` is false for every CRD-backed
+group with no cluster, so a check reachable at the defaults would refuse every
+offline render in the estate.
+*/}}
+{{- if .Values.database.create }}
+{{- include "iam-db.require-api" (dict
+      "context" $
+      "apiVersion" "k8s.mariadb.com/v1alpha1"
+      "operator" "mariadb-operator"
+      "toggle" "database.create") }}
+{{- end }}

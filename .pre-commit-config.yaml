@@ -132,3 +132,33 @@ repos:
       # check — so a half that examined nothing is red rather than green.
       - id: chart-baseline
       - id: chart-network-policy
+
+  # LOCAL, because it is this repository's own content assertion rather than a rule
+  # the estate shares. Until this hook the chart was covered by `helm lint --strict`
+  # and the two shared `chart-*` hooks alone — none of which asserts what the chart
+  # RENDERS — so `scripts/tests/` is this chart's first content assertion and this
+  # line is what makes it run.
+  #
+  # `language: python` rather than `system`, so pre-commit provisions the
+  # interpreter, pytest and PyYAML. PYYAML IS FOR THE SUBJECT AS WELL AS THE SUITE:
+  # every case there parses a `helm template` render. Both pins match
+  # `yadgarhq/platform`'s copy of this block.
+  #
+  # HELM IS NOT PROVISIONED BY THIS HOOK and the suite does not skip without it — it
+  # fails, naming helm (ADR-0650). `ci-pr.yaml`'s `precommit` job installs helm
+  # v3.18.4 before it runs pre-commit, and the suite is measured on that version and
+  # on 4.3.0.
+  #
+  # `always_run` with `pass_filenames: false`, and `files:` is omitted rather than
+  # written as documentation: a hook filtered on `^scripts/` reports `Skipped`, exit
+  # 0, on a pull request that changes only `chart/values.yaml` — which is exactly the
+  # pull request whose rendered instance this suite exists to check.
+  - repo: local
+    hooks:
+      - id: pytest-scripts
+        name: pytest scripts/tests
+        language: python
+        additional_dependencies: ["pytest==9.1.1", "pyyaml==6.0.3"]
+        entry: pytest scripts/tests/ -q
+        pass_filenames: false
+        always_run: true

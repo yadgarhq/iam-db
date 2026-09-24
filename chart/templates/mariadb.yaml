@@ -1,0 +1,78 @@
+{{/*
+THE ENGINE THIS MODULE IS THE ONLY WRITER OF, rendered by the chart that consumes it.
+
+ADR-0752 put the shared platform layer in `yadgarhq/platform` and kept this object
+out of it in one sentence: "an object that exactly one module consumes does NOT go
+here. The three MariaDB CRs belong to `iam-db`, `project-db` and `task-db` behind
+`database.create`." This instance has exactly one consumer — the Deployment rendered
+beside it — and no invariant spanning its siblings, which is the test that decides
+between the two homes.
+
+IT MOVED FROM `yadgarhq/deploy`'s `infra/databases/iam-db.yaml`, and that copy is
+NOT retired by this change: flipping this toggle true while that Argo Application
+still owns the object would put two owners on one name. Retiring the `deploy` copies
+is filed with its own ordering. Under this organisation's values `database.create`
+stays false.
+
+EVERY IDENTITY FIELD BELOW IS READ FROM THE KEYS THE POD ALREADY READS, and that is
+the whole of why this template is short. `database.host`, `database.name`,
+`database.user` and `database.passwordSecret` are what `templates/deployment.yaml`
+hands the container as `DB_HOST`, `DB_NAME`, `DB_USER` and the Secret it mounts at
+`DB_PASSWORD_FILE`. A second set of keys for the engine's side would be two sources
+for one fact and would drift; `deploy/infra/databases/iam-db.yaml` records the
+failure that drift produces, where a wrong key mounts a Secret whose file the
+service cannot find and the symptom is a connection error rather than a missing
+file. `scripts/tests/test_mariadb.py` asserts the two sides against each other by
+reading BOTH out of the rendered objects.
+
+NO PASSWORD IN GIT. `generate: true` has the operator mint each credential on first
+reconcile when it is absent, so it is created in-cluster and never passes through a
+commit (ADR-0517).
+*/}}
+{{- if .Values.database.create }}
+apiVersion: k8s.mariadb.com/v1alpha1
+kind: MariaDB
+metadata:
+  name: {{ .Values.database.host | quote }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  image: {{ .Values.database.instance.image | quote }}
+
+  # TLS IS ENFORCED, AND `enabled` IS WRITTEN OUT THOUGH IT IS ALREADY THE
+  # OPERATOR'S DEFAULT. A file that states its posture cannot be misread by the next
+  # reader who greps for `tls:` and finds nothing — which is exactly how this engine
+  # came to serve TLS without enforcing it for as long as it did.
+  tls:
+    enabled: {{ .Values.database.instance.tls.enabled }}
+    required: {{ .Values.database.instance.tls.required }}
+
+  rootPasswordSecretKeyRef:
+    name: {{ .Values.database.instance.rootPasswordSecret | quote }}
+    key: password
+    generate: true
+
+  # The database, the user and the grant this module needs, in one resource. The
+  # separate Database/User/Grant resources are for cases this shape cannot express.
+  database: {{ .Values.database.name | quote }}
+  username: {{ .Values.database.user | quote }}
+  passwordSecretKeyRef:
+    name: {{ .Values.database.passwordSecret | quote }}
+    # THE KEY THE POD OPENS. `templates/deployment.yaml` mounts this whole Secret at
+    # a directory and hands the binary `DB_PASSWORD_FILE` ending in `/password`, so
+    # this key and that basename are one fact. `test_mariadb.py` derives the pod's
+    # side from the rendered mount rather than from this file.
+    key: password
+    generate: true
+
+  replicas: {{ .Values.database.instance.replicas }}
+
+  storage:
+    size: {{ .Values.database.instance.storage.size | quote }}
+    storageClassName: {{ .Values.database.instance.storage.className | quote }}
+
+  resources:
+    {{- toYaml .Values.database.instance.resources | nindent 4 }}
+{{- end }}
