@@ -52,11 +52,12 @@ So, for a render exercising a set of checks:
                  adding a check is most tempted to delete. Deleting it is the
                  disarmament this harness exists to prevent.
 
-THE FILLER STAYS IN THE RED CASE AT EVERY COUNT, THE ONE-CHECK CHART INCLUDED — and
-THIS chart is the one-check case, so the clause is load-bearing here rather than
-hypothetical. With one check "every group except i's" is empty, so dropping the
-filler collapses the red case back into the bare render this docstring forbids. At
-one check the construction reduces to the filler alone; at two or more it does not.
+THE FILLER STAYS IN THE RED CASE AT EVERY COUNT, THE ONE-CHECK CHART INCLUDED. With
+one check "every group except i's" is empty, so dropping the filler collapses the red
+case back into the bare render this docstring forbids. At one check the construction
+reduces to the filler alone; at two or more it does not. This chart declares two, so
+the clause is not load-bearing HERE today — it is kept stated because this file is
+copied into charts that declare one, and because this chart may drop back to one.
 
 THE FILLER CARRIES A TRIPWIRE ASSERTING TWO THINGS, and both run BEFORE any red case.
 First, that the filler is absent from a BARE render's `.Capabilities.APIVersions`
@@ -98,9 +99,16 @@ list rather than reconstructing it:
     invisible in each of them alone. `CHART` below is the one place the name is
     written, and the `INVOCATION` regex and the two-check fixture are both built
     from it.
-  - this chart declares ONE check, so `EXPECTED_RENDER_CHECKS` is 1.
-  - there is no `example/values.yaml` here. The renders that must reach the check
-    pass `--set database.create=true` instead, which is `TOGGLE_ON` below.
+  - this chart declares TWO checks, so `EXPECTED_RENDER_CHECKS` is 2.
+  - there is no `example/values.yaml` here. The renders that must reach the checks
+    pass `--set` for every toggle a check sits behind instead, which is `TOGGLES_ON`
+    below.
+  - `RECORDED_GROUP_PATHS` and
+    `test_every_declared_check_names_the_group_the_values_file_records` are stated
+    HERE, over every declared check. The `platform` reference asserts the same
+    property one check at a time, in the suite that owns each object. Generalising it
+    means a check added with no recorded path reddens on the map's coverage rather
+    than on nobody noticing.
   - `test_the_checks_are_unreachable_at_the_chart_defaults` cannot assert the
     defaults render NOTHING, because this chart's defaults render a Deployment, a
     Service, a ServiceAccount and a PodDisruptionBudget. It asserts instead that
@@ -128,16 +136,34 @@ CHART = REPO / "chart"
 # is what keeps three sibling `-db` charts from defining one name between them.
 CHART_NAME = "iam-db"
 
-# The toggle turned on for every render that must REACH the check. There is no
-# adopter values file in this repository, and one is not added: the plan's step 9
-# puts the adopter block in the PARENT's `example/values.yaml`, not here.
-TOGGLE_ON = ("--set", "database.create=true")
+# THE TOGGLE BEHIND THE MariaDB CHECK, ALONE. `test_mariadb.py` imports THIS and not
+# the union below, and the two are separate for a reason that is an assertion rather
+# than a preference: that file counts the objects a render produces against literals,
+# so a render of its that also created a ScaledObject would redden every count it
+# owns for a reason that has nothing to do with the database.
+DATABASE_TOGGLE_ON = ("--set", "database.create=true")
+
+# THE TOGGLE BEHIND THE KEDA CHECK, ALONE.
+AUTOSCALING_TOGGLE_ON = ("--set", "autoscaling.enabled=true")
+
+# EVERY TOGGLE A DECLARED CHECK SITS BEHIND, and the renders below pass all of them,
+# because the construction is stated over ALL the checks the render exercises. There
+# is no adopter values file in this repository, and one is not added: the plan's step
+# 9 puts the adopter block in the PARENT's `example/values.yaml`, not here.
+#
+# A CHECK ADDED BEHIND A TOGGLE NOBODY ADDS HERE IS CAUGHT, and it is worth saying
+# where: `declared_checks` reads the template whatever the toggles say, so the green
+# render names that group and the check is simply never reached — and then ITS red
+# case, which removes that same group, renders successfully too and
+# `red.returncode != 0` goes red with "the render for <operator> succeeded". The
+# harness does not pass having examined one fewer.
+TOGGLES_ON = DATABASE_TOGGLE_ON + AUTOSCALING_TOGGLE_ON
 
 # ── WHAT THE CHART DECLARES, WRITTEN DOWN ────────────────────────────────────
 # A LITERAL, for the reason every expected count in this estate is a literal: a
 # number derived from the thing under test agrees with whatever that thing happens
 # to be and detects nothing.
-EXPECTED_RENDER_CHECKS = 1
+EXPECTED_RENDER_CHECKS = 2
 EXPECTED_CHECKS = {
     # THE OPERATOR'S OWN GROUP. `k8s.mariadb.com/v1alpha1` is registered by
     # mariadb-operator and by nothing else — unlike the Gateway API, which is a
@@ -147,6 +173,25 @@ EXPECTED_CHECKS = {
     # `test_mariadb.py::test_the_render_check_names_the_group_the_values_file_records`
     # is the gate that keeps the two one.
     "k8s.mariadb.com/v1alpha1": "mariadb-operator",
+    # KEDA'S OWN GROUP, and it needs no argument the way Envoy Gateway's did in
+    # `yadgarhq/platform`: `keda.sh/v1alpha1` is registered by KEDA and by nothing
+    # else, so there is no sibling specification a check could name by mistake. The
+    # operator string is `KEDA` in the shape the refusal prints it — an adopter reads
+    # it and goes and installs the thing with that name.
+    "keda.sh/v1alpha1": "KEDA",
+}
+
+# WHERE `values.yaml` RECORDS EACH CHECK'S GROUP-AND-VERSION STRING, one path per
+# declared check. The rule behind the map: the string is READ OFF the operator and
+# RECORDED IN THE VALUES FILE beside the toggle that asks for it, so an operator
+# upgrade that moved the version turns the check red rather than silently weakening
+# it. The check itself must pass a LITERAL, because `declared_checks` reads the
+# invocation's arguments off the template — so the string lives in two files and
+# `test_every_declared_check_names_the_group_the_values_file_records` is the gate
+# that keeps them one.
+RECORDED_GROUP_PATHS = {
+    "k8s.mariadb.com/v1alpha1": ("database", "mariadbOperator", "apiVersion"),
+    "keda.sh/v1alpha1": ("autoscaling", "kedaOperator", "apiVersion"),
 }
 
 # The number of checks the throwaway fixture declares, and it is a LITERAL for the
@@ -244,8 +289,9 @@ def red_api_versions(declared: Iterable[str], under_test: str) -> tuple[str, ...
     The other groups are what keeps the refusal ATTRIBUTABLE: without them the
     render aborts at whichever other check `fail` reaches first, and names that
     check's operator rather than this one's. The filler is what keeps the render
-    distinguishable from a bare one when `under_test` is the only check there is —
-    which, in this chart, it is.
+    distinguishable from a bare one when `under_test` is the only check there is,
+    which is not this chart today and is the state every chart this file is copied
+    into starts in.
     """
     return api_versions(
         sorted(group for group in declared if group != under_test)
@@ -382,10 +428,15 @@ def exercise_one_pair_per_declared_check(
         # case rewritten straight to a bare `render(chart)` is caught here instead of
         # silently reverting to the bare render
         # `test_a_bare_render_refuses_too_and_that_is_the_renderers_reason` exists to
-        # keep out. AT ONE CHECK — WHICH IS THIS CHART — THAT IS THE ONLY ASSERTION
-        # THAT CATCHES IT: a bare render still exits non-zero and still names the one
-        # operator there is, so `returncode` and the stderr assertions below all stay
-        # green over a red case that proves nothing.
+        # keep out. AT ONE DECLARED CHECK IT IS THE ONLY ASSERTION THAT CATCHES IT IN
+        # THE CHART'S OWN RED CASE: a bare render still exits non-zero and still names
+        # the one operator there is, so `returncode` and the stderr assertions below
+        # all stay green over a red case that proves nothing. AT TWO OR MORE — WHICH
+        # IS THIS CHART — the `--api-versions` COUNT ASSERTION BELOW CATCHES THE SAME
+        # DELETION INDEPENDENTLY, because a red argv that lost the filler carries one
+        # fewer group than `len(declared)`. MEASURED, both on helm 3.18.4 and 4.3.0.
+        # That is a strengthening, not a licence to drop either: the next chart this
+        # file is copied into declares one again.
         #
         # EVERY CLAUSE IS PHRASED OVER SOMETHING `red_api_versions` DID NOT PRODUCE —
         # the module-level filler literal, the group under test, and the groups read
@@ -393,7 +444,9 @@ def exercise_one_pair_per_declared_check(
         # instead would compare the builder with itself and could not fail.
         assert A_GROUP_NO_CHECK_ASKS_FOR in red.args, (
             f"the red render for {operator} no longer carries the filler "
-            f"{A_GROUP_NO_CHECK_ASKS_FOR}, so at one check it is a bare render: {red.args}"
+            f"{A_GROUP_NO_CHECK_ASKS_FOR}, so it has lost the tail that makes it "
+            f"differ from a bare render — which at one declared check is the whole "
+            f"of it: {red.args}"
         )
         assert group not in red.args, (
             f"the red render for {operator} carries {group}, the very group whose "
@@ -500,6 +553,60 @@ def test_the_chart_declares_the_checks_this_harness_exercises():
     assert len(declared_checks(CHART)) == EXPECTED_RENDER_CHECKS
 
 
+def test_every_declared_check_names_the_group_the_values_file_records():
+    """ONE SOURCE FOR EACH OPERATOR STRING, asserted across the two files that hold it.
+
+    The group-and-version string is READ OFF the operator and RECORDED IN `values.yaml`
+    beside the toggle that asks for it, so an operator upgrade that moved the version
+    turns the check red rather than silently weakening it. The invocation must pass a
+    LITERAL — `declared_checks` reads the arguments off the template — so each string
+    exists in two files and this is the gate that keeps them one.
+
+    IT IS STATED OVER EVERY DECLARED CHECK, NOT ONE, and both directions of the map are
+    asserted. A check added with no recorded path reddens here on the first direction;
+    a recorded path left behind after its check was deleted reddens on the second. A
+    gate written for one named group would have said nothing about either.
+
+    AND IT ASSERTS HOW MANY IT EXAMINED. A loop over an empty set of declared checks
+    finds no disagreement among zero of them and reports a pass, which is the failure
+    every count in this file is a literal to prevent.
+
+    `test_mariadb.py` carries the same assertion for its own group alone, written
+    before this one generalised it. It is left where it is: it is the file a reader of
+    the database change opens, and a second independent statement of a property costs
+    nothing.
+    """
+    declared = declared_checks(CHART)
+
+    assert set(RECORDED_GROUP_PATHS) == set(declared), (
+        f"the chart's checks ask for {sorted(declared)} and values.yaml records paths "
+        f"for {sorted(RECORDED_GROUP_PATHS)}; a check with no recorded string is one "
+        f"an operator upgrade can weaken silently, and a recorded string no check "
+        f"names is documentation"
+    )
+
+    values = yaml.safe_load((CHART / "values.yaml").read_text())
+    examined = 0
+    for group, path in sorted(RECORDED_GROUP_PATHS.items()):
+        recorded = values
+        for key in path:
+            assert key in recorded, (
+                f"values.yaml has no {'.'.join(path)}, so {group} is recorded nowhere "
+                f"beside the toggle that asks for it"
+            )
+            recorded = recorded[key]
+        assert recorded == group, (
+            f"values.yaml records {recorded} at {'.'.join(path)} and the chart's check "
+            f"names {group}; the two disagree, so the recorded string is documentation "
+            f"rather than the thing under test"
+        )
+        examined += 1
+
+    assert examined == EXPECTED_RENDER_CHECKS, (
+        f"examined {examined} recorded strings, expected {EXPECTED_RENDER_CHECKS}"
+    )
+
+
 def test_deleting_a_check_from_the_chart_reddens_the_count(tmp_path):
     """The harness's own red case: it goes red on the COUNT, not one check quieter.
 
@@ -525,13 +632,26 @@ def test_the_red_argv_builder_keeps_the_filler_at_one_check():
 
     `test_deleting_a_check_from_the_chart_reddens_the_count` is the meta-test for the
     COUNT. The two `red.args` tripwires inside `exercise_one_pair_per_declared_check`
-    had none, and at ONE check — which is this chart — they are the ONLY witness that
-    the red case is not a bare render: a bare render still exits non-zero and still
-    names the one operator there is. So a builder who meets a red suite while adding a
-    second check and does exactly what the docstrings above warn against — deletes
-    `+ FILLER_API_VERSIONS` from `red_api_versions` AND both tripwires — measures a
-    fully green suite, and from then on every red case in this chart is a bare render
-    proving nothing. This case is what that builder meets instead.
+    had none, and at ONE declared check they are the only witness that THE CHART'S OWN
+    red case is not a bare render: a bare render still exits non-zero and still names
+    the one operator there is. So a builder who deletes `+ FILLER_API_VERSIONS` from
+    `red_api_versions` AND both tripwires turns every red case the CHART has into a
+    bare render proving nothing. This case is what that builder meets instead.
+
+    THE CLAIM IS SCOPED TO THE CHART'S OWN RED CASES, AND THAT IS A MEASUREMENT RATHER
+    THAN A CAUTION. `test_the_construction_is_correct_at_two_checks` runs the same
+    function over a fixture declaring TWO checks whatever the chart declares, so its
+    `--api-versions` count assertion reddens under that same deletion at every chart
+    count. A sentence claiming the tripwires are the suite's only witness would be
+    false, and was.
+
+    IT DOES NOT GO VACUOUS WHEN THE CHART LEAVES ONE CHECK, WHICH THIS ONE HAS DONE.
+    Its input is the hand-written one-element set below and its expected value is a
+    module-level literal — neither is the chart's count — so deleting
+    `+ FILLER_API_VERSIONS` still reddens it here. What the move to two checks changed
+    is that the chart's OWN red cases gained the count assertion as a second witness.
+    The reduction this case states is the one the module docstring keeps stated at
+    every count, and the chart this file is copied into next declares one.
 
     IT IS NOT THE BUILDER COMPARED WITH ITSELF, which is the objection those
     tripwires' own comment raises against `set(red_api_versions(...)) <= set(red.args)`.
@@ -552,7 +672,7 @@ def test_the_harness_exercises_one_red_green_pair_per_declared_check(tmp_path):
     refuses whatever the target holds and proves nothing about the check.
     """
     exercise_one_pair_per_declared_check(
-        CHART, TOGGLE_ON, EXPECTED_RENDER_CHECKS, tmp_path
+        CHART, TOGGLES_ON, EXPECTED_RENDER_CHECKS, tmp_path
     )
 
 
@@ -567,11 +687,19 @@ def test_the_construction_is_correct_at_two_checks(tmp_path):
 
     SO THE COUNT EXERCISED HERE IS THE FIXTURE'S, NEVER THE CHART'S, AND THAT IS WHAT
     THIS CASE BUYS. `FIXTURE_RENDER_CHECKS` is two however many checks
-    `EXPECTED_RENDER_CHECKS` says the chart declares, so the generalisation is proved
-    at two on a chart declaring one — which is this chart — and stays proved the day a
-    chart drops back to one. This file is copied into every chart that carries a
-    render check, and those charts declare different counts; a case whose reason for
-    existing is read off one chart's count arrives stale in the next.
+    `EXPECTED_RENDER_CHECKS` says the chart declares, so the generalisation stays
+    proved at two the day a chart drops back to one. This file is copied into every
+    chart that carries a render check, and those charts declare different counts; a
+    case whose reason for existing is read off one chart's count arrives stale in the
+    next.
+
+    THIS CHART NOW DECLARES TWO ITSELF, SO SAY WHAT THIS CASE STILL BUYS AND WHAT IT
+    NO LONGER DOES. It no longer buys a count the chart does not have. What it buys is
+    INDEPENDENCE OF THE SUBJECT: its own chart, its own literal, its own two groups,
+    and the one-object-per-check assertion below that no render of a real chart can
+    give. A chart edit that took the real count to one or to three would leave this
+    case exercising two regardless, which is the property the paragraph above is
+    about and the reason the fixture is not deleted now that the counts agree.
 
     IT ALSO ASSERTS SOMETHING NO RENDER OF A REAL CHART CAN GIVE. The fixture renders
     exactly one object per check, so the green half is asserted to produce one object
@@ -633,8 +761,8 @@ def test_a_bare_render_refuses_too_and_that_is_the_renderers_reason():
     named a group the target does have, which is the case the check exists to let
     through.
 
-    IT CARRIES `TOGGLE_ON`, and without it there is nothing to measure: at this
-    chart's defaults the check is unreachable and the bare render SUCCEEDS, which is
+    IT CARRIES `TOGGLES_ON`, and without it there is nothing to measure: at this
+    chart's defaults every check is unreachable and the bare render SUCCEEDS, which is
     what `test_the_checks_are_unreachable_at_the_chart_defaults` asserts.
 
     EXACTLY ONE DECLARED OPERATOR, NOT A NAMED ONE. `fail` aborts at the first failing
@@ -645,7 +773,7 @@ def test_a_bare_render_refuses_too_and_that_is_the_renderers_reason():
     THAT one, which is the clause an `any(...)` rewrite would drop.
     """
     declared = declared_checks(CHART)
-    bare = render(CHART, *TOGGLE_ON)
+    bare = render(CHART, *TOGGLES_ON)
     assert bare.returncode != 0
 
     named = sorted(group for group, operator in declared.items() if operator in bare.stderr)

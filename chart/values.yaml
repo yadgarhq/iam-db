@@ -265,6 +265,17 @@ database:
 # replicas and a chart that applies cleanly.
 autoscaling:
   enabled: false
+
+  # THE GROUP-AND-VERSION STRING THE RENDER CHECK NAMES, recorded here beside the
+  # toggle so an operator upgrade that moved the version turns the check red rather
+  # than silently weakening it. Read off KEDA as the estate pins it.
+  # `chart/templates/render-checks.yaml` passes the same string as a literal, because
+  # the suite reads the invocation's arguments off the template;
+  # `test_render_checks.py::test_every_declared_check_names_the_group_the_values_file_records`
+  # is the gate that keeps the two one.
+  kedaOperator:
+    apiVersion: keda.sh/v1alpha1
+
   minReplicas: 2
   # At least two, always (D55) — the floor is a correctness property, not a
   # tuning knob: one replica makes a class of defect unreachable.

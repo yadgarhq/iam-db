@@ -50,9 +50,9 @@ import yaml
 from test_render_checks import (
     CHART,
     CHART_NAME,
+    DATABASE_TOGGLE_ON,
     EXPECTED_CHECKS,
     REPO,
-    TOGGLE_ON,
     declared_checks,
     objects,
     render,
@@ -112,8 +112,15 @@ def render_with_the_instance(chart: Path = CHART):
     IT PASSES `--api-versions`, and it has to: the render check behind the same
     toggle refuses a render that does not name the operator's group, which is the
     whole point of that check. `test_render_checks.py` is where THAT is exercised.
+
+    IT TURNS ON THE DATABASE TOGGLE AND NOTHING ELSE, which is why it imports
+    `DATABASE_TOGGLE_ON` rather than the `TOGGLES_ON` union the render-check harness
+    uses. The counts below are literals over the objects a render produces, so a
+    render that also created a ScaledObject would move every one of them for a reason
+    that has nothing to do with the database — and it would refuse outright, because
+    the KEDA check behind that other toggle asks for a group this argv does not name.
     """
-    return render(chart, *TOGGLE_ON, *API_VERSIONS_FOR_THE_INSTANCE)
+    return render(chart, *DATABASE_TOGGLE_ON, *API_VERSIONS_FOR_THE_INSTANCE)
 
 
 def instances(rendered: list[dict]) -> list[dict]:
