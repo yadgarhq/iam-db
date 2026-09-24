@@ -428,15 +428,26 @@ def exercise_one_pair_per_declared_check(
         # case rewritten straight to a bare `render(chart)` is caught here instead of
         # silently reverting to the bare render
         # `test_a_bare_render_refuses_too_and_that_is_the_renderers_reason` exists to
-        # keep out. AT ONE DECLARED CHECK IT IS THE ONLY ASSERTION THAT CATCHES IT IN
-        # THE CHART'S OWN RED CASE: a bare render still exits non-zero and still names
-        # the one operator there is, so `returncode` and the stderr assertions below
-        # all stay green over a red case that proves nothing. AT TWO OR MORE — WHICH
-        # IS THIS CHART — the `--api-versions` COUNT ASSERTION BELOW CATCHES THE SAME
-        # DELETION INDEPENDENTLY, because a red argv that lost the filler carries one
-        # fewer group than `len(declared)`. MEASURED, both on helm 3.18.4 and 4.3.0.
-        # That is a strengthening, not a licence to drop either: the next chart this
-        # file is copied into declares one again.
+        # keep out. `returncode` and the stderr assertions below do NOT catch that
+        # rewrite: a bare render still exits non-zero, and at one declared check it
+        # still names the one operator there is.
+        #
+        # IT IS NOT THE ONLY ASSERTION THAT CATCHES IT, AND THE OTHER ONE WORKS AT
+        # EVERY COUNT — ONE INCLUDED. The `--api-versions` COUNT ASSERTION BELOW
+        # catches the same deletion independently, in THIS CHART'S OWN red case, at
+        # one declared check as well as at two or more. A red argv that lost the
+        # filler carries one fewer group than `len(declared)`, and at one check that
+        # is zero against one.
+        #
+        # MEASURED AT ONE DECLARED CHECK, on helm 3.18.4 and 4.3.0 with identical
+        # output. `+ FILLER_API_VERSIONS`, both tripwires here and
+        # `test_the_red_argv_builder_keeps_the_filler_at_one_check` were deleted
+        # together, over a copy of this chart reduced to its mariadb check alone. The
+        # chart's own red case went red on `the red render for mariadb-operator passed
+        # --api-versions 0 times; 1 is the whole construction`. An earlier revision of
+        # this comment asserted the opposite and was wrong. That is a strengthening,
+        # not a licence to drop either: the next chart this file is copied into
+        # declares one again.
         #
         # EVERY CLAUSE IS PHRASED OVER SOMETHING `red_api_versions` DID NOT PRODUCE —
         # the module-level filler literal, the group under test, and the groups read
@@ -632,26 +643,37 @@ def test_the_red_argv_builder_keeps_the_filler_at_one_check():
 
     `test_deleting_a_check_from_the_chart_reddens_the_count` is the meta-test for the
     COUNT. The two `red.args` tripwires inside `exercise_one_pair_per_declared_check`
-    had none, and at ONE declared check they are the only witness that THE CHART'S OWN
-    red case is not a bare render: a bare render still exits non-zero and still names
-    the one operator there is. So a builder who deletes `+ FILLER_API_VERSIONS` from
-    `red_api_versions` AND both tripwires turns every red case the CHART has into a
-    bare render proving nothing. This case is what that builder meets instead.
+    had none. A builder who deletes `+ FILLER_API_VERSIONS` from `red_api_versions`
+    AND both tripwires turns every red case the CHART has into a bare render, and
+    `returncode` and the stderr assertions do not notice: a bare render still exits
+    non-zero, and at one declared check it still names the one operator there is. This
+    case is what that builder meets instead.
 
-    THE CLAIM IS SCOPED TO THE CHART'S OWN RED CASES, AND THAT IS A MEASUREMENT RATHER
-    THAN A CAUTION. `test_the_construction_is_correct_at_two_checks` runs the same
-    function over a fixture declaring TWO checks whatever the chart declares, so its
-    `--api-versions` count assertion reddens under that same deletion at every chart
-    count. A sentence claiming the tripwires are the suite's only witness would be
-    false, and was.
+    THE TRIPWIRES ARE NOT THE ONLY WITNESS AT ANY COUNT, AND THAT IS A MEASUREMENT
+    RATHER THAN A CAUTION. Two other assertions redden under the SAME deletion.
+    `test_the_construction_is_correct_at_two_checks` runs the same function over a
+    fixture declaring TWO checks whatever the chart declares, so its `--api-versions`
+    count assertion reddens at every chart count. The count assertion inside
+    `exercise_one_pair_per_declared_check` is a THIRD witness, also at every chart
+    count — ONE included, where a red argv that lost the filler carries zero groups
+    against a `len(declared)` of one.
+
+    MEASURED AT ONE DECLARED CHECK, on helm 3.18.4 and 4.3.0 with identical output.
+    The filler, both tripwires and this case were deleted together, over a copy of this
+    chart reduced to its mariadb check alone. The chart's own red case went red on
+    `the red render for mariadb-operator passed --api-versions 0 times; 1 is the whole
+    construction`. TWO earlier revisions of this docstring were wrong here. The first
+    claimed the tripwires were the suite's only witness. The second scoped that claim
+    to the chart's own red cases at one check. The count assertion refutes both.
 
     IT DOES NOT GO VACUOUS WHEN THE CHART LEAVES ONE CHECK, WHICH THIS ONE HAS DONE.
     Its input is the hand-written one-element set below and its expected value is a
     module-level literal — neither is the chart's count — so deleting
-    `+ FILLER_API_VERSIONS` still reddens it here. What the move to two checks changed
-    is that the chart's OWN red cases gained the count assertion as a second witness.
-    The reduction this case states is the one the module docstring keeps stated at
-    every count, and the chart this file is copied into next declares one.
+    `+ FILLER_API_VERSIONS` still reddens it here. The move to two checks changed
+    NOTHING about which assertions witness that deletion: the count assertion
+    witnessed it at one too. The reduction this case states is the one the module
+    docstring keeps stated at every count, and the chart this file is copied into next
+    declares one.
 
     IT IS NOT THE BUILDER COMPARED WITH ITSELF, which is the objection those
     tripwires' own comment raises against `set(red_api_versions(...)) <= set(red.args)`.
