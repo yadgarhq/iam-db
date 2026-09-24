@@ -95,9 +95,8 @@ list rather than reconstructing it:
     template names are GLOBAL across a chart tree, and at the plan's step 9 the
     parent renders `platform`, `iam-db`, `project-db` and `task-db` in ONE namespace
     — three charts defining one name is a collision that is invisible in each of
-    them alone and resolves to whichever definition loaded last. `CHART` below is
-    the one place the name is written, and the `INVOCATION` regex and the two-check
-    fixture are both built from it.
+    them alone. `CHART` below is the one place the name is written, and the
+    `INVOCATION` regex and the two-check fixture are both built from it.
   - this chart declares ONE check, so `EXPECTED_RENDER_CHECKS` is 1.
   - there is no `example/values.yaml` here. The renders that must reach the check
     pass `--set database.create=true` instead, which is `TOGGLE_ON` below.
@@ -518,6 +517,29 @@ def test_deleting_a_check_from_the_chart_reddens_the_count(tmp_path):
         f"expected {EXPECTED_RENDER_CHECKS} render checks declared in the chart, found 0"
         in message
     )
+
+
+def test_the_red_argv_builder_keeps_the_filler_at_one_check():
+    """THE ARGV TRIPWIRES' OWN META-TEST, and the counterpart of the count's.
+
+    `test_deleting_a_check_from_the_chart_reddens_the_count` is the meta-test for the
+    COUNT. The two `red.args` tripwires inside `exercise_one_pair_per_declared_check`
+    had none, and at ONE check — which is this chart — they are the ONLY witness that
+    the red case is not a bare render: a bare render still exits non-zero and still
+    names the one operator there is. So a builder who meets a red suite while adding a
+    second check and does exactly what the docstrings above warn against — deletes
+    `+ FILLER_API_VERSIONS` from `red_api_versions` AND both tripwires — measures a
+    fully green suite, and from then on every red case in this chart is a bare render
+    proving nothing. This case is what that builder meets instead.
+
+    IT IS NOT THE BUILDER COMPARED WITH ITSELF, which is the objection those
+    tripwires' own comment raises against `set(red_api_versions(...)) <= set(red.args)`.
+    The INPUT here is hand-written and the EXPECTED VALUE is the module-level literal
+    — neither is produced by the function under test. What it asserts is the reduction
+    the module docstring states: at one check "every declared group except the one
+    under test" is empty, so the whole red argv IS the filler.
+    """
+    assert red_api_versions({"a"}, "a") == FILLER_API_VERSIONS
 
 
 def test_the_harness_exercises_one_red_green_pair_per_declared_check(tmp_path):
