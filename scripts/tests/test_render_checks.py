@@ -93,10 +93,11 @@ list rather than reconstructing it:
 
   - the template name is `iam-db.require-api`, not `platform.require-api`. Helm
     template names are GLOBAL across a chart tree, and at the plan's step 9 the
-    parent renders `platform`, `iam-db`, `project-db` and `task-db` in ONE namespace
-    — three charts defining one name is a collision that is invisible in each of
-    them alone. `CHART` below is the one place the name is written, and the
-    `INVOCATION` regex and the two-check fixture are both built from it.
+    parent renders `platform` and the three `-db` charts in ONE namespace — one name
+    shared between every chart that copies this partial is a collision that is
+    invisible in each of them alone. `CHART` below is the one place the name is
+    written, and the `INVOCATION` regex and the two-check fixture are both built
+    from it.
   - this chart declares ONE check, so `EXPECTED_RENDER_CHECKS` is 1.
   - there is no `example/values.yaml` here. The renders that must reach the check
     pass `--set database.create=true` instead, which is `TOGGLE_ON` below.

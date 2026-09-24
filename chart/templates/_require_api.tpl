@@ -6,11 +6,18 @@ COPIED FROM `yadgarhq/platform`'s `chart/templates/_require_api.tpl` (ADR-0679: 
 matcher a sibling has hardened is copied, never re-derived). Two things differ and
 both are deliberate — the template's NAME and the prefix of the message it fails
 with. Helm template names are GLOBAL across a chart tree: at the plan's step 9 the
-parent renders `platform`, `iam-db`, `project-db` and `task-db` together in ONE
-namespace, so four charts defining `platform.require-api` between them would leave
-ONE definition's body rendering for every one of the four callers — measured on helm
-3.18.4 and 4.3.0, exit 0, no warning — with nothing in any one repository's own suite
-able to see it.
+parent renders `platform` and the three `-db` charts together in ONE namespace, so
+one name shared between every chart that copies this partial would leave ONE
+definition's body rendering for every caller, silently, with nothing in any one
+repository's own suite able to see it.
+
+SO THE NAMES MUST STAY PAIRWISE DISTINCT ACROSS THE ASSEMBLED TREE, and nothing in
+THIS repository can assert that — a chart rendered alone has no sibling to collide
+with. The parent's suite at step 9 is the only place that can. The measurement behind
+this paragraph is recorded there and in the pull request that added this file, rather
+than restated here. A version-pinned measurement written into a comment is a claim no
+suite re-runs. This paragraph already lost one sentence for being unverifiable, and a
+measured one that nothing re-checks goes stale the same way.
 
 A TOGGLE GATES A RESOURCE; IT DOES NOT DIAGNOSE A MISSING PREREQUISITE. A toggle
 set true on a cluster with no mariadb-operator renders cleanly and then fails at
