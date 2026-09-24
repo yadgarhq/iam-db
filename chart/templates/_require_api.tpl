@@ -13,11 +13,17 @@ repository's own suite able to see it.
 
 SO THE NAMES MUST STAY PAIRWISE DISTINCT ACROSS THE ASSEMBLED TREE, and nothing in
 THIS repository can assert that — a chart rendered alone has no sibling to collide
-with. The parent's suite at step 9 is the only place that can. The measurement behind
-this paragraph is recorded there and in the pull request that added this file, rather
-than restated here. A version-pinned measurement written into a comment is a claim no
-suite re-runs. This paragraph already lost one sentence for being unverifiable, and a
-measured one that nothing re-checks goes stale the same way.
+with. The measurement behind this paragraph is recorded in LEDGER TASK 1063, which
+also carries the obligation on the parent's suite at the plan's step 9: the only
+place distinctness can be asserted, and not yet written. So a reader today follows
+this pointer and lands somewhere real, and a reader after step 9 finds the suite
+where the task said it would be.
+
+THE MEASUREMENT IS NOT RESTATED HERE, and that is the rule rather than an omission.
+A version-pinned measurement written into a comment is a claim no suite re-runs, so
+nothing goes red the day it stops being true while the prose still reads as evidence.
+This paragraph already lost one sentence for being unverifiable. A measured one that
+nothing re-checks goes stale the same way.
 
 A TOGGLE GATES A RESOURCE; IT DOES NOT DIAGNOSE A MISSING PREREQUISITE. A toggle
 set true on a cluster with no mariadb-operator renders cleanly and then fails at
