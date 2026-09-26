@@ -214,6 +214,93 @@ A_GROUP_NO_CHECK_ASKS_FOR = "monitoring.coreos.com/v1"
 # probe and the tail of every red case can never drift apart from each other.
 FILLER_API_VERSIONS = ("--api-versions", A_GROUP_NO_CHECK_ASKS_FOR)
 
+# ── THE SHAPE OF `database.create`, AND THE ELEVEN WRITABLE SHAPES ───────────
+# `templates/render-checks.yaml` and `templates/mariadb.yaml` both gate on a BARE
+# TRUTHINESS TEST, which is FAIL-OPEN on a string: measured identically on helm
+# 3.20.2 and 4.3.0, `database.create: "false"` — which reads as OFF to any human —
+# renders a MariaDB. ADR-0797 is the rule the refusal implements: `kindIs "bool"` on
+# the RAW value, with `hasKey` first because `kindOf` answers `invalid` both for a
+# deleted key and for an absent one and cannot tell them apart.
+
+# THE GROUP EVERY SHAPE RENDER NAMES, AND IT IS NOT OPTIONAL. Without it the truthy
+# shapes abort at the mariadb-operator CHECK instead of at the shape refusal, and a
+# red case built on the exit code alone would redden for the renderer's reason while
+# reading as correct. Both refusals exit 1 (ADR-0794), so every assertion below
+# discriminates on the MESSAGE.
+MARIADB_API_VERSIONS = ("--api-versions", "k8s.mariadb.com/v1alpha1")
+
+# THE THREE ARMS OF THE REFUSAL, each with the phrase its message is recognised by
+# and the line that opens its block in the template. Two things follow from having
+# both: every arm gets its OWN red case below (a construction that strips one arm
+# and proves the shapes it owns stop being refused), and no arm can be satisfied by
+# another arm's message.
+SHAPE_ARMS = {
+    "database-absent": (
+        "`database` is absent from the values",
+        '{{- if not (hasKey .Values "database") }}',
+    ),
+    "create-absent": (
+        "`database.create` is absent.",
+        '{{- if not (hasKey .Values.database "create") }}',
+    ),
+    "not-a-bool": (
+        "`database.create` must be true or false",
+        '{{- if not (kindIs "bool" .Values.database.create) }}',
+    ),
+}
+
+# TEXT A REFUSAL MAY NOT CONTAIN (ADR-0794). Writing the raise text a refusal
+# REPLACES into the refusal string made an assertion of the form
+# `raise_text not in message` false-green forever, because the marker is then in
+# both. Asserted explicitly, so a later edit cannot reintroduce it quietly.
+RAISE_MARKERS = ("error calling", "nil pointer", "can't evaluate field")
+
+# EVERY SHAPE A VALUES FILE CAN WRITE AT `database.create`, with the outcome each
+# one MUST have. The bodies are WHOLE FILES and are written in one go: an earlier
+# measurement in this estate appended a key to an overlay, silently nested it under
+# a sibling, and produced a table where every shape read as permitted — including
+# the ones that refuse. `test_the_shape_harness_measures_what_it_claims_to` is the
+# tripwire that a mis-built overlay cannot pass.
+#
+# `("render", n)` means exit 0 with n MariaDB objects. `("refuse", arm, kind)` means
+# exit 1 with THAT arm's phrase, and — where the arm is the kind test — the helm
+# KIND NAME the message must print. The kind name is per row rather than shared:
+# asserting only the common phrase would pass an implementation that called every
+# shape a bool.
+SHAPES = (
+    ("bool-false", "database:\n  create: false\n", ("render", 0)),
+    ("bool-true", "database:\n  create: true\n", ("render", 1)),
+    ("string-false", 'database:\n  create: "false"\n', ("refuse", "not-a-bool", "string")),
+    ("string-no", 'database:\n  create: "no"\n', ("refuse", "not-a-bool", "string")),
+    ("string-true", 'database:\n  create: "true"\n', ("refuse", "not-a-bool", "string")),
+    ("number-one", "database:\n  create: 1\n", ("refuse", "not-a-bool", "float64")),
+    ("number-zero", "database:\n  create: 0\n", ("refuse", "not-a-bool", "float64")),
+    # THE DELETED KEY, and it is the dangerous one ADR-0797 names. Helm DELETES a
+    # null-valued key that a chart in the tree declares and restores no default, so
+    # this reaches the template as `create` ABSENT — measured, on both helm lines —
+    # while a values file that simply OMITS `create` gets this chart's own `false`
+    # back with `hasKey` true. `kindOf` answers `invalid` for both and cannot tell
+    # them apart, which is why the arm is `hasKey` rather than a kind test.
+    ("create-null", "database:\n  create:\n", ("refuse", "create-absent", None)),
+    ("empty-map", "database:\n  create: {}\n", ("refuse", "not-a-bool", "map")),
+    ("empty-list", "database:\n  create: []\n", ("refuse", "not-a-bool", "slice")),
+    # THE SAME DELETION ONE LEVEL UP, and it is what makes the first arm reachable.
+    # Without this row that arm has no shape of its own and could be deleted with
+    # the suite still green.
+    ("database-null", "database:\n", ("refuse", "database-absent", None)),
+)
+
+# THE COUNTS, LITERALS. A gate that reports how many shapes it examined turns a
+# deleted row into a red suite rather than into a quieter pass. The plan this
+# implements wrote ten shapes and `8 refused, 2 rendered`; the eleventh is
+# `database-null`, added so the first arm is falsifiable too.
+EXPECTED_SHAPES = 11
+EXPECTED_SHAPES_REFUSED = 9
+EXPECTED_SHAPES_RENDERED = 2
+# The MariaDB counts of the two shapes that render, in order. Both, because a
+# template that rendered nothing under any shape would satisfy the first alone.
+EXPECTED_RENDERED_INSTANCES = (0, 1)
+
 INVOCATION = re.compile(
     r'include\s+"%s\.require-api"\s+\(dict(?P<body>.*?)\)\s*\}\}' % re.escape(CHART_NAME),
     re.DOTALL,
@@ -838,3 +925,258 @@ def test_the_checks_are_unreachable_at_the_chart_defaults():
         f"a group a render check asks for — so the check is reachable at the defaults "
         f"and every offline render in the estate refuses"
     )
+
+
+# ── THE SHAPE OF THE TOGGLE, M1 ──────────────────────────────────────────────
+
+
+def shape_overlay(body: str, destination: Path) -> Path:
+    """One shape's values file, WRITTEN AS A WHOLE FILE and read back.
+
+    NEVER BY APPENDING, and the read-back is not ceremony. An earlier measurement in
+    this estate appended a key to an overlay, silently nested it under a sibling, and
+    produced a table in which every shape read as permitted — including the ones that
+    refuse. A harness that measures nothing looks exactly like a harness that passes.
+    """
+    destination.mkdir(parents=True, exist_ok=True)
+    overlay = destination / "values.yaml"
+    overlay.write_text(body)
+    assert overlay.read_text() == body, (
+        f"the overlay at {overlay} is not the whole of what this shape writes"
+    )
+    return overlay
+
+
+def render_the_shape(chart: Path, body: str, destination: Path):
+    """One shape rendered, NAMING mariadb-operator's group.
+
+    THE `--api-versions` IS LOAD-BEARING. Four of these shapes are truthy, so without
+    it they reach the mariadb-operator render check and abort THERE — the refusal for
+    the renderer's reason, not for the shape's. The red cases below would then redden
+    correctly while proving nothing, which is why every shape carries it and every
+    assertion discriminates on the message rather than on the exit code.
+    """
+    overlay = shape_overlay(body, destination)
+    return render(chart, "--values", str(overlay), *MARIADB_API_VERSIONS)
+
+
+def examine_the_shapes(chart: Path, destination: Path) -> tuple[list[str], int, int, list[int]]:
+    """Every shape in SHAPES against `chart`: the disagreements, and what was counted.
+
+    PURE over its arguments and it RETURNS ITS COUNTS, for the reason every gate in
+    this repository does: a loop that examined zero shapes finds no disagreement among
+    them and reports a pass.
+    """
+    failures: list[str] = []
+    refused = 0
+    rendered_instances: list[int] = []
+
+    for label, body, expectation in SHAPES:
+        result = render_the_shape(chart, body, destination / label)
+        instances = result.stdout.count("kind: MariaDB")
+
+        if expectation[0] == "render":
+            wanted = expectation[1]
+            if result.returncode != 0:
+                failures.append(
+                    f"{label}: expected a render and helm exited {result.returncode}: "
+                    f"{result.stderr.strip()}"
+                )
+                continue
+            rendered_instances.append(instances)
+            if instances != wanted:
+                failures.append(
+                    f"{label}: rendered {instances} MariaDB objects, expected {wanted}"
+                )
+            continue
+
+        _, arm, kind = expectation
+        phrase = SHAPE_ARMS[arm][0]
+        if result.returncode == 0:
+            failures.append(
+                f"{label}: rendered {instances} MariaDB objects and was NOT refused — "
+                f"the {arm} arm did not fire"
+            )
+            continue
+        refused += 1
+        if phrase not in result.stderr:
+            failures.append(
+                f"{label}: refused without the {arm} arm's message ({phrase!r}): "
+                f"{result.stderr.strip()}"
+            )
+        if CHART_NAME not in result.stderr:
+            failures.append(f"{label}: the refusal does not name {CHART_NAME}: {result.stderr.strip()}")
+        if kind is not None and kind not in result.stderr:
+            failures.append(
+                f"{label}: the refusal does not name the kind it found ({kind!r}), so it "
+                f"would read the same for every wrong shape: {result.stderr.strip()}"
+            )
+        for marker in RAISE_MARKERS:
+            if marker in result.stderr:
+                failures.append(
+                    f"{label}: helm RAISED rather than refusing — {marker!r} is in the "
+                    f"output, so the adopter got a template trace instead of a key name"
+                )
+
+    return failures, len(SHAPES), refused, rendered_instances
+
+
+def strip_arm(text: str, opening: str) -> str:
+    """The template with ONE arm of the refusal removed, for a red case. PURE."""
+    lines = text.splitlines(keepends=True)
+    starts = [index for index, line in enumerate(lines) if line.strip() == opening.strip()]
+    assert len(starts) == 1, (
+        f"{opening!r} opens {len(starts)} blocks in the template, expected exactly 1 — "
+        f"this red case removes a block it can find, and 0 would remove nothing and pass"
+    )
+    (start,) = starts
+    ends = [index for index in range(start + 1, len(lines)) if lines[index].strip() == "{{- end }}"]
+    assert ends, f"{opening!r} opens a block nothing closes"
+    return "".join(lines[: start] + lines[ends[0] + 1 :])
+
+
+def test_the_shape_harness_measures_what_it_claims_to(tmp_path):
+    """THE TRIPWIRE, and it runs before the table is believed.
+
+    A shape overlay that landed under the wrong parent — the failure mode this
+    estate has actually met — leaves `database.create` at the chart's own `false`,
+    and then every row reads as "not refused" or "rendered nothing" and the table
+    measures the chart's defaults eleven times. So: a shape that MUST render an
+    instance is rendered and the instance is counted, which is impossible unless the
+    overlay reached the key; and a shape that MUST be refused is refused.
+    """
+    reaching = render_the_shape(CHART, "database:\n  create: true\n", tmp_path / "reaching")
+    assert reaching.returncode == 0, reaching.stderr
+    assert reaching.stdout.count("kind: MariaDB") == 1, (
+        "an overlay setting `database.create: true` rendered no MariaDB, so it did "
+        "not reach the key and no row of the table below measures anything"
+    )
+
+    refusing = render_the_shape(CHART, 'database:\n  create: "false"\n', tmp_path / "refusing")
+    assert refusing.returncode != 0, refusing.stdout
+    assert SHAPE_ARMS["not-a-bool"][0] in refusing.stderr, refusing.stderr
+
+
+def test_every_writable_shape_of_the_toggle_is_a_bool_or_refused(tmp_path):
+    """M1. Eleven shapes examined: nine refused, two rendered (0 and 1 MariaDB).
+
+    THE COUNTS ARE ASSERTED, so a row deleted from SHAPES reddens this gate rather
+    than letting it quietly examine one fewer. The two that render are BOTH asserted,
+    because a chart that rendered nothing under any shape would satisfy the zero.
+    """
+    failures, examined, refused, rendered_instances = examine_the_shapes(CHART, tmp_path)
+
+    assert examined == EXPECTED_SHAPES, (
+        f"examined {examined} shapes, expected {EXPECTED_SHAPES}"
+    )
+    assert failures == [], "\n".join(failures)
+    assert refused == EXPECTED_SHAPES_REFUSED, (
+        f"examined {examined} shapes: {refused} refused, expected "
+        f"{EXPECTED_SHAPES_REFUSED}"
+    )
+    assert len(rendered_instances) == EXPECTED_SHAPES_RENDERED, rendered_instances
+    assert tuple(rendered_instances) == EXPECTED_RENDERED_INSTANCES, (
+        f"the shapes that render produced {tuple(rendered_instances)} MariaDB "
+        f"objects, expected {EXPECTED_RENDERED_INSTANCES}"
+    )
+    print(
+        f"examined {examined} shapes: {refused} refused, "
+        f"{len(rendered_instances)} rendered {tuple(rendered_instances)}"
+    )
+
+
+def test_stripping_an_arm_of_the_refusal_reddens_the_shapes_it_owns(tmp_path):
+    """THE RED CASE, CONSTRUCTED, and run ONCE PER ARM rather than once for the guard.
+
+    A single red case that deleted the `kindIs` block would leave the two `hasKey`
+    arms unfalsifiable — either could be deleted with this suite still green, which
+    is the exact shape of guard ADR-0797 was written about: one that reads as
+    complete and is not. So each arm is stripped in turn and the shapes it owns are
+    asserted to stop being refused for its reason.
+
+    THE THREE ARMS FAIL DIFFERENTLY WHEN STRIPPED, and that is stated rather than
+    smoothed over. Stripping `kindIs` restores the FAIL-OPEN: `"false"`, `"no"`,
+    `"true"` and `1` render a MariaDB again, which is asserted below by name.
+    Stripping either `hasKey` arm does not open a hole — the kind test still refuses
+    a deleted key — it DEGRADES THE MESSAGE, from one that explains that helm deleted
+    the adopter's key into one that reports `invalid`, or into a raw template raise.
+    An arm that owns a message is still an arm; what it owns is asserted for what it
+    is.
+    """
+    exercised = 0
+    for arm, (phrase, opening) in sorted(SHAPE_ARMS.items()):
+        copy = tmp_path / arm / "chart"
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(CHART, copy)
+        template = copy / "templates" / "render-checks.yaml"
+        template.write_text(strip_arm(template.read_text(), opening))
+
+        failures, examined, _, _ = examine_the_shapes(copy, tmp_path / arm / "renders")
+        assert examined == EXPECTED_SHAPES, examined
+        assert failures, (
+            f"the {arm} arm was stripped from the template and the table said nothing"
+        )
+
+        owned = [label for label, _body, expectation in SHAPES
+                 if expectation[0] == "refuse" and expectation[1] == arm]
+        assert owned, f"no shape in SHAPES exercises the {arm} arm, so it is unfalsifiable"
+        for label in owned:
+            assert any(failure.startswith(f"{label}:") for failure in failures), (
+                f"the {arm} arm was stripped and {label} still passed: {failures}"
+            )
+        exercised += 1
+
+    assert exercised == len(SHAPE_ARMS), (
+        f"examined {exercised} arms of the refusal, expected {len(SHAPE_ARMS)}"
+    )
+
+
+def test_stripping_the_kind_test_puts_the_four_wrong_on_shapes_back(tmp_path):
+    """THE DEFECT ITSELF, reconstructed: four shapes that read as OFF and create an engine.
+
+    The arm-by-arm case above asserts that each arm's shapes stop being refused. This
+    one asserts WHAT THAT COSTS for the arm that guards the fail-open, in the only
+    terms that matter: with `kindIs` gone, `database.create: "false"` renders a
+    MariaDB. A red case that asserted only "the suite went red" would be satisfied by
+    a template that broke in any way at all.
+    """
+    copy = tmp_path / "chart"
+    shutil.copytree(CHART, copy)
+    template = copy / "templates" / "render-checks.yaml"
+    template.write_text(strip_arm(template.read_text(), SHAPE_ARMS["not-a-bool"][1]))
+
+    wrong_on = ("string-false", "string-no", "string-true", "number-one")
+    bodies = {label: body for label, body, _ in SHAPES}
+    for label in wrong_on:
+        result = render_the_shape(copy, bodies[label], tmp_path / "renders" / label)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.count("kind: MariaDB") == 1, (
+            f"{label} did not render a MariaDB with the kind test stripped, so this "
+            f"construction does not reproduce the fail-open it is named for"
+        )
+
+    failures, examined, _, _ = examine_the_shapes(copy, tmp_path / "table")
+    assert examined == EXPECTED_SHAPES, examined
+    assert failures and failures[0].startswith("string-false:"), (
+        f"the table must redden naming `\"false\"` first — the shape an adopter is "
+        f"most likely to have written: {failures}"
+    )
+
+
+def test_the_shape_refusal_does_not_quote_a_raise():
+    """ADR-0794: a refusal may not carry the raise text it replaces.
+
+    Writing `error calling eq: incompatible types` into a refusal string made an
+    assertion of the form `raise_text not in message` false-green forever, because
+    the marker was then in both. Asserted over the TEMPLATE SOURCE, so the ban holds
+    for every shape including ones nobody has written a row for yet.
+    """
+    text = (CHART / "templates" / "render-checks.yaml").read_text()
+    for arm, (phrase, _opening) in sorted(SHAPE_ARMS.items()):
+        assert phrase in text, f"the {arm} arm's message is not in the template: {phrase!r}"
+    for marker in RAISE_MARKERS:
+        assert marker not in text, (
+            f"`templates/render-checks.yaml` contains {marker!r}, which is how a "
+            f"refusal is told apart from a raise — a refusal carrying it makes that "
+            f"discrimination false-green"
+        )

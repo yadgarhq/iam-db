@@ -83,6 +83,20 @@ MARIADB_KIND = "MariaDB"
 EXPECTED_CONTRACT_TERMS = 4
 EXPECTED_POSTURE_TERMS = 6
 
+# THE TWO ANNOTATIONS THAT KEEP A DATA-BEARING OBJECT FROM BEING DELETED, and they
+# cover DIFFERENT paths — neither is a spare for the other. `Prune=false` is read off
+# the live object by gitops-engine's `pruneObject` and protects an object a render
+# has DROPPED; `helm.sh/resource-policy: keep` is what Argo's app-deletion cascade
+# reads in `shouldBeDeleted`, a predicate `Prune=false` is ABSENT from. Both, or the
+# protection has a hole. LITERALS, and the count below is asserted for the same
+# reason every count here is: a gate that compared an empty set of annotations would
+# find no disagreement among zero of them.
+EXPECTED_ANNOTATIONS = {
+    "helm.sh/resource-policy": "keep",
+    "argocd.argoproj.io/sync-options": "Prune=false",
+}
+EXPECTED_ANNOTATION_TERMS = 2
+
 # The group-and-version string the render check names, recorded in `values.yaml`
 # beside the toggle so an operator upgrade that moved the version turns the check red
 # rather than silently weakening it.
@@ -295,9 +309,17 @@ def posture_disagreements(rendered: list[dict], values: dict) -> tuple[list[str]
             instance_values["storage"]["size"],
         ),
         (
+            # AN EMPTY CLASS MEANS AN ABSENT FIELD, and the term says so rather than
+            # comparing `""` against a `storageClassName` the template never wrote.
+            # The default is empty precisely so the field is omitted and the target
+            # cluster's own default StorageClass binds; a term that expected `""` in
+            # the render would be satisfied only by a template writing an empty
+            # class name, which is a different object and binds nothing.
+            # `test_an_empty_storage_class_omits_the_field_and_a_named_one_renders_it`
+            # is the gate that holds BOTH directions of this against the render.
             "storage.storageClassName",
             field(instance, "spec", "storage", "storageClassName"),
-            instance_values["storage"]["className"],
+            instance_values["storage"]["className"] or ABSENT,
         ),
         (
             "tls.enabled",
@@ -315,6 +337,30 @@ def posture_disagreements(rendered: list[dict], values: dict) -> tuple[list[str]
         f"the instance's {what} is {rendered_value!r} and values.yaml says {wanted!r}"
         for what, rendered_value, wanted in terms
         if rendered_value != wanted
+    ]
+    return failures, len(terms)
+
+
+def annotation_disagreements(rendered: list[dict]) -> tuple[list[str], int]:
+    """How the rendered instance's annotations differ from the two required. PURE.
+
+    READ OFF THE RENDERED OBJECT, never off the template text. A grep for
+    `resource-policy` in `templates/mariadb.yaml` is true of the comment above the
+    annotation and stays true after the value is changed to `delete`.
+
+    ABSENCE IS A DISAGREEMENT rather than a KeyError, for the reason `Absent` exists:
+    the red case DELETES a line from the template, so the gate must survive the field
+    being gone and report it by name.
+    """
+    (instance,) = instances(rendered)
+    terms = [
+        (name, field(instance, "metadata", "annotations", name), wanted)
+        for name, wanted in sorted(EXPECTED_ANNOTATIONS.items())
+    ]
+    failures = [
+        f"the instance's {name} annotation is {found!r} and must be {wanted!r}"
+        for name, found, wanted in terms
+        if found != wanted
     ]
     return failures, len(terms)
 
@@ -494,6 +540,120 @@ def test_dropping_a_knob_from_the_template_reddens_the_posture(tmp_path):
         "`tls.required` was deleted from the template and the posture gate said nothing"
     )
     assert "tls.required" in "\n".join(failures), failures
+
+
+def test_the_instance_carries_the_annotations_that_keep_it_from_being_deleted():
+    """M3. A data-bearing object must survive a prune AND a cascading app delete.
+
+    THE TWO COVER DIFFERENT PATHS AND NEITHER IS A SPARE FOR THE OTHER, which is why
+    this gate counts them rather than asserting "at least one is present".
+    `argocd.argoproj.io/sync-options: Prune=false` is read off the LIVE object by
+    gitops-engine's `pruneObject` and protects an object a render has DROPPED — the
+    path a revert of the merge that turned this toggle on would take.
+    `helm.sh/resource-policy: keep` is what Argo's app-deletion cascade reads in
+    `shouldBeDeleted`, a predicate `Prune=false` is ABSENT from — so `argocd app
+    delete --cascade` walks straight past `Prune=false` and is stopped by `keep`
+    alone. Without both, some path deletes a production engine and its volume.
+    """
+    rendered = objects(render_with_the_instance().stdout)
+    failures, compared = annotation_disagreements(rendered)
+
+    assert compared == EXPECTED_ANNOTATION_TERMS, (
+        f"the annotation comparison lined up {compared} terms, expected "
+        f"{EXPECTED_ANNOTATION_TERMS} — a comparison over fewer finds no "
+        f"disagreement among the ones it dropped"
+    )
+    assert failures == [], "\n".join(failures)
+
+
+def test_deleting_either_annotation_from_the_template_reddens_the_gate(tmp_path):
+    """THE RED CASE for the gate above, run ONCE PER ANNOTATION and counted.
+
+    ONE PER ANNOTATION, not one for the pair. A red case that deletes only `keep`
+    leaves a gate that could be satisfied by `Prune=false` alone still reporting a
+    pass for the cascade path this object needs `keep` for — and the count below is
+    what makes a silently-dropped row redden rather than quietly exercise one fewer.
+    """
+    exercised = 0
+    for name, value in sorted(EXPECTED_ANNOTATIONS.items()):
+        copy = tmp_path / name.replace("/", "_") / "chart"
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(CHART, copy)
+        template = copy / "templates" / "mariadb.yaml"
+        text = template.read_text()
+
+        # COMMENT LINES ARE NOT CANDIDATES, and skipping them is the difference
+        # between a red case and a no-op. The comment above the annotations quotes
+        # both pairs verbatim while explaining which Argo path each one covers, so a
+        # plain substring count over the file reads 2, and a plain filter would
+        # delete the prose as well and leave the reader without the reason.
+        written = f"{name}: {value}"
+        lines = text.splitlines(keepends=True)
+        declarations = [
+            index
+            for index, line in enumerate(lines)
+            if written in line and not line.lstrip().startswith("#")
+        ]
+        assert len(declarations) == 1, (
+            f"`{written}` is declared on {len(declarations)} non-comment lines of the "
+            f"template, expected exactly 1 — this red case deletes a line it can find, "
+            f"and a count of 0 would delete nothing and pass"
+        )
+        (declared_at,) = declarations
+        template.write_text("".join(lines[:declared_at] + lines[declared_at + 1 :]))
+
+        rendered = objects(render_with_the_instance(copy).stdout)
+        failures, compared = annotation_disagreements(rendered)
+        assert compared == EXPECTED_ANNOTATION_TERMS, compared
+        assert failures, f"`{name}` was deleted from the template and the gate said nothing"
+        assert name in "\n".join(failures), failures
+        exercised += 1
+
+    assert exercised == EXPECTED_ANNOTATION_TERMS, (
+        f"examined {exercised} annotations, expected {EXPECTED_ANNOTATION_TERMS}"
+    )
+
+
+def test_an_empty_storage_class_omits_the_field_and_a_named_one_renders_it():
+    """The default binds the TARGET cluster's default class; a named class is honoured.
+
+    THE DEFAULT USED TO BE `standard`, kind's bundled local-path class, which exists
+    on no other cluster: the PVC sat `Pending` for ever, the pod never scheduled, and
+    nothing refused. Empty renders no `storageClassName` AT ALL — not an empty
+    string, which is a different object that binds nothing — so the cluster's own
+    default class applies.
+
+    BOTH DIRECTIONS, because either alone is satisfied by a broken template. A
+    template that always omitted the field would pass the first half; one that always
+    wrote it would pass the second.
+    """
+    empty = chart_values()["database"]["instance"]["storage"]["className"]
+    assert empty == "", (
+        f"`database.instance.storage.className` defaults to {empty!r}; this gate is "
+        f"about the EMPTY default and there is none to exercise"
+    )
+
+    at_the_default = objects(render_with_the_instance().stdout)
+    (instance,) = instances(at_the_default)
+    assert field(instance, "spec", "storage", "storageClassName") is ABSENT, (
+        f"an empty class rendered `storageClassName: "
+        f"{field(instance, 'spec', 'storage', 'storageClassName')!r}` — an empty "
+        f"class name is not the same thing as no class, and binds no volume"
+    )
+
+    named = render(
+        CHART,
+        *DATABASE_TOGGLE_ON,
+        *API_VERSIONS_FOR_THE_INSTANCE,
+        "--set",
+        "database.instance.storage.className=a-named-class",
+    )
+    assert named.returncode == 0, named.stderr
+    (named_instance,) = instances(objects(named.stdout))
+    assert field(named_instance, "spec", "storage", "storageClassName") == "a-named-class", (
+        "a class an adopter named did not reach the instance, so the `with` omits "
+        "every class rather than only the empty one"
+    )
 
 
 def test_the_render_check_names_the_group_the_values_file_records():
