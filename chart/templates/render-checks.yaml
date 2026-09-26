@@ -1,12 +1,19 @@
 {{/*
 EVERY RENDER CHECK THIS CHART DECLARES, IN ONE FILE, AND THE FILE RENDERS NOTHING.
 
-ONE CHECK PER OPERATOR, NOT ONE PER KIND. `database.create` renders one kind today,
+ONE CHECK PER OPERATOR, NOT ONE PER KIND. Each toggle below renders one kind today,
 so the two counts happen to be equal here — they are not the same rule, and the
 number this chart asserts is the number of CHECKS.
 `scripts/tests/test_render_checks.py` counts the checks DECLARED here and asserts
 that number, so a check deleted from this file reddens the suite on the count rather
 than letting it quietly exercise one fewer.
+
+EACH CHECK SITS BEHIND ITS OWN TOGGLE, AND THE TOGGLES ARE NOT OR-ED TOGETHER. An
+adopter who creates the database and does not autoscale is refused for
+mariadb-operator alone, and never for KEDA. `yadgarhq/platform` OR-s three toggles
+into one check because all three render objects from the SAME group; these two
+render objects from two groups that two different operators provide, so they are two
+checks.
 
 THE FILENAME DOES NOT BEGIN WITH AN UNDERSCORE, AND THAT IS LOAD-BEARING. helm
 treats `templates/_*` as partials and never renders them, so a `fail` that lived
@@ -34,4 +41,44 @@ offline render in the estate.
       "apiVersion" "k8s.mariadb.com/v1alpha1"
       "operator" "mariadb-operator"
       "toggle" "database.create") }}
+{{- end }}
+
+{{/*
+KEDA, BEHIND THE TOGGLE THAT RENDERS THE ScaledObject.
+
+`autoscaling.enabled` renders `templates/scaledobject.yaml`, whose one kind is
+`keda.sh/v1alpha1/ScaledObject`. Without this check an adopter who turns autoscaling
+on against a cluster with no KEDA renders cleanly and then fails at apply with `no
+matches for kind ScaledObject`, half-way through an install — the pod and the Service
+applied, the autoscaler absent, and the message naming a kind rather than the
+operator to install.
+
+THE GROUP IS THE OPERATOR'S OWN. `keda.sh/v1alpha1` is registered by KEDA and by
+nothing else, so there is no sibling specification this could name by mistake — the
+argument `yadgarhq/platform`'s Envoy Gateway check has to make, and which does not
+arise here. `ScaledObject` is the only kind of that group this chart renders; KEDA
+serves five more, and a chart that later renders one of them is covered by this same
+check, because the rule is one check per OPERATOR.
+
+NO GATEWAY API CHECK IS ADDED BESIDE IT, and that is a decision rather than an
+omission. This chart renders no Gateway API object at all, and the estate's
+`gateway.enabled` is the one toggle that defaults TRUE — a render check behind a
+default-true toggle refuses every offline render in the estate, which is the exact
+failure the opt-in rule below exists to prevent.
+
+THE STRING IS A LITERAL HERE AND IS RECORDED IN `values.yaml` UNDER
+`autoscaling.kedaOperator.apiVersion`, read off KEDA as the estate pins it. It has to
+be a literal because `scripts/tests/test_render_checks.py` reads these arguments off
+the template to count and exercise the checks; the gate that keeps the two one is
+`test_every_declared_check_names_the_group_the_values_file_records`.
+
+THE TOGGLE IS OPT-IN, which is what makes this check legal at all. `autoscaling.enabled`
+defaults false, for the same reason `database.create` does.
+*/}}
+{{- if .Values.autoscaling.enabled }}
+{{- include "iam-db.require-api" (dict
+      "context" $
+      "apiVersion" "keda.sh/v1alpha1"
+      "operator" "KEDA"
+      "toggle" "autoscaling.enabled") }}
 {{- end }}
