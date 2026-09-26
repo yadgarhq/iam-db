@@ -228,10 +228,20 @@ database:
 
     storage:
       size: 1Gi
-      # NAMED rather than left to the cluster's default, so this file says what the
-      # volume binds to. `standard` is kind's bundled local-path-provisioner; an
-      # adopter names their own.
-      className: standard
+      # EMPTY IS THE SHIPPED DEFAULT AND IT MEANS "the target cluster's default
+      # class", not "a missing value". An empty string renders NO `storageClassName`
+      # field at all, so the cluster's own default StorageClass binds the volume.
+      #
+      # IT USED TO SAY `standard`, AND THAT WAS THE TRAP. `standard` is kind's
+      # bundled local-path-provisioner and exists on no other cluster: an adopter
+      # installing this chart elsewhere got a PVC that sat `Pending` for ever, a pod
+      # that never scheduled, and nothing that refused — the silent shape.
+      #
+      # NAME YOUR OWN CLASS HERE IF YOU WANT ONE, and name it explicitly if the
+      # instance already exists: `storageClassName` is IMMUTABLE on a live MariaDB,
+      # so a render that dropped a class a live object carries has the webhook refuse
+      # the update.
+      className: ""
 
     # THE SECRET THE OPERATOR MINTS THE ROOT PASSWORD INTO, and it is not the one the
     # pod mounts — that is `passwordSecret` above. Nothing in this estate reads this

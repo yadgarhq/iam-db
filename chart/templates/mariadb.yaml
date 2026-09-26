@@ -34,6 +34,29 @@ apiVersion: k8s.mariadb.com/v1alpha1
 kind: MariaDB
 metadata:
   name: {{ .Values.database.host | quote }}
+  # TWO ANNOTATIONS, AND NEITHER COVERS THE OTHER'S PATH. A MariaDB is a
+  # DATA-BEARING object: turning `database.create` off, reverting the merge that
+  # turned it on, or `helm uninstall` must leave the engine and its volume in place
+  # for a human to delete. Read in `argoproj/argo-cd` at v3.1.8:
+  #
+  #   `argocd.argoproj.io/sync-options: Prune=false` is read off the LIVE object by
+  #   gitops-engine's `pruneObject` (`pkg/sync/sync_context.go:1212-1217`). It
+  #   protects an object a render has DROPPED, at sync time.
+  #
+  #   `helm.sh/resource-policy: keep` is what the APP-DELETION cascade reads:
+  #   `controller/appcontroller.go:1162-1166` `shouldBeDeleted` spares an object for
+  #   `Delete=false` or for `keep`, and `Prune=false` IS ABSENT FROM THAT PREDICATE.
+  #   So `argocd app delete <app> --cascade` walks straight past `Prune=false`.
+  #
+  # `keep` is therefore not inert under Argo — it is the only one of the two that
+  # survives a cascading app delete, and it covers the `helm uninstall` path as
+  # well. The protection is complete because both ship together, not because either
+  # one is sufficient. The visible cost is accepted: after the toggle goes false
+  # Argo reports the instance `OutOfSync (requires pruning)` until somebody deletes
+  # it by hand, which is the right prompt for a database.
+  annotations:
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Prune=false
   labels:
     app.kubernetes.io/name: {{ .Chart.Name }}
     app.kubernetes.io/instance: {{ .Release.Name }}
@@ -71,7 +94,20 @@ spec:
 
   storage:
     size: {{ .Values.database.instance.storage.size | quote }}
-    storageClassName: {{ .Values.database.instance.storage.className | quote }}
+    # AN EMPTY CLASS OMITS THE FIELD, and that is what makes the default safe. A
+    # NAMED default was `standard`, kind's bundled local-path class, which exists on
+    # no other cluster: the PVC would sit `Pending` for ever, the pod would never
+    # schedule, and nothing would refuse. Omitting the field lets the target
+    # cluster's DEFAULT StorageClass bind, which is the only answer that is right
+    # everywhere. An adopter who wants a specific class names it and it is rendered.
+    #
+    # `storageClassName` IS IMMUTABLE on an existing instance, so a deployment that
+    # already named a class must keep naming it in its own values — a render that
+    # dropped a set field would have the webhook refuse the update. Loud, not
+    # destructive, and avoided by stating the class where it applies.
+    {{- with .Values.database.instance.storage.className }}
+    storageClassName: {{ . | quote }}
+    {{- end }}
 
   resources:
     {{- toYaml .Values.database.instance.resources | nindent 4 }}

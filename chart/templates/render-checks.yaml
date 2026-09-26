@@ -35,6 +35,74 @@ may only ever sit behind a default-false toggle: `Has` is false for every CRD-ba
 group with no cluster, so a check reachable at the defaults would refuse every
 offline render in the estate.
 */}}
+{{/*
+THE SHAPE OF `database.create`, REFUSED BEFORE ANY TOGGLE READS IT.
+
+DECLARED FIRST IN THIS FILE, AND THAT IS THE POINT. Everything below this block, and
+`templates/mariadb.yaml` beside it, gates on `{{ if .Values.database.create }}` — a
+BARE TRUTHINESS TEST, which is FAIL-OPEN on a string. Measured on helm 3.20.2 and
+4.3.0, identically, over ten writable shapes:
+
+  false, 0, null, {}, []   render no MariaDB
+  true                     renders one
+  "false", "no", "true", 1 render one
+
+So `database.create: "false"` — which reads as OFF to any human, and is what a
+`--set-string`, a templated overlay or a quoted values file produces — CREATES A
+DATABASE ENGINE. `{}` additionally draws a coalesce warning on both helm lines and
+still resolves falsy, so the two shapes an adopter is most likely to write are the
+two that say least about what they did.
+
+ADR-0797 IS THE GOVERNING RULE: a values key a helm condition reads, and that some
+chart in the tree DECLARES, is validated with `kindIs "bool"` ON THE RAW VALUE. Not
+`hasKey` alone — `{}` is present and is not a toggle. Not `kindIs "map"` — that is
+ADR-0794's rule for a key whose value is a BLOCK, and this one's value is a bool.
+Never on the result of a `default`: sprig's `default` substitutes on an EMPTY value,
+so `false`, `0`, `""` and `[]` all collapse into the default and the kind test then
+covers exactly the non-empty scalars.
+
+`hasKey` COMES FIRST BECAUSE `kindOf` CANNOT TELL A DELETED KEY FROM AN ABSENT ONE —
+it answers `invalid` for both. The distinction is load-bearing here, and it is
+MEASURED rather than assumed: helm DELETES a null-valued key when some chart in the
+tree declares it, and restores no default. This chart's own `values.yaml` declares
+`database.create: false`, so a values file that OMITS the key gets that default back
+and `hasKey` is true. `hasKey` is false only when a values file wrote `create:` with
+NO VALUE and helm deleted it — the one shape where the chart's default does not
+apply and nothing warns. THAT is why an absent key REFUSES here rather than
+defaulting false: the absence is not an adopter leaving the key alone, it is an
+adopter having written something helm threw away.
+
+THE REFUSAL TEXT MAY NOT QUOTE THE RAISE TEXT IT REPLACES (ADR-0794). A refusal and
+a raise both exit 1, so the only thing that tells them apart is the message — and a
+refusal that quotes one of go/template's own error markers makes an assertion of the
+form "the raise marker is not in this message" false-green for ever.
+`scripts/tests/test_render_checks.py::test_the_shape_refusal_does_not_quote_a_raise`
+holds the banned markers, in one place, and reads this whole file for them; the
+eleven-shape table beside it is the gate on this block.
+*/}}
+{{- if not (hasKey .Values "database") }}
+{{- fail (join "" (list
+      "iam-db: `database` is absent from the values, so `database.create` cannot be read. "
+      "Helm deletes a null-valued key that a chart in the tree declares, and restores no "
+      "default, so a values file writing `database:` with no value leaves this chart with "
+      "nothing under it. Write the keys you mean, or omit `database` entirely and this "
+      "chart's own defaults apply.")) }}
+{{- end }}
+{{- if not (hasKey .Values.database "create") }}
+{{- fail (join "" (list
+      "iam-db: `database.create` is absent. This chart's `values.yaml` declares it false, so "
+      "it is missing only when a values file wrote `create:` with NO VALUE — helm deletes a "
+      "null-valued key a chart declares and restores no default. Write `database.create: "
+      "false` to leave the MariaDB instance uncreated, or `true` to create it.")) }}
+{{- end }}
+{{- if not (kindIs "bool" .Values.database.create) }}
+{{- fail (printf (join "" (list
+      "iam-db: `database.create` must be true or false and is %s (%s). A string, number, map "
+      "or list here is not a toggle: the template gates on bare truthiness, so \"false\", "
+      "\"no\", \"true\" and 1 all CREATE a MariaDB instance while {}, 0 and [] do not, and "
+      "nothing tells you which one you wrote. Write the bare word `true` or `false`."))
+      (kindOf .Values.database.create) (toJson .Values.database.create)) }}
+{{- end }}
 {{- if .Values.database.create }}
 {{- include "iam-db.require-api" (dict
       "context" $
