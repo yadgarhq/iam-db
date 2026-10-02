@@ -235,14 +235,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     install_logging();
 
     // Every default, every refusal and the transport mode live in `boot`, which
-    // a test can reach. This line is the whole of the configuration decision.
-    let config = boot::pool_config(|key| std::env::var(key).ok())?;
-    // The migration lock's wait, read beside the pool's knobs so an absent one
-    // refuses before anything opens (ledger 814, ADR-0837). `store` has no
-    // default for it any more.
-    // `.to_string()` so the refusal reaches the operator as its sentence, which
-    // names the variable and the chart key, rather than as a Debug-printed
-    // `MigrationLockWait { .. }` through `main`'s `Box<dyn Error>`.
+    // a test can reach. `.to_string()` because `main`'s `Box<dyn Error>` prints
+    // DEBUG — a variant name, not the sentence naming the knob (ADR-0569);
+    // `tests/boot_message.rs` holds it. The lock wait has no default (ledger 814).
+    let config = boot::pool_config(|key| std::env::var(key).ok()).map_err(|e| e.to_string())?;
     let migration_lock =
         boot::migration_lock(|key| std::env::var(key).ok()).map_err(|e| e.to_string())?;
 
