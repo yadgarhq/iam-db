@@ -72,9 +72,9 @@ impl IamDbService for IamDb {
             SERVICE,
             "CreateCredential",
             Kind::Write,
-            tel(rid, &r.user_id),
+            tel(rid.clone(), &r.user_id),
         );
-        self.mint_credential(r, call).await
+        self.mint_credential(r, &rid, call).await
     }
 
     /// Revoke, and return who it belonged to.
@@ -89,8 +89,13 @@ impl IamDbService for IamDb {
     ) -> Result<Response<RevokeCredentialResponse>, Status> {
         let rid = request_id_of(&req);
         let r = req.into_inner();
-        let call = Call::start(SERVICE, "RevokeCredential", Kind::Write, tel(rid, ""));
-        self.revoke(r, call).await
+        let call = Call::start(
+            SERVICE,
+            "RevokeCredential",
+            Kind::Write,
+            tel(rid.clone(), ""),
+        );
+        self.revoke(r, &rid, call).await
     }
 
     async fn create_user(
@@ -99,8 +104,8 @@ impl IamDbService for IamDb {
     ) -> Result<Response<CreateUserResponse>, Status> {
         let rid = request_id_of(&req);
         let r = req.into_inner();
-        let call = Call::start(SERVICE, "CreateUser", Kind::Write, tel(rid, ""));
-        self.insert_user(r, call).await
+        let call = Call::start(SERVICE, "CreateUser", Kind::Write, tel(rid.clone(), ""));
+        self.insert_user(r, &rid, call).await
     }
 
     async fn add_team_member(
@@ -109,8 +114,13 @@ impl IamDbService for IamDb {
     ) -> Result<Response<AddTeamMemberResponse>, Status> {
         let rid = request_id_of(&req);
         let r = req.into_inner();
-        let call = Call::start(SERVICE, "AddTeamMember", Kind::Write, tel(rid, &r.user_id));
-        self.add_member(r, call).await
+        let call = Call::start(
+            SERVICE,
+            "AddTeamMember",
+            Kind::Write,
+            tel(rid.clone(), &r.user_id),
+        );
+        self.add_member(r, &rid, call).await
     }
 
     /// Removing a member changes what that user can see, so the caller MUST
@@ -126,9 +136,9 @@ impl IamDbService for IamDb {
             SERVICE,
             "RemoveTeamMember",
             Kind::Write,
-            tel(rid, &r.user_id),
+            tel(rid.clone(), &r.user_id),
         );
-        self.remove_member(r, call).await
+        self.remove_member(r, &rid, call).await
     }
 
     async fn create_enrolment(
@@ -141,9 +151,9 @@ impl IamDbService for IamDb {
             SERVICE,
             "CreateEnrolment",
             Kind::Write,
-            tel(rid, &r.user_id),
+            tel(rid.clone(), &r.user_id),
         );
-        self.mint_enrolment(r, call).await
+        self.mint_enrolment(r, &rid, call).await
     }
 
     async fn redeem_enrolment(
@@ -179,8 +189,13 @@ impl IamDbService for IamDb {
     ) -> Result<Response<SetUserAdminResponse>, Status> {
         let rid = request_id_of(&req);
         let r = req.into_inner();
-        let call = Call::start(SERVICE, "SetUserAdmin", Kind::Write, tel(rid, &r.user_id));
-        self.set_admin(r, call).await
+        let call = Call::start(
+            SERVICE,
+            "SetUserAdmin",
+            Kind::Write,
+            tel(rid.clone(), &r.user_id),
+        );
+        self.set_admin(r, &rid, call).await
     }
 
     async fn set_rate_limit_override(
@@ -193,9 +208,9 @@ impl IamDbService for IamDb {
             SERVICE,
             "SetRateLimitOverride",
             Kind::Write,
-            tel(rid, &r.user_id),
+            tel(rid.clone(), &r.user_id),
         );
-        self.set_rate_limit(r, call).await
+        self.set_rate_limit(r, &rid, call).await
     }
 
     /// Write ONE LEVEL of ADR-0522's inheritable setting.
@@ -254,8 +269,13 @@ impl IamDbService for IamDb {
         // which is self-asserted; putting it where every other record in the
         // estate carries an ATTESTED `Scope.user_id` would make a dashboard join
         // an unverifiable string to a verified one.
-        let call = Call::start(SERVICE, "SetInheritedSetting", Kind::Write, tel(rid, ""));
-        self.store_setting(r, call).await
+        let call = Call::start(
+            SERVICE,
+            "SetInheritedSetting",
+            Kind::Write,
+            tel(rid.clone(), ""),
+        );
+        self.store_setting(r, &rid, call).await
     }
 
     /// Whether this store's rows were encrypted under the key set the caller

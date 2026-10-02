@@ -35,11 +35,17 @@ impl IamDb {
     pub(super) async fn mint_enrolment(
         &self,
         r: CreateEnrolmentRequest,
+        rid: &str,
         call: Call,
     ) -> Result<Response<CreateEnrolmentResponse>, Status> {
         // ADR-0534's RECORDING HALF. `r.user_id` is the TARGET — the person being
         // enrolled — and is passed as such; the actor is the separate field.
-        record_actor(r.unverified_actor.as_ref(), "CreateEnrolment", &r.user_id);
+        record_actor(
+            rid,
+            r.unverified_actor.as_ref(),
+            "CreateEnrolment",
+            &r.user_id,
+        );
 
         // `idempotency` IS DISCARDED HERE, AND THIS RPC'S OWN CONTRACT SAYS IT
         // MUST NOT BE. `yadgar.iamdb.v1.CreateEnrolmentRequest` enumerates the

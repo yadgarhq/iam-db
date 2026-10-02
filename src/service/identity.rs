@@ -13,6 +13,7 @@ impl IamDb {
     pub(super) async fn insert_user(
         &self,
         r: CreateUserRequest,
+        rid: &str,
         call: Call,
     ) -> Result<Response<CreateUserResponse>, Status> {
         // `idempotency` IS DISCARDED HERE, AND A RETRY IS NOT A REPLAY. The
@@ -29,7 +30,7 @@ impl IamDb {
         // target does not exist until it runs, and an attribution naming no object
         // answers half the question an incident asks. Generating the id cannot
         // fail, so nothing is recorded that the request did not reach.
-        record_actor(r.unverified_actor.as_ref(), "CreateUser", &id);
+        record_actor(rid, r.unverified_actor.as_ref(), "CreateUser", &id);
 
         sqlx::query(
             // is_admin is set AT CREATION rather than by a follow-up
@@ -75,11 +76,12 @@ impl IamDb {
     pub(super) async fn add_member(
         &self,
         r: AddTeamMemberRequest,
+        rid: &str,
         call: Call,
     ) -> Result<Response<AddTeamMemberResponse>, Status> {
         // ADR-0534's RECORDING HALF. The TARGET is the membership, team first.
         let target = format!("{}/{}", r.team_id, r.user_id);
-        record_actor(r.unverified_actor.as_ref(), "AddTeamMember", &target);
+        record_actor(rid, r.unverified_actor.as_ref(), "AddTeamMember", &target);
 
         // `INSERT IGNORE` SWALLOWED BOTH FOREIGN KEYS, WHICH IS WHY THIS RPC
         // REPORTED SUCCESS FOR A ROW THAT NEVER LANDED. IGNORE downgrades a
@@ -187,11 +189,17 @@ impl IamDb {
     pub(super) async fn remove_member(
         &self,
         r: RemoveTeamMemberRequest,
+        rid: &str,
         call: Call,
     ) -> Result<Response<RemoveTeamMemberResponse>, Status> {
         // ADR-0534's RECORDING HALF. The TARGET is the membership, team first.
         let target = format!("{}/{}", r.team_id, r.user_id);
-        record_actor(r.unverified_actor.as_ref(), "RemoveTeamMember", &target);
+        record_actor(
+            rid,
+            r.unverified_actor.as_ref(),
+            "RemoveTeamMember",
+            &target,
+        );
 
         // NO `live_user`, NO `live_team`, AND NO EXISTENCE CHECK — DECIDED,
         // rather than the sweep stopping one short again. `AddTeamMember` above

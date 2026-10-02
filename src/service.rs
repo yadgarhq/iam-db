@@ -263,11 +263,19 @@ fn tel(request_id: String, user_id: &str) -> yadgar_telemetry::observe::Scope {
 /// list and that test pattern, or the grep that lands here finds an omission
 /// indistinguishable from a decision again.
 ///
+/// **THE LINE RECORDS AN ATTEMPT, NEVER AN OUTCOME.** It is written before the
+/// operation refuses or touches the store, so a request refused as NOT_FOUND or
+/// INVALID_ARGUMENT, or one that failed against the engine, still left it.
+/// Whether the write HAPPENED is the CallRecord's to say, and `request_id` is the
+/// key that joins the two: it is the same `x-yadgar-request-id` the handler
+/// hands `tel` for that call's `Scope`. An empty one is a caller that sent none.
+///
 /// **THERE IS NO AUDIT STORE ON THIS BOUNDARY**, so the structured log is where an
 /// attribution can land today (ADR-0620). Said plainly rather than implied: the
 /// durable audit record ADR-0534 imagines does not exist here yet.
-fn record_actor(actor: Option<&UnverifiedActor>, rpc: &str, target: &str) {
+fn record_actor(request_id: &str, actor: Option<&UnverifiedActor>, rpc: &str, target: &str) {
     tracing::info!(
+        request_id = request_id,
         unverified_actor = actor
             .map(|a| a.user_id.as_str())
             .filter(|id| !id.is_empty())

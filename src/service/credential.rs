@@ -125,6 +125,7 @@ impl IamDb {
     pub(super) async fn mint_credential(
         &self,
         r: CreateCredentialRequest,
+        rid: &str,
         call: Call,
     ) -> Result<Response<CreateCredentialResponse>, Status> {
         // `idempotency` IS DISCARDED HERE, AND A RETRY IS NOT A REPLAY. Measured
@@ -165,7 +166,12 @@ impl IamDb {
         // minting it cannot fail, and the credential id is what joins this
         // record to a later `RevokeCredential`'s.
         let target = format!("{}/{}", r.user_id, id);
-        record_actor(r.unverified_actor.as_ref(), "CreateCredential", &target);
+        record_actor(
+            rid,
+            r.unverified_actor.as_ref(),
+            "CreateCredential",
+            &target,
+        );
 
         let done = sqlx::query(
             // FROM_UNIXTIME, because the contract carries epoch SECONDS and the
@@ -229,10 +235,12 @@ impl IamDb {
     pub(super) async fn revoke(
         &self,
         r: RevokeCredentialRequest,
+        rid: &str,
         call: Call,
     ) -> Result<Response<RevokeCredentialResponse>, Status> {
         // ADR-0534's RECORDING HALF. The target is the credential revoked.
         record_actor(
+            rid,
             r.unverified_actor.as_ref(),
             "RevokeCredential",
             &r.credential_id,

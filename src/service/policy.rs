@@ -13,6 +13,7 @@ impl IamDb {
     pub(super) async fn set_admin(
         &self,
         r: SetUserAdminRequest,
+        rid: &str,
         call: Call,
     ) -> Result<Response<SetUserAdminResponse>, Status> {
         // ADR-0534's RECORDING HALF, AND THE ONE HOP WHERE THE FIELD ALREADY
@@ -24,7 +25,7 @@ impl IamDb {
         // `r.user_id` is the TARGET — the person promoted or demoted — and is
         // passed as such. It is also this record's telemetry scope; recording it
         // as the actor would attribute every promotion to the person promoted.
-        record_actor(r.unverified_actor.as_ref(), "SetUserAdmin", &r.user_id);
+        record_actor(rid, r.unverified_actor.as_ref(), "SetUserAdmin", &r.user_id);
 
         // `deleted_at IS NULL` for the reason every clause like it exists here:
         // promoting a soft-deleted person grants authority to an account nobody
@@ -70,11 +71,17 @@ impl IamDb {
     pub(super) async fn set_rate_limit(
         &self,
         r: SetRateLimitOverrideRequest,
+        rid: &str,
         call: Call,
     ) -> Result<Response<SetRateLimitOverrideResponse>, Status> {
         // ADR-0534's RECORDING HALF. The TARGET is the bucket and the verb.
         let target = rate_limit_target(&r);
-        record_actor(r.unverified_actor.as_ref(), "SetRateLimitOverride", &target);
+        record_actor(
+            rid,
+            r.unverified_actor.as_ref(),
+            "SetRateLimitOverride",
+            &target,
+        );
 
         refuse_unstored_kind(r.kind)?;
 

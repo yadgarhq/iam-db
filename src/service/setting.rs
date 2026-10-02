@@ -22,9 +22,11 @@ impl IamDb {
     pub(super) async fn store_setting(
         &self,
         r: SetInheritedSettingRequest,
+        rid: &str,
         call: Call,
     ) -> Result<Response<SetInheritedSettingResponse>, Status> {
         record_actor(
+            rid,
             r.unverified_actor.as_ref(),
             "SetInheritedSetting",
             &setting_target(&r),

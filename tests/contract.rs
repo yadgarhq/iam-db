@@ -4879,6 +4879,205 @@ async fn set_inherited_setting_without_a_usable_actor_records_it_as_unattributed
     }
 }
 
+/// A request carrying the `x-yadgar-request-id` the handlers read.
+fn with_request_id<T>(message: T, request_id: &str) -> Request<T> {
+    let mut req = Request::new(message);
+    req.metadata_mut().insert(
+        "x-yadgar-request-id",
+        request_id.parse().expect("an ascii request id"),
+    );
+    req
+}
+
+/// The one actor record in `log`, so a field asserted on it cannot be satisfied
+/// by some other line — the CallRecord carries a request id of its own.
+fn actor_line(log: &str) -> &str {
+    let mut lines = log
+        .lines()
+        .filter(|l| l.contains("an administrative write carrying a self-asserted actor"));
+    let line = lines.next().expect("one actor record");
+    assert!(lines.next().is_none(), "exactly one actor record: {log}");
+    line
+}
+
+/// Assert the call's request id and its verb are on the actor record itself.
+fn assert_request_id(log: &str, rpc: &str, request_id: &str) {
+    let line = actor_line(log);
+    assert!(
+        line.contains(&format!(r#"request_id="{request_id}""#)),
+        "{rpc}'s actor record must carry its call's request id: {line}"
+    );
+    assert!(
+        line.contains(&format!(r#"rpc="{rpc}""#)),
+        "{rpc}'s actor record must name its verb: {line}"
+    );
+}
+
+#[tokio::test]
+async fn every_actor_record_carries_the_request_id_of_its_call() {
+    // THE JOIN TO THE CALLRECORD. The actor line records an ATTEMPT and the
+    // CallRecord records the OUTCOME; `request_id` is the only key both carry,
+    // so a line without it cannot be matched to whether the write happened.
+    // All nine verbs, each with its own id, so a verb that dropped it — or
+    // logged another call's — fails by name.
+    let svc = fresh("iam_db_test_actor_request_id").await;
+    let (person, credential) = seed(&svc, &[91u8; 32], &[92u8; 32]).await;
+    seed_team(&svc, "yadgar:team:a").await;
+    let who = actor("yadgar:user:actor-ten");
+
+    macro_rules! check {
+        ($rpc:literal, $call:expr) => {{
+            let log = {
+                let (_guard, buf) = capturing();
+                $call.await.expect($rpc);
+                rendered(&buf)
+            };
+            assert_request_id(&log, $rpc, concat!("rid-", $rpc));
+        }};
+    }
+
+    check!(
+        "CreateUser",
+        svc.create_user(with_request_id(
+            CreateUserRequest {
+                external_id_blind_index: vec![93u8; 32],
+                external_id_ciphertext: b"ciphertext".to_vec(),
+                display_name_ciphertext: b"ciphertext".to_vec(),
+                unverified_actor: who.clone(),
+                ..Default::default()
+            },
+            "rid-CreateUser",
+        ))
+    );
+    check!(
+        "CreateEnrolment",
+        svc.create_enrolment(with_request_id(
+            CreateEnrolmentRequest {
+                user_id: person.clone(),
+                secret_hash: vec![94u8; 32],
+                expires_at: Some(at(3600)),
+                unverified_actor: who.clone(),
+                ..Default::default()
+            },
+            "rid-CreateEnrolment",
+        ))
+    );
+    check!(
+        "SetUserAdmin",
+        svc.set_user_admin(with_request_id(
+            SetUserAdminRequest {
+                user_id: person.clone(),
+                is_admin: true,
+                unverified_actor: who.clone(),
+                ..Default::default()
+            },
+            "rid-SetUserAdmin",
+        ))
+    );
+    check!(
+        "CreateCredential",
+        svc.create_credential(with_request_id(
+            CreateCredentialRequest {
+                user_id: person.clone(),
+                token_hash: vec![95u8; 32],
+                label: "laptop".into(),
+                unverified_actor: who.clone(),
+                ..Default::default()
+            },
+            "rid-CreateCredential",
+        ))
+    );
+    check!(
+        "RevokeCredential",
+        svc.revoke_credential(with_request_id(
+            RevokeCredentialRequest {
+                credential_id: credential.clone(),
+                unverified_actor: who.clone(),
+                ..Default::default()
+            },
+            "rid-RevokeCredential",
+        ))
+    );
+    check!(
+        "SetRateLimitOverride",
+        svc.set_rate_limit_override(with_request_id(
+            SetRateLimitOverrideRequest {
+                unverified_actor: who.clone(),
+                ..rate_limit_request(&person)
+            },
+            "rid-SetRateLimitOverride",
+        ))
+    );
+    check!(
+        "AddTeamMember",
+        svc.add_team_member(with_request_id(
+            AddTeamMemberRequest {
+                team_id: "yadgar:team:a".into(),
+                user_id: person.clone(),
+                unverified_actor: who.clone(),
+                ..Default::default()
+            },
+            "rid-AddTeamMember",
+        ))
+    );
+    check!(
+        "RemoveTeamMember",
+        svc.remove_team_member(with_request_id(
+            RemoveTeamMemberRequest {
+                team_id: "yadgar:team:a".into(),
+                user_id: person.clone(),
+                unverified_actor: who.clone(),
+                ..Default::default()
+            },
+            "rid-RemoveTeamMember",
+        ))
+    );
+    check!(
+        "SetInheritedSetting",
+        svc.set_inherited_setting(with_request_id(
+            SetInheritedSettingRequest {
+                unverified_actor: who.clone(),
+                ..team_request("yadgar:team:a")
+            },
+            "rid-SetInheritedSetting",
+        ))
+    );
+}
+
+#[tokio::test]
+async fn an_actor_record_is_written_for_an_attempt_the_store_refuses() {
+    // `record_actor`'s doc: the line records an ATTEMPT, never an outcome. A
+    // credential for a person who does not exist is refused NOT_FOUND, and the
+    // attribution is still on the log, joined by request id to a CallRecord
+    // that says the write did not happen.
+    let svc = fresh("iam_db_test_actor_attempt").await;
+
+    let log = {
+        let (_guard, buf) = capturing();
+        let err = svc
+            .create_credential(with_request_id(
+                CreateCredentialRequest {
+                    user_id: "yadgar:user:nobody".into(),
+                    token_hash: vec![96u8; 32],
+                    label: "laptop".into(),
+                    unverified_actor: actor("yadgar:user:actor-eleven"),
+                    ..Default::default()
+                },
+                "rid-refused",
+            ))
+            .await
+            .expect_err("no such person");
+        assert_eq!(err.code(), tonic::Code::NotFound);
+        rendered(&buf)
+    };
+
+    assert_request_id(&log, "CreateCredential", "rid-refused");
+    assert!(
+        actor_line(&log).contains(r#"unverified_actor="yadgar:user:actor-eleven""#),
+        "the refused attempt is still attributed: {log}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // THE KEY-IDENTITY MARKER (ADR-0764, ADR-0765).
 //
