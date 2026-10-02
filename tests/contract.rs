@@ -61,7 +61,10 @@ async fn fresh(db: &str) -> IamDb {
     let pool = sqlx::MySqlPool::connect(&format!("{base}/{db}"))
         .await
         .expect("pool");
-    yadgar_store::migrate::apply(&pool, &schema::migrations().expect("migrations"))
+    // The wait a chart would render. Stated in the TEST because `store` has no
+    // default for it any more (ADR-0569); 60 is the chart's shipped value.
+    let lock = yadgar_store::migrate::LockOptions::new(60).expect("60 seconds is a wait");
+    yadgar_store::migrate::apply(&pool, &schema::migrations().expect("migrations"), &lock)
         .await
         .expect("migrate");
     IamDb::new(pool)
