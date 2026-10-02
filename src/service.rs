@@ -180,21 +180,27 @@ impl IamDb {
 ///
 /// **CAPPED HERE, AND ONLY HERE, WITH [`capped`] — THE SAME BOUND AND MARKER
 /// EVERY OTHER CALLER STRING ON THIS BOUNDARY GETS.** A header is bounded only
-/// by the transport (HTTP/2's own frame limits, tens of kilobytes), and this
-/// value reaches TWO places from the ONE `String` this function returns: the
-/// actor record's `request_id` field, and `tel`'s `Scope`, which carries it
-/// into `Call::start`'s span and the `CallRecord` a collector joins the actor
-/// line to. Capping at either destination instead of here would let the two
+/// by the transport's own header-size limit — `h2`'s own default is 16 MiB
+/// ("a sane default taken from golang http2"), and this service sets no
+/// `http2_max_header_list_size` of its own — and this value reaches TWO places
+/// from the ONE `String` this function returns: the actor record's
+/// `request_id` field, and `tel`'s `Scope`, which carries it into
+/// `Call::start`'s span and the `CallRecord` a collector joins the actor line
+/// to. Capping at either destination instead of here would let the two
 /// diverge on a caller long enough to be cut differently in each place,
 /// breaking the very join `request_id` exists for. Capping here instead of
-/// refusing the call keeps D25's rule: a correlation id is transport-level
-/// context, never part of what is being asked, so a malformed one must not be
-/// able to fail a request over it.
+/// refusing the call keeps D67's rule that telemetry emission must never fail
+/// a call: a correlation id is transport-level context rather than part of
+/// what is being asked, so a malformed one must not be able to fail a request
+/// over it.
 ///
-/// Measured, not assumed: the gateway MINTS this id as a UUIDv7 and discards
-/// whatever a caller sent (`gateway::request_id`, D67) — every legitimate
-/// value is 36 characters, far under the cap. A value long enough to be cut
-/// here already did not come from the gateway's own generator.
+/// Measured, not assumed: `gateway::request_id` (D67) mints this id as a
+/// UUIDv7, but the gateway does not put it on `x-yadgar-request-id` today —
+/// `iam` forwards only a header it received, so on the gateway→iam→iam-db
+/// path the header is absent and `request_id` is empty. Any value long
+/// enough to be cut here came from a direct caller, not from the gateway.
+/// Propagating the gateway's id onto this header is booked separately
+/// (ledger 1248).
 fn request_id_of<T>(req: &Request<T>) -> String {
     req.metadata()
         .get("x-yadgar-request-id")
