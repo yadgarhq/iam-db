@@ -194,13 +194,12 @@ impl IamDb {
 /// what is being asked, so a malformed one must not be able to fail a request
 /// over it.
 ///
-/// Measured, not assumed: `gateway::request_id` (D67) mints this id as a
-/// UUIDv7, but the gateway does not put it on `x-yadgar-request-id` today —
-/// `iam` forwards only a header it received, so on the gateway→iam→iam-db
-/// path the header is absent and `request_id` is empty. Any value long
-/// enough to be cut here came from a direct caller, not from the gateway.
-/// Propagating the gateway's id onto this header is booked separately
-/// (ledger 1248).
+/// `gateway::request_id` (D67) mints this id as a 36-character UUIDv7, and
+/// ledger 1248 puts it on the header: yadgarhq/gateway#97 sends it to `iam`,
+/// and yadgarhq/iam#88 forwards it here CAPPED with a copy of [`capped`]. Any
+/// value long enough to be cut did not come from the gateway's generator.
+/// Re-capping what `iam` already capped changes nothing, so both hops'
+/// records carry the identical string.
 fn request_id_of<T>(req: &Request<T>) -> String {
     req.metadata()
         .get("x-yadgar-request-id")
@@ -258,7 +257,7 @@ fn tel(request_id: String, user_id: &str) -> yadgar_telemetry::observe::Scope {
 /// are; neither can hold a `/`.
 ///
 /// **EVERY CALLER STRING IS CAPPED** at [`ACTOR_RECORD_CAP`] characters, with
-/// `…` marking a cut: each target segment inside [`seg`], the actor id here,
+/// `...` marking a cut: each target segment inside [`seg`], the actor id here,
 /// and `request_id` itself inside [`request_id_of`] — the one caller string on
 /// this line that is also read by `tel` for the `CallRecord`, capped at its
 /// single point of entry so both consumers agree. A request can be 4 MB, and
@@ -328,13 +327,27 @@ fn record_actor(request_id: &str, actor: Option<&UnverifiedActor>, rpc: &str, ta
 /// A request may be 4 MB, and a header can run to the transport's own limit:
 /// the actor id, every caller-supplied target segment, and `x-yadgar-request-id`
 /// are all the caller's own strings, read before anything validates them. Past
-/// this many characters the rest is cut and `…` marks the cut.
+/// this many characters the rest is cut and [`CUT_MARKER`] marks the cut, so a
+/// cut value is at most `ACTOR_RECORD_CAP + 3` characters.
+///
+/// **`iam` HOLDS A COPY OF THIS BOUND AND OF [`CUT_MARKER`]** (yadgarhq/iam#88,
+/// its `REQUEST_ID_CAP` and `capped`). The copies must stay identical, or the
+/// two hops cut one over-long request id differently and their records stop
+/// joining.
 const ACTOR_RECORD_CAP: usize = 256;
 
-/// `s` cut to [`ACTOR_RECORD_CAP`] characters, with `…` appended if it was cut.
+/// What marks a cut. **ASCII, and that is load-bearing** (ledger 1248): the
+/// capped request id crosses a hop in `x-yadgar-request-id`, and
+/// [`request_id_of`] reads it with `to_str()`, which refuses any non-ASCII
+/// byte. The `…` this used to be was accepted into metadata and read back as
+/// `""`.
+const CUT_MARKER: &str = "...";
+
+/// `s` cut to [`ACTOR_RECORD_CAP`] characters, with [`CUT_MARKER`] appended if
+/// it was cut.
 fn capped(s: &str) -> std::borrow::Cow<'_, str> {
     match s.char_indices().nth(ACTOR_RECORD_CAP) {
-        Some((at, _)) => format!("{}…", &s[..at]).into(),
+        Some((at, _)) => format!("{}{CUT_MARKER}", &s[..at]).into(),
         None => s.into(),
     }
 }
@@ -439,3 +452,6 @@ where
 fn label(status: &Status) -> &'static str {
     status_name(status)
 }
+
+#[cfg(test)]
+mod tests;
