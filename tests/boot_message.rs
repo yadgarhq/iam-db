@@ -1,10 +1,11 @@
 //! What an operator reads when the boot refuses.
 //!
-//! `main` returns `Box<dyn Error>`, and Rust prints that with DEBUG. A
-//! `BootError` handed to it with a bare `?` therefore prints its variant name —
-//! `ObsoleteRequireTls`, `MigrationLockWait { .. }` — and drops the sentence
-//! that names the knob and says what to set, which is the whole of what
-//! ADR-0569 asks a refusal to carry. `boot`'s unit tests prove the sentences
+//! `main` used to return `Result<(), Box<dyn Error>>`, and Rust prints a `main`
+//! that returns `Err` with DEBUG: a `BootError` came out as its variant name —
+//! `ObsoleteRequireTls`, `MigrationLockWait { .. }` — and even a sentence came
+//! out quoted and escaped. `main` now calls `run()` and prints `Error: {e}` with
+//! Display, which is what these tests hold: the sentence names the knob and says
+//! what to set, which is the whole of what ADR-0569 asks a refusal to carry. `boot`'s unit tests prove the sentences
 //! exist; only running the BINARY proves they reach the operator.
 //!
 //! No engine is needed: every case here is refused before anything connects.
