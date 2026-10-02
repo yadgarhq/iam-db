@@ -80,7 +80,7 @@ impl IamDb {
         call: Call,
     ) -> Result<Response<AddTeamMemberResponse>, Status> {
         // ADR-0534's RECORDING HALF. The TARGET is the membership, team first.
-        let target = format!("{}/{}", r.team_id, r.user_id);
+        let target = format!("{}/{}", seg(&r.team_id), seg(&r.user_id));
         record_actor(rid, r.unverified_actor.as_ref(), "AddTeamMember", &target);
 
         // `INSERT IGNORE` SWALLOWED BOTH FOREIGN KEYS, WHICH IS WHY THIS RPC
@@ -193,7 +193,7 @@ impl IamDb {
         call: Call,
     ) -> Result<Response<RemoveTeamMemberResponse>, Status> {
         // ADR-0534's RECORDING HALF. The TARGET is the membership, team first.
-        let target = format!("{}/{}", r.team_id, r.user_id);
+        let target = format!("{}/{}", seg(&r.team_id), seg(&r.user_id));
         record_actor(
             rid,
             r.unverified_actor.as_ref(),

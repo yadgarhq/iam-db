@@ -165,7 +165,7 @@ impl IamDb {
         // ADR-0534's RECORDING HALF, AFTER the id on `CreateUser`'s argument:
         // minting it cannot fail, and the credential id is what joins this
         // record to a later `RevokeCredential`'s.
-        let target = format!("{}/{}", r.user_id, id);
+        let target = format!("{}/{}", seg(&r.user_id), id);
         record_actor(
             rid,
             r.unverified_actor.as_ref(),
@@ -243,7 +243,7 @@ impl IamDb {
             rid,
             r.unverified_actor.as_ref(),
             "RevokeCredential",
-            &r.credential_id,
+            &seg(&r.credential_id),
         );
 
         // A tombstone, not a delete (D26). Idempotent by the WHERE clause:

@@ -25,7 +25,12 @@ impl IamDb {
         // `r.user_id` is the TARGET — the person promoted or demoted — and is
         // passed as such. It is also this record's telemetry scope; recording it
         // as the actor would attribute every promotion to the person promoted.
-        record_actor(rid, r.unverified_actor.as_ref(), "SetUserAdmin", &r.user_id);
+        record_actor(
+            rid,
+            r.unverified_actor.as_ref(),
+            "SetUserAdmin",
+            &seg(&r.user_id),
+        );
 
         // `deleted_at IS NULL` for the reason every clause like it exists here:
         // promoting a soft-deleted person grants authority to an account nobody
@@ -208,5 +213,5 @@ fn rate_limit_target(r: &SetRateLimitOverrideRequest) -> String {
         .map(|k| k.as_str_name().to_string())
         .unwrap_or_else(|_| r.kind.to_string());
     let verb = if r.limit.is_some() { "set" } else { "clear" };
-    format!("{}/{}/{kind}/{verb}", r.user_id, r.module)
+    format!("{}/{}/{kind}/{verb}", seg(&r.user_id), seg(&r.module))
 }

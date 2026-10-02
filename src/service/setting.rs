@@ -364,6 +364,6 @@ fn setting_target(r: &SetInheritedSettingRequest) -> String {
     let scope = SettingScope::try_from(r.scope)
         .map(|s| s.as_str_name().to_string())
         .unwrap_or_else(|_| r.scope.to_string());
-    let team = r.team_id.as_deref().unwrap_or_default();
-    format!("{scope}/{team}/{}", r.name)
+    let team = seg(r.team_id.as_deref().unwrap_or_default());
+    format!("{scope}/{team}/{}", seg(&r.name))
 }

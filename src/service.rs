@@ -226,8 +226,16 @@ fn tel(request_id: String, user_id: &str) -> yadgar_telemetry::observe::Scope {
 /// object is also useless during an incident, which is why both are on one line.
 ///
 /// **EACH VERB'S `target`, AND WHY IT IS COMPOSITE WHERE IT IS.** A `/` joins
-/// the segments, container first. The minted ids never contain one; a team id
-/// or a module name is caller-supplied and is not checked for one.
+/// the segments, container first. EVERY CALLER-SUPPLIED SEGMENT IS ESCAPED by
+/// [`seg`] — `%` to `%25`, then `/` to `%2F` — because no id grammar in the
+/// contract forbids a `/` and the target is rendered before anything validates
+/// the request. A segment this service minted (`CreateUser`'s id,
+/// `CreateCredential`'s credential id) and an enum name are written as they
+/// are; neither can hold a `/`.
+///
+/// **EVERY CALLER STRING IS CAPPED** at [`ACTOR_RECORD_CAP`] characters, with
+/// `…` marking a cut: each target segment inside [`seg`], and the actor id
+/// here. A request can be 4 MB, and none of it should reach a log line whole.
 ///
 /// | RPC                    | `target`                                       |
 /// | ---------------------- | ---------------------------------------------- |
@@ -276,14 +284,39 @@ fn tel(request_id: String, user_id: &str) -> yadgar_telemetry::observe::Scope {
 fn record_actor(request_id: &str, actor: Option<&UnverifiedActor>, rpc: &str, target: &str) {
     tracing::info!(
         request_id = request_id,
-        unverified_actor = actor
+        unverified_actor = ?actor
             .map(|a| a.user_id.as_str())
             .filter(|id| !id.is_empty())
-            .unwrap_or("<unattributed>"),
+            .map_or(std::borrow::Cow::Borrowed("<unattributed>"), capped),
         rpc = rpc,
         target = target,
         "an administrative write carrying a self-asserted actor"
     );
+}
+
+/// How many of a caller's characters one string may put on an actor record.
+///
+/// A request may be 4 MB, and the actor id and every caller-supplied target
+/// segment are the caller's own strings, logged before anything validates
+/// them. Past this many characters the rest is cut and `…` marks the cut.
+const ACTOR_RECORD_CAP: usize = 256;
+
+/// `s` cut to [`ACTOR_RECORD_CAP`] characters, with `…` appended if it was cut.
+fn capped(s: &str) -> std::borrow::Cow<'_, str> {
+    match s.char_indices().nth(ACTOR_RECORD_CAP) {
+        Some((at, _)) => format!("{}…", &s[..at]).into(),
+        None => s.into(),
+    }
+}
+
+/// One caller-supplied segment of a `record_actor` target: capped, then
+/// escaped `%` → `%25` FIRST and `/` → `%2F` second.
+///
+/// No id grammar in this contract forbids a `/`, so an unescaped one would let
+/// one object's target read as another's. `%` goes first, or a literal `%2F`
+/// would be indistinguishable from an escaped `/`.
+fn seg(s: &str) -> String {
+    capped(s).replace('%', "%25").replace('/', "%2F")
 }
 
 fn db(e: sqlx::Error) -> Status {

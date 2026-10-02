@@ -44,7 +44,7 @@ impl IamDb {
             rid,
             r.unverified_actor.as_ref(),
             "CreateEnrolment",
-            &r.user_id,
+            &seg(&r.user_id),
         );
 
         // `idempotency` IS DISCARDED HERE, AND THIS RPC'S OWN CONTRACT SAYS IT

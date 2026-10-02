@@ -5078,6 +5078,80 @@ async fn an_actor_record_is_written_for_an_attempt_the_store_refuses() {
     );
 }
 
+#[tokio::test]
+async fn a_caller_supplied_segment_is_escaped_so_a_target_cannot_be_forged() {
+    // A caller-supplied segment is logged BEFORE validation, and nothing in this
+    // contract forbids a `/` in a module name or an id, so an unescaped one
+    // could make one bucket's target read as another's. `%` is escaped FIRST,
+    // or a literal `%2F` would be indistinguishable from an escaped `/`.
+    let svc = fresh("iam_db_test_actor_segment_escape").await;
+    let (person, _) = seed(&svc, &[97u8; 32], &[98u8; 32]).await;
+
+    for (module, rendered_module) in [("a/b", "a%2Fb"), ("a%2Fb", "a%252Fb")] {
+        let log = {
+            let (_guard, buf) = capturing();
+            // The outcome is not this test's subject: the line records the
+            // attempt whatever the store then does with the module.
+            let _ = svc
+                .set_rate_limit_override(Request::new(SetRateLimitOverrideRequest {
+                    module: module.into(),
+                    unverified_actor: actor("yadgar:user:actor-twelve"),
+                    ..rate_limit_request(&person)
+                }))
+                .await;
+            rendered(&buf)
+        };
+        let target = format!("{person}/{rendered_module}/KIND_READ/set");
+        assert!(
+            actor_line(&log).contains(&format!(r#"target="{target}""#)),
+            "module {module:?} must be logged as {rendered_module}: {log}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_caller_supplied_string_reaches_the_actor_record_capped() {
+    // A request may be 4 MB, and the actor id and every target segment are the
+    // caller's own strings. Each is cut at 256 characters with a `…` marker,
+    // so the line stays bounded and says that it was cut.
+    let svc = fresh("iam_db_test_actor_cap").await;
+    let (person, _) = seed(&svc, &[99u8; 32], &[100u8; 32]).await;
+    let long_module = "m".repeat(1000);
+    let long_actor = "y".repeat(1000);
+
+    let log = {
+        let (_guard, buf) = capturing();
+        let _ = svc
+            .set_rate_limit_override(Request::new(SetRateLimitOverrideRequest {
+                module: long_module,
+                unverified_actor: actor(&long_actor),
+                ..rate_limit_request(&person)
+            }))
+            .await;
+        rendered(&buf)
+    };
+    let line = actor_line(&log);
+
+    let module_cut = format!("{}…", "m".repeat(256));
+    assert!(
+        line.contains(&format!(r#"target="{person}/{module_cut}/KIND_READ/set""#)),
+        "the module segment must be cut at 256 characters and marked: {line}"
+    );
+    assert!(
+        !line.contains(&"m".repeat(257)),
+        "no more than 256 characters of the module reach the log: {line}"
+    );
+    let actor_cut = format!("{}…", "y".repeat(256));
+    assert!(
+        line.contains(&format!(r#"unverified_actor="{actor_cut}""#)),
+        "the actor id must be cut at 256 characters and marked: {line}"
+    );
+    assert!(
+        !line.contains(&"y".repeat(257)),
+        "no more than 256 characters of the actor id reach the log: {line}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // THE KEY-IDENTITY MARKER (ADR-0764, ADR-0765).
 //
