@@ -208,7 +208,7 @@ fn tel(request_id: String, user_id: &str) -> yadgar_telemetry::observe::Scope {
 /// and it MUST NOT be an authorisation input.
 ///
 /// **ONE READER OF THE FIELD IN THIS CRATE**, so a grep for `unverified_actor`
-/// lands on this paragraph rather than on four copies of it, and so a later verb
+/// lands on this paragraph rather than on nine copies of it, and so a later verb
 /// that starts carrying an actor gets the absent-and-empty handling for free
 /// instead of re-deriving it.
 ///
@@ -225,36 +225,98 @@ fn tel(request_id: String, user_id: &str) -> yadgar_telemetry::observe::Scope {
 /// would attribute every promotion to the person promoted. An attribution with no
 /// object is also useless during an incident, which is why both are on one line.
 ///
+/// **EACH VERB'S `target`, AND WHY IT IS COMPOSITE WHERE IT IS.** A `/` joins
+/// the segments, container first. EVERY CALLER-SUPPLIED SEGMENT IS ESCAPED by
+/// [`seg`] — `%` to `%25`, then `/` to `%2F` — because no id grammar in the
+/// contract forbids a `/` and the target is rendered before anything validates
+/// the request. A segment this service minted (`CreateUser`'s id,
+/// `CreateCredential`'s credential id) and an enum name are written as they
+/// are; neither can hold a `/`.
+///
+/// **EVERY CALLER STRING IS CAPPED** at [`ACTOR_RECORD_CAP`] characters, with
+/// `…` marking a cut: each target segment inside [`seg`], and the actor id
+/// here. A request can be 4 MB, and none of it should reach a log line whole.
+///
+/// | RPC                    | `target`                                       |
+/// | ---------------------- | ---------------------------------------------- |
+/// | `CreateUser`           | `{user_id}`, the id just minted                |
+/// | `CreateEnrolment`      | `{user_id}`, the person enrolled               |
+/// | `SetUserAdmin`         | `{user_id}`, the person promoted or demoted    |
+/// | `CreateCredential`     | `{user_id}/{credential_id}`, the id just minted |
+/// | `RevokeCredential`     | `{credential_id}`                              |
+/// | `SetRateLimitOverride` | `{user_id}/{module}/{kind}/{set\|clear}`       |
+/// | `AddTeamMember`        | `{team_id}/{user_id}`                          |
+/// | `RemoveTeamMember`     | `{team_id}/{user_id}`                          |
+/// | `SetInheritedSetting`  | `{scope}/{team_id}/{name}`                     |
+///
+/// `CreateCredential` names the credential so its record joins a later
+/// `RevokeCredential`'s on the id. `{kind}` and `{scope}` are the contract's enum
+/// names (`KIND_READ`, `SETTING_SCOPE_TEAM`), or the raw number when the request
+/// carries one the contract does not define — the target is rendered before the
+/// request is checked. An absent `team_id` is the empty segment, so an
+/// organisation write reads `SETTING_SCOPE_ORG//{name}`.
+///
 /// **ABSENT AND PRESENT-HOLDING-EMPTY ARE ONE CASE** and are recorded as
 /// unattributed, NEVER as an actor whose id is the empty string — ADR-0512's
 /// collapse, pointed at the audit trail. `prost` cannot tell an absent message
 /// from a default one, so `filter` is what keeps the two together;
 /// `unwrap_or_default` would write "" as an actor.
 ///
-/// **FOUR OF THE NINE RPCs THAT CARRY THE FIELD CALL THIS, AND THE OTHER FIVE ARE
-/// A GAP RATHER THAN A MECHANISM.** Stated here for the reason the module header
-/// states the same thing about `Idempotency`: a reader who greps
-/// `unverified_actor` and finds five handlers that accept one and never mention it
-/// cannot tell an omission from a decision. `CreateUser`, `CreateEnrolment`,
-/// `SetUserAdmin` and `SetInheritedSetting` record. `CreateCredential`,
+/// **ALL NINE RPCs THAT CARRY THE FIELD CALL THIS**, each before any refusal or
+/// SQL in its operation. `CreateUser`, `CreateEnrolment`,
+/// `SetUserAdmin` and `SetInheritedSetting` came first; `CreateCredential`,
 /// `RevokeCredential`, `SetRateLimitOverride`, `AddTeamMember` and
-/// `RemoveTeamMember` do not, and nothing about them argues they should not —
-/// wiring them is additive and wants the same test per verb. Booked as follow-on
-/// work rather than done here.
+/// `RemoveTeamMember` were wired later (ledger 870), with the same test per verb
+/// in `tests/contract.rs`. A tenth verb that starts carrying an actor joins this
+/// list and that test pattern, or the grep that lands here finds an omission
+/// indistinguishable from a decision again.
+///
+/// **THE LINE RECORDS AN ATTEMPT, NEVER AN OUTCOME.** It is written before the
+/// operation refuses or touches the store, so a request refused as NOT_FOUND or
+/// INVALID_ARGUMENT, or one that failed against the engine, still left it.
+/// Whether the write HAPPENED is the CallRecord's to say, and `request_id` is the
+/// key that joins the two: it is the same `x-yadgar-request-id` the handler
+/// hands `tel` for that call's `Scope`. An empty one is a caller that sent none.
 ///
 /// **THERE IS NO AUDIT STORE ON THIS BOUNDARY**, so the structured log is where an
 /// attribution can land today (ADR-0620). Said plainly rather than implied: the
 /// durable audit record ADR-0534 imagines does not exist here yet.
-fn record_actor(actor: Option<&UnverifiedActor>, rpc: &str, target: &str) {
+fn record_actor(request_id: &str, actor: Option<&UnverifiedActor>, rpc: &str, target: &str) {
     tracing::info!(
-        unverified_actor = actor
+        request_id = request_id,
+        unverified_actor = ?actor
             .map(|a| a.user_id.as_str())
             .filter(|id| !id.is_empty())
-            .unwrap_or("<unattributed>"),
+            .map_or(std::borrow::Cow::Borrowed("<unattributed>"), capped),
         rpc = rpc,
         target = target,
         "an administrative write carrying a self-asserted actor"
     );
+}
+
+/// How many of a caller's characters one string may put on an actor record.
+///
+/// A request may be 4 MB, and the actor id and every caller-supplied target
+/// segment are the caller's own strings, logged before anything validates
+/// them. Past this many characters the rest is cut and `…` marks the cut.
+const ACTOR_RECORD_CAP: usize = 256;
+
+/// `s` cut to [`ACTOR_RECORD_CAP`] characters, with `…` appended if it was cut.
+fn capped(s: &str) -> std::borrow::Cow<'_, str> {
+    match s.char_indices().nth(ACTOR_RECORD_CAP) {
+        Some((at, _)) => format!("{}…", &s[..at]).into(),
+        None => s.into(),
+    }
+}
+
+/// One caller-supplied segment of a `record_actor` target: capped, then
+/// escaped `%` → `%25` FIRST and `/` → `%2F` second.
+///
+/// No id grammar in this contract forbids a `/`, so an unescaped one would let
+/// one object's target read as another's. `%` goes first, or a literal `%2F`
+/// would be indistinguishable from an escaped `/`.
+fn seg(s: &str) -> String {
+    capped(s).replace('%', "%25").replace('/', "%2F")
 }
 
 fn db(e: sqlx::Error) -> Status {

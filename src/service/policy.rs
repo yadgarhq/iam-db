@@ -13,6 +13,7 @@ impl IamDb {
     pub(super) async fn set_admin(
         &self,
         r: SetUserAdminRequest,
+        rid: &str,
         call: Call,
     ) -> Result<Response<SetUserAdminResponse>, Status> {
         // ADR-0534's RECORDING HALF, AND THE ONE HOP WHERE THE FIELD ALREADY
@@ -24,7 +25,12 @@ impl IamDb {
         // `r.user_id` is the TARGET — the person promoted or demoted — and is
         // passed as such. It is also this record's telemetry scope; recording it
         // as the actor would attribute every promotion to the person promoted.
-        record_actor(r.unverified_actor.as_ref(), "SetUserAdmin", &r.user_id);
+        record_actor(
+            rid,
+            r.unverified_actor.as_ref(),
+            "SetUserAdmin",
+            &seg(&r.user_id),
+        );
 
         // `deleted_at IS NULL` for the reason every clause like it exists here:
         // promoting a soft-deleted person grants authority to an account nobody
@@ -70,20 +76,19 @@ impl IamDb {
     pub(super) async fn set_rate_limit(
         &self,
         r: SetRateLimitOverrideRequest,
+        rid: &str,
         call: Call,
     ) -> Result<Response<SetRateLimitOverrideResponse>, Status> {
-        // D74 puts system-initiated work outside this mechanism, so KIND_JOB and
-        // KIND_UNSPECIFIED are never stored. Refused rather than written: a
-        // bucket the gateway will never consult is a limit an operator believes
-        // is in force and is not.
-        if !matches!(
-            ContractKind::try_from(r.kind),
-            Ok(ContractKind::Read) | Ok(ContractKind::Write) | Ok(ContractKind::Generate)
-        ) {
-            return Err(Status::invalid_argument(
-                "a rate-limit override must name READ, WRITE or GENERATE",
-            ));
-        }
+        // ADR-0534's RECORDING HALF. The TARGET is the bucket and the verb.
+        let target = rate_limit_target(&r);
+        record_actor(
+            rid,
+            r.unverified_actor.as_ref(),
+            "SetRateLimitOverride",
+            &target,
+        );
+
+        refuse_unstored_kind(r.kind)?;
 
         // The liveness check SetUserAdmin carries, on the neighbouring RPC. The
         // FOREIGN KEY proves the user row exists and says nothing about whether
@@ -181,4 +186,32 @@ impl IamDb {
         });
         Ok(Response::new(SetRateLimitOverrideResponse {}))
     }
+}
+
+/// D74 puts system-initiated work outside the rate-limit mechanism, so KIND_JOB
+/// and KIND_UNSPECIFIED are never stored. Refused rather than written: a bucket
+/// the gateway will never consult is a limit an operator believes is in force
+/// and is not.
+fn refuse_unstored_kind(kind: i32) -> Result<(), Status> {
+    if !matches!(
+        ContractKind::try_from(kind),
+        Ok(ContractKind::Read) | Ok(ContractKind::Write) | Ok(ContractKind::Generate)
+    ) {
+        return Err(Status::invalid_argument(
+            "a rate-limit override must name READ, WRITE or GENERATE",
+        ));
+    }
+    Ok(())
+}
+
+/// `SetRateLimitOverride`'s `record_actor` target: `{user_id}/{module}/{kind}/{set|clear}`.
+///
+/// Rendered BEFORE the kind is checked, so an unrecognised kind is written as
+/// its number rather than refused here: the line records the attempt.
+fn rate_limit_target(r: &SetRateLimitOverrideRequest) -> String {
+    let kind = ContractKind::try_from(r.kind)
+        .map(|k| k.as_str_name().to_string())
+        .unwrap_or_else(|_| r.kind.to_string());
+    let verb = if r.limit.is_some() { "set" } else { "clear" };
+    format!("{}/{}/{kind}/{verb}", seg(&r.user_id), seg(&r.module))
 }

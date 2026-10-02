@@ -3029,6 +3029,95 @@ async fn every_team_override_comes_back_including_teams_the_caller_is_not_in() {
 }
 
 #[tokio::test]
+async fn team_ids_and_team_override_answer_different_questions_in_one_resolve() {
+    // LEDGER 732. The two tests above each hold ONE side: the membership test
+    // seeds no override, and the override test asserts `team_ids.is_empty()`.
+    // Neither sees both populated in one answer, so a change that coupled them —
+    // narrowing the overrides to the caller's teams, or widening the teams to
+    // those holding an override — passed both.
+    //
+    // THE CORRECT COMBINED ANSWER, and why. The two fields are INDEPENDENT.
+    // `team_ids` is the caller's memberships and only those (D12; the membership
+    // query filters by `user_id`). `team_override` is EVERY team's override,
+    // unfiltered and unresolved, because the team that matters is the RECORD'S
+    // and never the caller's (ADR-0522; `yadgar.common.v1.InheritedSetting`;
+    // `owner_reads_own_record` in `src/service/credential.rs`). A team with no
+    // override has no entry, membership or not.
+    //
+    // MUTATIONS THIS CATCHES: restricting the override query to the caller's
+    // teams (C disappears), and dropping the membership `WHERE user_id = ?`
+    // (C leaks into `team_ids`).
+    let svc = fresh("iam_db_test_teams_and_overrides").await;
+    let (me, _) = seed(&svc, &[71u8; 32], &[71u8; 32]).await;
+    let (other, _) = seed(&svc, &[72u8; 32], &[72u8; 32]).await;
+
+    for team in ["yadgar:team:a", "yadgar:team:b", "yadgar:team:c"] {
+        seed_team(&svc, team).await;
+    }
+    for (team, user) in [
+        ("yadgar:team:a", &me),
+        ("yadgar:team:b", &me),
+        ("yadgar:team:c", &other),
+    ] {
+        svc.add_team_member(Request::new(AddTeamMemberRequest {
+            team_id: team.into(),
+            user_id: user.clone(),
+            ..Default::default()
+        }))
+        .await
+        .expect("add member");
+    }
+    // A: the caller's team, with an override. B: the caller's team, without one.
+    // C: NOT the caller's team, with an override. Different values, so a swap
+    // between the two entries is visible too.
+    for (team, value) in [
+        ("yadgar:team:a", SettingValue::On),
+        ("yadgar:team:c", SettingValue::Off),
+    ] {
+        sqlx::query(
+            "INSERT INTO iam_team_setting_override (name, team_id, value) VALUES (?, ?, ?)",
+        )
+        .bind(OWNER_READS_OWN_RECORD)
+        .bind(team)
+        .bind(value as i32)
+        .execute(svc.pool())
+        .await
+        .expect("seed override");
+    }
+
+    let got = svc
+        .resolve_credential(Request::new(ResolveCredentialRequest {
+            token_hash: vec![71u8; 32],
+        }))
+        .await
+        .expect("resolve")
+        .into_inner();
+
+    // SORTED, because the membership query carries no ORDER BY.
+    let mut team_ids = got.team_ids.clone();
+    team_ids.sort();
+    assert_eq!(
+        team_ids,
+        vec!["yadgar:team:a".to_string(), "yadgar:team:b".to_string()],
+        "team_ids is the caller's memberships: B without an override is in, C with one is out"
+    );
+
+    let setting = got
+        .owner_reads_own_record
+        .expect("the setting travels with the identity");
+    let expected: std::collections::HashMap<String, i32> = [
+        ("yadgar:team:a".to_string(), SettingValue::On as i32),
+        ("yadgar:team:c".to_string(), SettingValue::Off as i32),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        setting.team_override, expected,
+        "team_override is every stated override: C outside the caller's teams is in, B without one is out"
+    );
+}
+
+#[tokio::test]
 async fn an_absent_organisation_row_is_unspecified_and_never_off() {
     // SETTING_VALUE_UNSPECIFIED IS NOT A DEFAULT AND IS NEVER A VALUE. A store
     // with no row states no policy, and the enforcing -db refuses rather than
@@ -4350,6 +4439,717 @@ async fn set_user_admin_without_a_usable_actor_records_it_as_unattributed() {
             "round {i}: the empty string must never be written as an actor: {log}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// THE OTHER FIVE (ledger 870): `CreateCredential`, `RevokeCredential`,
+// `SetRateLimitOverride`, `AddTeamMember` and `RemoveTeamMember` carried the
+// field and recorded nothing. Same two tests per verb as the four above, and the
+// same trap asserted on every one: the person the act was done to is also the
+// record's telemetry scope, so logging that id as the actor would attribute the
+// act to them. `SetInheritedSetting`'s pair sits here too, for its target.
+//
+// **EACH `target` IS THE COMPOSITE `record_actor` DOCUMENTS**, asserted whole, so
+// a target that drops the team, the credential or the bucket cannot pass.
+// ---------------------------------------------------------------------------
+
+/// The two claims every unattributed round makes, shared by the verbs below.
+fn assert_unattributed(log: &str, rpc: &str, round: usize) {
+    assert!(
+        log.contains(&format!(r#"rpc="{rpc}""#)),
+        "round {round}: the record must name the verb {rpc}: {log}"
+    );
+    assert!(
+        log.contains(r#"unverified_actor="<unattributed>""#),
+        "round {round}: an unusable actor is recorded as unattributed: {log}"
+    );
+    assert!(
+        !log.contains(r#"unverified_actor="""#),
+        "round {round}: the empty string must never be written as an actor: {log}"
+    );
+}
+
+/// The actor reached the log, the target is named in full, and the person the
+/// act was done to is never recorded as the one who asked.
+fn assert_attributed(log: &str, rpc: &str, actor: &str, target: &str, done_to: &str) {
+    assert!(
+        log.contains(&format!(r#"rpc="{rpc}""#)),
+        "the record must name the verb {rpc}: {log}"
+    );
+    assert!(
+        log.contains(&format!(r#"unverified_actor="{actor}""#)),
+        "the actor must reach the log: {log}"
+    );
+    assert!(
+        !log.contains(&format!(r#"unverified_actor="{done_to}""#)),
+        "the person acted on must never be recorded as the actor: {log}"
+    );
+    assert!(
+        log.contains(&format!(r#"target="{target}""#)),
+        "the record must name what was acted on, as {target}: {log}"
+    );
+}
+
+fn actor(id: &str) -> Option<UnverifiedActor> {
+    Some(UnverifiedActor { user_id: id.into() })
+}
+
+#[tokio::test]
+async fn create_credential_records_the_actor_and_names_the_holder_and_the_credential() {
+    let svc = fresh("iam_db_test_actor_create_credential").await;
+    let (holder, _) = seed(&svc, &[41u8; 32], &[42u8; 32]).await;
+
+    let (minted, log) = {
+        let (_guard, buf) = capturing();
+        let minted = svc
+            .create_credential(Request::new(CreateCredentialRequest {
+                user_id: holder.clone(),
+                token_hash: vec![43u8; 32],
+                label: "laptop".into(),
+                unverified_actor: actor("yadgar:user:actor-four"),
+                ..Default::default()
+            }))
+            .await
+            .expect("create credential")
+            .into_inner();
+        (minted, rendered(&buf))
+    };
+
+    // `{user_id}/{credential_id}`: the credential id is what joins this record
+    // to a later `RevokeCredential`'s.
+    let target = format!("{holder}/{}", minted.credential_id);
+    assert_attributed(
+        &log,
+        "CreateCredential",
+        "yadgar:user:actor-four",
+        &target,
+        &holder,
+    );
+
+    // D72: this boundary never logs a token. `token_hash` is 32 bytes of 43, so
+    // its hex is `2b2b…` and its `Debug` is `[43, 43, …`; neither may appear.
+    for rendering in ["2b2b2b2b", "2B2B2B2B", "43, 43, 43"] {
+        assert!(
+            !log.contains(rendering),
+            "the actor record must carry no rendering of the token hash ({rendering}): {log}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn create_credential_without_a_usable_actor_records_it_as_unattributed() {
+    let svc = fresh("iam_db_test_actor_create_credential_none").await;
+    let (holder, _) = seed(&svc, &[44u8; 32], &[45u8; 32]).await;
+
+    for (i, unverified_actor) in [None, Some(UnverifiedActor::default())]
+        .into_iter()
+        .enumerate()
+    {
+        let log = {
+            let (_guard, buf) = capturing();
+            svc.create_credential(Request::new(CreateCredentialRequest {
+                user_id: holder.clone(),
+                // FRESH per round: `uq_iam_credential_token` refuses a repeat.
+                token_hash: vec![46u8 + i as u8; 32],
+                label: "laptop".into(),
+                unverified_actor,
+                ..Default::default()
+            }))
+            .await
+            .expect("an actor decides nothing, including whether this succeeds");
+            rendered(&buf)
+        };
+        assert_unattributed(&log, "CreateCredential", i);
+    }
+}
+
+#[tokio::test]
+async fn revoke_credential_records_the_actor_and_names_the_credential() {
+    let svc = fresh("iam_db_test_actor_revoke_credential").await;
+    let (holder, credential) = seed(&svc, &[51u8; 32], &[52u8; 32]).await;
+
+    let log = {
+        let (_guard, buf) = capturing();
+        svc.revoke_credential(Request::new(RevokeCredentialRequest {
+            credential_id: credential.clone(),
+            unverified_actor: actor("yadgar:user:actor-five"),
+            ..Default::default()
+        }))
+        .await
+        .expect("revoke");
+        rendered(&buf)
+    };
+
+    assert_attributed(
+        &log,
+        "RevokeCredential",
+        "yadgar:user:actor-five",
+        &credential,
+        &holder,
+    );
+}
+
+#[tokio::test]
+async fn revoke_credential_without_a_usable_actor_records_it_as_unattributed() {
+    let svc = fresh("iam_db_test_actor_revoke_credential_none").await;
+    let (_, credential) = seed(&svc, &[53u8; 32], &[54u8; 32]).await;
+
+    // The second round revokes an already-revoked credential, which the WHERE
+    // clause makes a no-op answered OK — so both rounds reach the record.
+    for (i, unverified_actor) in [None, Some(UnverifiedActor::default())]
+        .into_iter()
+        .enumerate()
+    {
+        let log = {
+            let (_guard, buf) = capturing();
+            svc.revoke_credential(Request::new(RevokeCredentialRequest {
+                credential_id: credential.clone(),
+                unverified_actor,
+                ..Default::default()
+            }))
+            .await
+            .expect("an actor decides nothing, including whether this succeeds");
+            rendered(&buf)
+        };
+        assert_unattributed(&log, "RevokeCredential", i);
+    }
+}
+
+fn rate_limit_request(user_id: &str) -> SetRateLimitOverrideRequest {
+    SetRateLimitOverrideRequest {
+        user_id: user_id.into(),
+        module: "recall".into(),
+        kind: yadgar_iam_db::pb::yadgar::telemetry::v1::Kind::Read as i32,
+        limit: Some(RateLimit {
+            rate: 1.0,
+            burst: 1,
+        }),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn set_rate_limit_override_records_the_actor_and_names_the_bucket() {
+    let svc = fresh("iam_db_test_actor_rate_limit").await;
+    let (person, _) = seed(&svc, &[55u8; 32], &[56u8; 32]).await;
+
+    // SET, then CLEAR: the same bucket, and the target says which was asked for.
+    for (limit, verb) in [
+        (
+            Some(RateLimit {
+                rate: 1.0,
+                burst: 1,
+            }),
+            "set",
+        ),
+        (None, "clear"),
+    ] {
+        let log = {
+            let (_guard, buf) = capturing();
+            svc.set_rate_limit_override(Request::new(SetRateLimitOverrideRequest {
+                limit,
+                unverified_actor: actor("yadgar:user:actor-six"),
+                ..rate_limit_request(&person)
+            }))
+            .await
+            .expect("set or clear the override");
+            rendered(&buf)
+        };
+
+        let target = format!("{person}/recall/KIND_READ/{verb}");
+        assert_attributed(
+            &log,
+            "SetRateLimitOverride",
+            "yadgar:user:actor-six",
+            &target,
+            &person,
+        );
+    }
+}
+
+#[tokio::test]
+async fn set_rate_limit_override_without_a_usable_actor_records_it_as_unattributed() {
+    let svc = fresh("iam_db_test_actor_rate_limit_none").await;
+    let (person, _) = seed(&svc, &[57u8; 32], &[58u8; 32]).await;
+
+    for (i, unverified_actor) in [None, Some(UnverifiedActor::default())]
+        .into_iter()
+        .enumerate()
+    {
+        let log = {
+            let (_guard, buf) = capturing();
+            svc.set_rate_limit_override(Request::new(SetRateLimitOverrideRequest {
+                unverified_actor,
+                ..rate_limit_request(&person)
+            }))
+            .await
+            .expect("an actor decides nothing, including whether this succeeds");
+            rendered(&buf)
+        };
+        assert_unattributed(&log, "SetRateLimitOverride", i);
+    }
+}
+
+#[tokio::test]
+async fn add_team_member_records_the_actor_and_names_the_team_and_the_person() {
+    let svc = fresh("iam_db_test_actor_add_member").await;
+    let (person, _) = seed(&svc, &[61u8; 32], &[62u8; 32]).await;
+    seed_team(&svc, "yadgar:team:a").await;
+
+    let log = {
+        let (_guard, buf) = capturing();
+        svc.add_team_member(Request::new(AddTeamMemberRequest {
+            team_id: "yadgar:team:a".into(),
+            user_id: person.clone(),
+            unverified_actor: actor("yadgar:user:actor-seven"),
+            ..Default::default()
+        }))
+        .await
+        .expect("add member");
+        rendered(&buf)
+    };
+
+    let target = format!("yadgar:team:a/{person}");
+    assert_attributed(
+        &log,
+        "AddTeamMember",
+        "yadgar:user:actor-seven",
+        &target,
+        &person,
+    );
+}
+
+#[tokio::test]
+async fn add_team_member_without_a_usable_actor_records_it_as_unattributed() {
+    let svc = fresh("iam_db_test_actor_add_member_none").await;
+    let (person, _) = seed(&svc, &[63u8; 32], &[64u8; 32]).await;
+    seed_team(&svc, "yadgar:team:a").await;
+
+    // The second round repeats the first, which the composite key makes a no-op
+    // answered OK — so both rounds reach the record.
+    for (i, unverified_actor) in [None, Some(UnverifiedActor::default())]
+        .into_iter()
+        .enumerate()
+    {
+        let log = {
+            let (_guard, buf) = capturing();
+            svc.add_team_member(Request::new(AddTeamMemberRequest {
+                team_id: "yadgar:team:a".into(),
+                user_id: person.clone(),
+                unverified_actor,
+                ..Default::default()
+            }))
+            .await
+            .expect("an actor decides nothing, including whether this succeeds");
+            rendered(&buf)
+        };
+        assert_unattributed(&log, "AddTeamMember", i);
+    }
+}
+
+#[tokio::test]
+async fn remove_team_member_records_the_actor_and_names_the_team_and_the_person() {
+    let svc = fresh("iam_db_test_actor_remove_member").await;
+    let (person, _) = seed(&svc, &[65u8; 32], &[66u8; 32]).await;
+    seed_team(&svc, "yadgar:team:a").await;
+    svc.add_team_member(Request::new(AddTeamMemberRequest {
+        team_id: "yadgar:team:a".into(),
+        user_id: person.clone(),
+        ..Default::default()
+    }))
+    .await
+    .expect("add member");
+
+    let log = {
+        let (_guard, buf) = capturing();
+        svc.remove_team_member(Request::new(RemoveTeamMemberRequest {
+            team_id: "yadgar:team:a".into(),
+            user_id: person.clone(),
+            unverified_actor: actor("yadgar:user:actor-eight"),
+            ..Default::default()
+        }))
+        .await
+        .expect("remove member");
+        rendered(&buf)
+    };
+
+    let target = format!("yadgar:team:a/{person}");
+    assert_attributed(
+        &log,
+        "RemoveTeamMember",
+        "yadgar:user:actor-eight",
+        &target,
+        &person,
+    );
+}
+
+#[tokio::test]
+async fn remove_team_member_without_a_usable_actor_records_it_as_unattributed() {
+    let svc = fresh("iam_db_test_actor_remove_member_none").await;
+    let (person, _) = seed(&svc, &[67u8; 32], &[68u8; 32]).await;
+    seed_team(&svc, "yadgar:team:a").await;
+    svc.add_team_member(Request::new(AddTeamMemberRequest {
+        team_id: "yadgar:team:a".into(),
+        user_id: person.clone(),
+        ..Default::default()
+    }))
+    .await
+    .expect("add member");
+
+    // The second round removes a membership already gone, answered OK with
+    // `rows: 0` — so both rounds reach the record.
+    for (i, unverified_actor) in [None, Some(UnverifiedActor::default())]
+        .into_iter()
+        .enumerate()
+    {
+        let log = {
+            let (_guard, buf) = capturing();
+            svc.remove_team_member(Request::new(RemoveTeamMemberRequest {
+                team_id: "yadgar:team:a".into(),
+                user_id: person.clone(),
+                unverified_actor,
+                ..Default::default()
+            }))
+            .await
+            .expect("an actor decides nothing, including whether this succeeds");
+            rendered(&buf)
+        };
+        assert_unattributed(&log, "RemoveTeamMember", i);
+    }
+}
+
+#[tokio::test]
+async fn set_inherited_setting_records_the_actor_and_names_the_level_it_writes() {
+    // `r.name` ALONE IS EFFECTIVELY CONSTANT — one setting exists — so a target
+    // of the name says nothing about WHICH policy changed. The scope and the
+    // team are what an incident asks about.
+    let svc = fresh("iam_db_test_actor_inherited_setting").await;
+    seed_team(&svc, "yadgar:team:a").await;
+
+    for (req, target) in [
+        (
+            org_request(),
+            format!("SETTING_SCOPE_ORG//{OWNER_READS_OWN_RECORD}"),
+        ),
+        (
+            team_request("yadgar:team:a"),
+            format!("SETTING_SCOPE_TEAM/yadgar:team:a/{OWNER_READS_OWN_RECORD}"),
+        ),
+    ] {
+        let log = {
+            let (_guard, buf) = capturing();
+            svc.set_inherited_setting(Request::new(SetInheritedSettingRequest {
+                unverified_actor: actor("yadgar:user:actor-nine"),
+                ..req
+            }))
+            .await
+            .expect("write one level");
+            rendered(&buf)
+        };
+        assert_attributed(
+            &log,
+            "SetInheritedSetting",
+            "yadgar:user:actor-nine",
+            &target,
+            "yadgar:team:a",
+        );
+    }
+}
+
+#[tokio::test]
+async fn set_inherited_setting_without_a_usable_actor_records_it_as_unattributed() {
+    let svc = fresh("iam_db_test_actor_inherited_setting_none").await;
+    seed_team(&svc, "yadgar:team:a").await;
+
+    for (i, unverified_actor) in [None, Some(UnverifiedActor::default())]
+        .into_iter()
+        .enumerate()
+    {
+        let log = {
+            let (_guard, buf) = capturing();
+            svc.set_inherited_setting(Request::new(SetInheritedSettingRequest {
+                unverified_actor,
+                ..team_request("yadgar:team:a")
+            }))
+            .await
+            .expect("an actor decides nothing, including whether this succeeds");
+            rendered(&buf)
+        };
+        assert_unattributed(&log, "SetInheritedSetting", i);
+    }
+}
+
+/// A request carrying the `x-yadgar-request-id` the handlers read.
+fn with_request_id<T>(message: T, request_id: &str) -> Request<T> {
+    let mut req = Request::new(message);
+    req.metadata_mut().insert(
+        "x-yadgar-request-id",
+        request_id.parse().expect("an ascii request id"),
+    );
+    req
+}
+
+/// The one actor record in `log`, so a field asserted on it cannot be satisfied
+/// by some other line — the CallRecord carries a request id of its own.
+fn actor_line(log: &str) -> &str {
+    let mut lines = log
+        .lines()
+        .filter(|l| l.contains("an administrative write carrying a self-asserted actor"));
+    let line = lines.next().expect("one actor record");
+    assert!(lines.next().is_none(), "exactly one actor record: {log}");
+    line
+}
+
+/// Assert the call's request id and its verb are on the actor record itself.
+fn assert_request_id(log: &str, rpc: &str, request_id: &str) {
+    let line = actor_line(log);
+    assert!(
+        line.contains(&format!(r#"request_id="{request_id}""#)),
+        "{rpc}'s actor record must carry its call's request id: {line}"
+    );
+    assert!(
+        line.contains(&format!(r#"rpc="{rpc}""#)),
+        "{rpc}'s actor record must name its verb: {line}"
+    );
+}
+
+#[tokio::test]
+async fn every_actor_record_carries_the_request_id_of_its_call() {
+    // THE JOIN TO THE CALLRECORD. The actor line records an ATTEMPT and the
+    // CallRecord records the OUTCOME; `request_id` is the only key both carry,
+    // so a line without it cannot be matched to whether the write happened.
+    // All nine verbs, each with its own id, so a verb that dropped it — or
+    // logged another call's — fails by name.
+    let svc = fresh("iam_db_test_actor_request_id").await;
+    let (person, credential) = seed(&svc, &[91u8; 32], &[92u8; 32]).await;
+    seed_team(&svc, "yadgar:team:a").await;
+    let who = actor("yadgar:user:actor-ten");
+
+    macro_rules! check {
+        ($rpc:literal, $call:expr) => {{
+            let log = {
+                let (_guard, buf) = capturing();
+                $call.await.expect($rpc);
+                rendered(&buf)
+            };
+            assert_request_id(&log, $rpc, concat!("rid-", $rpc));
+        }};
+    }
+
+    check!(
+        "CreateUser",
+        svc.create_user(with_request_id(
+            CreateUserRequest {
+                external_id_blind_index: vec![93u8; 32],
+                external_id_ciphertext: b"ciphertext".to_vec(),
+                display_name_ciphertext: b"ciphertext".to_vec(),
+                unverified_actor: who.clone(),
+                ..Default::default()
+            },
+            "rid-CreateUser",
+        ))
+    );
+    check!(
+        "CreateEnrolment",
+        svc.create_enrolment(with_request_id(
+            CreateEnrolmentRequest {
+                user_id: person.clone(),
+                secret_hash: vec![94u8; 32],
+                expires_at: Some(at(3600)),
+                unverified_actor: who.clone(),
+                ..Default::default()
+            },
+            "rid-CreateEnrolment",
+        ))
+    );
+    check!(
+        "SetUserAdmin",
+        svc.set_user_admin(with_request_id(
+            SetUserAdminRequest {
+                user_id: person.clone(),
+                is_admin: true,
+                unverified_actor: who.clone(),
+                ..Default::default()
+            },
+            "rid-SetUserAdmin",
+        ))
+    );
+    check!(
+        "CreateCredential",
+        svc.create_credential(with_request_id(
+            CreateCredentialRequest {
+                user_id: person.clone(),
+                token_hash: vec![95u8; 32],
+                label: "laptop".into(),
+                unverified_actor: who.clone(),
+                ..Default::default()
+            },
+            "rid-CreateCredential",
+        ))
+    );
+    check!(
+        "RevokeCredential",
+        svc.revoke_credential(with_request_id(
+            RevokeCredentialRequest {
+                credential_id: credential.clone(),
+                unverified_actor: who.clone(),
+                ..Default::default()
+            },
+            "rid-RevokeCredential",
+        ))
+    );
+    check!(
+        "SetRateLimitOverride",
+        svc.set_rate_limit_override(with_request_id(
+            SetRateLimitOverrideRequest {
+                unverified_actor: who.clone(),
+                ..rate_limit_request(&person)
+            },
+            "rid-SetRateLimitOverride",
+        ))
+    );
+    check!(
+        "AddTeamMember",
+        svc.add_team_member(with_request_id(
+            AddTeamMemberRequest {
+                team_id: "yadgar:team:a".into(),
+                user_id: person.clone(),
+                unverified_actor: who.clone(),
+                ..Default::default()
+            },
+            "rid-AddTeamMember",
+        ))
+    );
+    check!(
+        "RemoveTeamMember",
+        svc.remove_team_member(with_request_id(
+            RemoveTeamMemberRequest {
+                team_id: "yadgar:team:a".into(),
+                user_id: person.clone(),
+                unverified_actor: who.clone(),
+                ..Default::default()
+            },
+            "rid-RemoveTeamMember",
+        ))
+    );
+    check!(
+        "SetInheritedSetting",
+        svc.set_inherited_setting(with_request_id(
+            SetInheritedSettingRequest {
+                unverified_actor: who.clone(),
+                ..team_request("yadgar:team:a")
+            },
+            "rid-SetInheritedSetting",
+        ))
+    );
+}
+
+#[tokio::test]
+async fn an_actor_record_is_written_for_an_attempt_the_store_refuses() {
+    // `record_actor`'s doc: the line records an ATTEMPT, never an outcome. A
+    // credential for a person who does not exist is refused NOT_FOUND, and the
+    // attribution is still on the log, joined by request id to a CallRecord
+    // that says the write did not happen.
+    let svc = fresh("iam_db_test_actor_attempt").await;
+
+    let log = {
+        let (_guard, buf) = capturing();
+        let err = svc
+            .create_credential(with_request_id(
+                CreateCredentialRequest {
+                    user_id: "yadgar:user:nobody".into(),
+                    token_hash: vec![96u8; 32],
+                    label: "laptop".into(),
+                    unverified_actor: actor("yadgar:user:actor-eleven"),
+                    ..Default::default()
+                },
+                "rid-refused",
+            ))
+            .await
+            .expect_err("no such person");
+        assert_eq!(err.code(), tonic::Code::NotFound);
+        rendered(&buf)
+    };
+
+    assert_request_id(&log, "CreateCredential", "rid-refused");
+    assert!(
+        actor_line(&log).contains(r#"unverified_actor="yadgar:user:actor-eleven""#),
+        "the refused attempt is still attributed: {log}"
+    );
+}
+
+#[tokio::test]
+async fn a_caller_supplied_segment_is_escaped_so_a_target_cannot_be_forged() {
+    // A caller-supplied segment is logged BEFORE validation, and nothing in this
+    // contract forbids a `/` in a module name or an id, so an unescaped one
+    // could make one bucket's target read as another's. `%` is escaped FIRST,
+    // or a literal `%2F` would be indistinguishable from an escaped `/`.
+    let svc = fresh("iam_db_test_actor_segment_escape").await;
+    let (person, _) = seed(&svc, &[97u8; 32], &[98u8; 32]).await;
+
+    for (module, rendered_module) in [("a/b", "a%2Fb"), ("a%2Fb", "a%252Fb")] {
+        let log = {
+            let (_guard, buf) = capturing();
+            // The outcome is not this test's subject: the line records the
+            // attempt whatever the store then does with the module.
+            let _ = svc
+                .set_rate_limit_override(Request::new(SetRateLimitOverrideRequest {
+                    module: module.into(),
+                    unverified_actor: actor("yadgar:user:actor-twelve"),
+                    ..rate_limit_request(&person)
+                }))
+                .await;
+            rendered(&buf)
+        };
+        let target = format!("{person}/{rendered_module}/KIND_READ/set");
+        assert!(
+            actor_line(&log).contains(&format!(r#"target="{target}""#)),
+            "module {module:?} must be logged as {rendered_module}: {log}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_caller_supplied_string_reaches_the_actor_record_capped() {
+    // A request may be 4 MB, and the actor id and every target segment are the
+    // caller's own strings. Each is cut at 256 characters with a `…` marker,
+    // so the line stays bounded and says that it was cut.
+    let svc = fresh("iam_db_test_actor_cap").await;
+    let (person, _) = seed(&svc, &[99u8; 32], &[100u8; 32]).await;
+    let long_module = "m".repeat(1000);
+    let long_actor = "y".repeat(1000);
+
+    let log = {
+        let (_guard, buf) = capturing();
+        let _ = svc
+            .set_rate_limit_override(Request::new(SetRateLimitOverrideRequest {
+                module: long_module,
+                unverified_actor: actor(&long_actor),
+                ..rate_limit_request(&person)
+            }))
+            .await;
+        rendered(&buf)
+    };
+    let line = actor_line(&log);
+
+    let module_cut = format!("{}…", "m".repeat(256));
+    assert!(
+        line.contains(&format!(r#"target="{person}/{module_cut}/KIND_READ/set""#)),
+        "the module segment must be cut at 256 characters and marked: {line}"
+    );
+    assert!(
+        !line.contains(&"m".repeat(257)),
+        "no more than 256 characters of the module reach the log: {line}"
+    );
+    let actor_cut = format!("{}…", "y".repeat(256));
+    assert!(
+        line.contains(&format!(r#"unverified_actor="{actor_cut}""#)),
+        "the actor id must be cut at 256 characters and marked: {line}"
+    );
+    assert!(
+        !line.contains(&"y".repeat(257)),
+        "no more than 256 characters of the actor id reach the log: {line}"
+    );
 }
 
 // ---------------------------------------------------------------------------

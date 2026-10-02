@@ -125,6 +125,7 @@ impl IamDb {
     pub(super) async fn mint_credential(
         &self,
         r: CreateCredentialRequest,
+        rid: &str,
         call: Call,
     ) -> Result<Response<CreateCredentialResponse>, Status> {
         // `idempotency` IS DISCARDED HERE, AND A RETRY IS NOT A REPLAY. Measured
@@ -160,6 +161,18 @@ impl IamDb {
         // account nobody expects to act again; the constraint proves existence
         // and never liveness, which is this handler's own argument above.
         let id = format!("yadgar:credential:{}", uuid::Uuid::now_v7());
+
+        // ADR-0534's RECORDING HALF, AFTER the id on `CreateUser`'s argument:
+        // minting it cannot fail, and the credential id is what joins this
+        // record to a later `RevokeCredential`'s.
+        let target = format!("{}/{}", seg(&r.user_id), id);
+        record_actor(
+            rid,
+            r.unverified_actor.as_ref(),
+            "CreateCredential",
+            &target,
+        );
+
         let done = sqlx::query(
             // FROM_UNIXTIME, because the contract carries epoch SECONDS and the
             // column is a TIMESTAMP. Binding the integer directly makes MariaDB
@@ -222,8 +235,17 @@ impl IamDb {
     pub(super) async fn revoke(
         &self,
         r: RevokeCredentialRequest,
+        rid: &str,
         call: Call,
     ) -> Result<Response<RevokeCredentialResponse>, Status> {
+        // ADR-0534's RECORDING HALF. The target is the credential revoked.
+        record_actor(
+            rid,
+            r.unverified_actor.as_ref(),
+            "RevokeCredential",
+            &seg(&r.credential_id),
+        );
+
         // A tombstone, not a delete (D26). Idempotent by the WHERE clause:
         // revoking twice leaves the first timestamp, so the record still says
         // when access actually ended rather than when someone last asked.

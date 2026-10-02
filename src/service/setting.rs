@@ -22,9 +22,15 @@ impl IamDb {
     pub(super) async fn store_setting(
         &self,
         r: SetInheritedSettingRequest,
+        rid: &str,
         call: Call,
     ) -> Result<Response<SetInheritedSettingResponse>, Status> {
-        record_actor(r.unverified_actor.as_ref(), "SetInheritedSetting", &r.name);
+        record_actor(
+            rid,
+            r.unverified_actor.as_ref(),
+            "SetInheritedSetting",
+            &setting_target(&r),
+        );
 
         let scope = match check_inherited_setting(&r) {
             Ok(scope) => scope,
@@ -346,4 +352,18 @@ async fn answer(
     Ok(Response::new(SetInheritedSettingResponse {
         setting: Some(setting),
     }))
+}
+
+/// `SetInheritedSetting`'s `record_actor` target: `{scope}/{team_id}/{name}`.
+///
+/// `r.name` alone is effectively constant, so the scope and the team are what
+/// say WHICH policy changed. Rendered raw and BEFORE `check_inherited_setting`,
+/// so the line records the attempt: an absent `team_id` is the empty segment,
+/// and an unrecognised scope is its number.
+fn setting_target(r: &SetInheritedSettingRequest) -> String {
+    let scope = SettingScope::try_from(r.scope)
+        .map(|s| s.as_str_name().to_string())
+        .unwrap_or_else(|_| r.scope.to_string());
+    let team = seg(r.team_id.as_deref().unwrap_or_default());
+    format!("{scope}/{team}/{}", seg(&r.name))
 }
