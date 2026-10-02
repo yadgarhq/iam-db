@@ -24,6 +24,7 @@ use yadgar_iam_db::pb::yadgar::common::v1::{
 use yadgar_iam_db::pb::yadgar::iamdb::v1::iam_db_service_server::IamDbService as _;
 use yadgar_iam_db::pb::yadgar::iamdb::v1::*;
 use yadgar_iam_db::{schema, service::IamDb};
+use yadgar_telemetry::record;
 
 fn dsn() -> String {
     std::env::var("YADGAR_TEST_DSN")
@@ -4913,6 +4914,26 @@ fn assert_request_id(log: &str, rpc: &str, request_id: &str) {
     );
 }
 
+/// Captures every `CallRecord` line `yadgar_telemetry::record::emit` writes,
+/// for as long as the guard `record::set_sink` hands back lives — the
+/// telemetry-side twin of [`capturing`], which captures the tracing log.
+///
+/// Needed for exactly one test: proving the actor line and the CallRecord
+/// carry the IDENTICAL `request_id`, which means reading both, not just the
+/// log `capturing` already reaches.
+#[derive(Clone, Default)]
+struct RecordCapture(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+impl yadgar_telemetry::record::Sink for RecordCapture {
+    fn write_record(&self, line: &str) -> std::io::Result<()> {
+        self.0
+            .lock()
+            .expect("the capture buffer")
+            .push(line.to_string());
+        Ok(())
+    }
+}
+
 #[tokio::test]
 async fn every_actor_record_carries_the_request_id_of_its_call() {
     // THE JOIN TO THE CALLRECORD. The actor line records an ATTEMPT and the
@@ -5149,6 +5170,62 @@ async fn a_caller_supplied_string_reaches_the_actor_record_capped() {
     assert!(
         !line.contains(&"y".repeat(257)),
         "no more than 256 characters of the actor id reach the log: {line}"
+    );
+}
+
+#[tokio::test]
+async fn a_long_request_id_is_capped_identically_on_the_actor_line_and_the_call_record() {
+    // `request_id` is the ONE field `request_id_of` hands to two independent
+    // consumers from a single read of `x-yadgar-request-id`: `record_actor`'s
+    // log line, and `tel`'s `Scope`, which reaches the CallRecord through
+    // `Call::start`'s span and `record::Builder::scope`. Capping it anywhere
+    // other than that one shared read point risks the two diverging — which
+    // breaks the very join `request_id` exists for. This asserts both sides
+    // of the join see the IDENTICAL capped string, not just that the log does.
+    let svc = fresh("iam_db_test_actor_request_id_cap").await;
+    let long_rid = "z".repeat(1000);
+    let expected_cut = format!("{}…", "z".repeat(256));
+
+    let records = RecordCapture::default();
+    let log = {
+        let (_guard, buf) = capturing();
+        let _sink_guard = record::set_sink(std::sync::Arc::new(records.clone()));
+        let _ = svc
+            .create_user(with_request_id(
+                CreateUserRequest {
+                    external_id_blind_index: vec![95u8; 32],
+                    external_id_ciphertext: b"ciphertext".to_vec(),
+                    display_name_ciphertext: b"ciphertext".to_vec(),
+                    unverified_actor: actor("yadgar:user:actor-rid-cap"),
+                    ..Default::default()
+                },
+                &long_rid,
+            ))
+            .await;
+        rendered(&buf)
+    };
+
+    assert_request_id(&log, "CreateUser", &expected_cut);
+    assert!(
+        !actor_line(&log).contains(&"z".repeat(257)),
+        "no more than 256 characters of the request id reach the actor line: {log}"
+    );
+
+    let call_records = records.0.lock().expect("the capture buffer");
+    assert_eq!(
+        call_records.len(),
+        1,
+        "exactly one CallRecord for this call"
+    );
+    assert!(
+        call_records[0].contains(&format!(r#""request_id":"{expected_cut}""#)),
+        "the CallRecord must carry the SAME capped request id as the actor line: {}",
+        call_records[0]
+    );
+    assert!(
+        !call_records[0].contains(&"z".repeat(257)),
+        "no more than 256 characters of the request id reach the CallRecord: {}",
+        call_records[0]
     );
 }
 

@@ -177,12 +177,36 @@ impl IamDb {
 /// Metadata rather than a contract change because the contract is already tagged
 /// and published, and because a correlation id is transport-level context rather
 /// than part of what is being asked.
+///
+/// **CAPPED HERE, AND ONLY HERE, WITH [`capped`] — THE SAME BOUND AND MARKER
+/// EVERY OTHER CALLER STRING ON THIS BOUNDARY GETS.** A header is bounded only
+/// by the transport's own header-size limit — `h2`'s own default is 16 MiB
+/// ("a sane default taken from golang http2"), and this service sets no
+/// `http2_max_header_list_size` of its own — and this value reaches TWO places
+/// from the ONE `String` this function returns: the actor record's
+/// `request_id` field, and `tel`'s `Scope`, which carries it into
+/// `Call::start`'s span and the `CallRecord` a collector joins the actor line
+/// to. Capping at either destination instead of here would let the two
+/// diverge on a caller long enough to be cut differently in each place,
+/// breaking the very join `request_id` exists for. Capping here instead of
+/// refusing the call keeps D67's rule that telemetry emission must never fail
+/// a call: a correlation id is transport-level context rather than part of
+/// what is being asked, so a malformed one must not be able to fail a request
+/// over it.
+///
+/// Measured, not assumed: `gateway::request_id` (D67) mints this id as a
+/// UUIDv7, but the gateway does not put it on `x-yadgar-request-id` today —
+/// `iam` forwards only a header it received, so on the gateway→iam→iam-db
+/// path the header is absent and `request_id` is empty. Any value long
+/// enough to be cut here came from a direct caller, not from the gateway.
+/// Propagating the gateway's id onto this header is booked separately
+/// (ledger 1248).
 fn request_id_of<T>(req: &Request<T>) -> String {
     req.metadata()
         .get("x-yadgar-request-id")
         .and_then(|v| v.to_str().ok())
+        .map(|v| capped(v).into_owned())
         .unwrap_or_default()
-        .to_string()
 }
 
 /// Telemetry scope for a hop that has no `Scope`.
@@ -234,8 +258,11 @@ fn tel(request_id: String, user_id: &str) -> yadgar_telemetry::observe::Scope {
 /// are; neither can hold a `/`.
 ///
 /// **EVERY CALLER STRING IS CAPPED** at [`ACTOR_RECORD_CAP`] characters, with
-/// `…` marking a cut: each target segment inside [`seg`], and the actor id
-/// here. A request can be 4 MB, and none of it should reach a log line whole.
+/// `…` marking a cut: each target segment inside [`seg`], the actor id here,
+/// and `request_id` itself inside [`request_id_of`] — the one caller string on
+/// this line that is also read by `tel` for the `CallRecord`, capped at its
+/// single point of entry so both consumers agree. A request can be 4 MB, and
+/// none of it should reach a log line whole.
 ///
 /// | RPC                    | `target`                                       |
 /// | ---------------------- | ---------------------------------------------- |
@@ -294,11 +321,14 @@ fn record_actor(request_id: &str, actor: Option<&UnverifiedActor>, rpc: &str, ta
     );
 }
 
-/// How many of a caller's characters one string may put on an actor record.
+/// How many of a caller's characters one string may put on an actor record —
+/// and, since [`request_id_of`] caps with this same function, on the
+/// `request_id` the actor record and the `CallRecord` both carry.
 ///
-/// A request may be 4 MB, and the actor id and every caller-supplied target
-/// segment are the caller's own strings, logged before anything validates
-/// them. Past this many characters the rest is cut and `…` marks the cut.
+/// A request may be 4 MB, and a header can run to the transport's own limit:
+/// the actor id, every caller-supplied target segment, and `x-yadgar-request-id`
+/// are all the caller's own strings, read before anything validates them. Past
+/// this many characters the rest is cut and `…` marks the cut.
 const ACTOR_RECORD_CAP: usize = 256;
 
 /// `s` cut to [`ACTOR_RECORD_CAP`] characters, with `…` appended if it was cut.
