@@ -284,6 +284,10 @@ spec:
               value: {{ .Values.database.maxConnections | quote }}
             - name: DB_ENGINE_MAX_CONNECTIONS
               value: {{ .Values.database.engineMaxConnections | quote }}
+            # The migration lock's wait (ledger 814). No default behind it in the
+            # binary; values.yaml carries the bound and its arithmetic.
+            - name: DB_MIGRATION_LOCK_TIMEOUT_SECONDS
+              value: {{ .Values.database.migrationLockTimeoutSeconds | quote }}
             # THE NUMBER THE AUTOSCALER MAY REACH, not the number running now.
             # It is the multiplier in the headroom check above, so wiring
             # replicaCount while KEDA scales to autoscaling.maxReplicas would

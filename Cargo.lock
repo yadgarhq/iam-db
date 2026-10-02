@@ -2738,7 +2738,7 @@ dependencies = [
 [[package]]
 name = "yadgar-store"
 version = "0.1.0"
-source = "git+https://github.com/yadgarhq/store.git?tag=v0.2.13#7dc913bbd0f4b05c4595e4fb2d07c1bc76f09062"
+source = "git+https://github.com/yadgarhq/store.git?tag=v0.3.0#e0a06bf5955d6ef15068132e3055596022cae4d0"
 dependencies = [
  "sqlx",
  "thiserror",

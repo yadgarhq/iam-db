@@ -199,12 +199,27 @@ pub enum BootError {
     #[error("{0}")]
     Missing(String),
 
+    /// The migration lock's wait is set and unusable (ledger 814, ADR-0837).
+    /// Absent and empty are [`BootError::Missing`]; this is a value that is
+    /// there and cannot be a wait. It names the variable AND the chart key,
+    /// because ADR-0569 asks a refusal to say where the knob is set.
+    #[error(
+        "DB_MIGRATION_LOCK_TIMEOUT_SECONDS is {value:?}, which is not a usable migration \
+         lock wait: {reason}. Set the chart value database.migrationLockTimeoutSeconds to \
+         a whole number of seconds from 1 to 590; chart/values.schema.json carries the \
+         bound and chart/values.yaml its arithmetic."
+    )]
+    MigrationLockWait { value: String, reason: String },
+
     #[error(transparent)]
     Pool(#[from] PoolError),
 
     #[error(transparent)]
     Int(#[from] std::num::ParseIntError),
 }
+
+mod lock;
+pub use lock::{migration_lock, MIGRATION_LOCK_TIMEOUT_CHART_KEY, MIGRATION_LOCK_TIMEOUT_KEY};
 
 #[cfg(test)]
 mod tests;

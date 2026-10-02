@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "values",
+  "$comment": "DELIBERATELY OPEN: this schema bounds ONE knob, database.migrationLockTimeoutSeconds (ledger 814, ADR-0837), and declares nothing else, so every other value stays exactly as unvalidated as it was. A closed schema covering the whole chart is ledger 990's job, not this one's. The bound's arithmetic is in chart/values.yaml beside the value.",
+  "type": "object",
+  "properties": {
+    "database": {
+      "type": "object",
+      "properties": {
+        "migrationLockTimeoutSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 590,
+          "description": "Seconds a replica waits for another one's migration before failing its boot. Rendered as DB_MIGRATION_LOCK_TIMEOUT_SECONDS, read with no fallback. 1 because GET_LOCK with 0 never waits and with a negative wait never takes the lock; 590 because the Deployment's default progressDeadlineSeconds is 600 and the readiness ramp is 6s."
+        }
+      }
+    }
+  }
+}

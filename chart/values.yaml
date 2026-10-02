@@ -162,6 +162,30 @@ database:
   maxConnections: 8
   engineMaxConnections: 151
 
+  # HOW LONG A REPLICA WAITS FOR ANOTHER ONE'S MIGRATION, in seconds, before it
+  # fails its boot. Rendered as DB_MIGRATION_LOCK_TIMEOUT_SECONDS and read with
+  # NO fallback (ADR-0569, ADR-0837): `yadgar-store` v0.3.0 deleted the 60 it
+  # used to compile in, so this line is now the only place the wait is stated.
+  # Delete it, or null it, and the pod refuses to start naming both the
+  # variable and this key.
+  #
+  # Size it to this installation's slowest migration: two replicas start at
+  # once (D55), one migrates under the lock and the other waits this long.
+  #
+  # THE BOUND IS 1..590, enforced by chart/values.schema.json:
+  #   - minimum 1, because MariaDB 11.8 answers GET_LOCK with a negative wait
+  #     with NULL at once and with 0 does not wait at all, so the second replica
+  #     would fail every rollout that migrates (measured; `store` refuses both);
+  #   - maximum 590 = the Deployment's default progressDeadlineSeconds, 600
+  #     (this chart sets none), less the readiness ramp of the probe below:
+  #     initialDelaySeconds 2 + periodSeconds 2 x failureThreshold 2 = 6s, so
+  #     594, rounded down to 590. A longer wait would let the rollout be marked
+  #     failed while a replica is still legitimately waiting. 590 is a ceiling,
+  #     not a target: the migration itself and the probe also spend that budget.
+  #     (The Argo sync timeout, 25200s, is far above this and not the binding
+  #     bound.)
+  migrationLockTimeoutSeconds: 60
+
   # ── THE ENGINE ITSELF, WHICH THIS CHART CAN NOW CREATE ─────────────────────
   #
   # OFF, AND THAT IS NOT A PREFERENCE. `k8s.mariadb.com/v1alpha1` is a CRD-backed

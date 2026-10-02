@@ -237,6 +237,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Every default, every refusal and the transport mode live in `boot`, which
     // a test can reach. This line is the whole of the configuration decision.
     let config = boot::pool_config(|key| std::env::var(key).ok())?;
+    // The migration lock's wait, read beside the pool's knobs so an absent one
+    // refuses before anything opens (ledger 814, ADR-0837). `store` has no
+    // default for it any more.
+    let migration_lock = boot::migration_lock(|key| std::env::var(key).ok())?;
 
     // 0. THE TRANSPORT THIS SERVICE LISTENS ON, before anything else runs. A
     //    missing certificate, an unreadable one, a file holding no certificate
@@ -320,7 +324,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. MIGRATE. Refuses outright if the database is ahead of this binary.
     let pool = yadgar_store::pool::connect(&config, &secret).await?;
-    let applied = migrate::apply(&pool, &schema::migrations()?).await?;
+    let applied = migrate::apply(&pool, &schema::migrations()?, &migration_lock).await?;
     tracing::info!(applied, "schema at migration {applied}");
 
     // 3. SERVE. Only now.
