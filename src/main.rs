@@ -240,7 +240,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The migration lock's wait, read beside the pool's knobs so an absent one
     // refuses before anything opens (ledger 814, ADR-0837). `store` has no
     // default for it any more.
-    let migration_lock = boot::migration_lock(|key| std::env::var(key).ok())?;
+    // `.to_string()` so the refusal reaches the operator as its sentence, which
+    // names the variable and the chart key, rather than as a Debug-printed
+    // `MigrationLockWait { .. }` through `main`'s `Box<dyn Error>`.
+    let migration_lock =
+        boot::migration_lock(|key| std::env::var(key).ok()).map_err(|e| e.to_string())?;
 
     // 0. THE TRANSPORT THIS SERVICE LISTENS ON, before anything else runs. A
     //    missing certificate, an unreadable one, a file holding no certificate
