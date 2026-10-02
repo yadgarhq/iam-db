@@ -3029,6 +3029,95 @@ async fn every_team_override_comes_back_including_teams_the_caller_is_not_in() {
 }
 
 #[tokio::test]
+async fn team_ids_and_team_override_answer_different_questions_in_one_resolve() {
+    // LEDGER 732. The two tests above each hold ONE side: the membership test
+    // seeds no override, and the override test asserts `team_ids.is_empty()`.
+    // Neither sees both populated in one answer, so a change that coupled them —
+    // narrowing the overrides to the caller's teams, or widening the teams to
+    // those holding an override — passed both.
+    //
+    // THE CORRECT COMBINED ANSWER, and why. The two fields are INDEPENDENT.
+    // `team_ids` is the caller's memberships and only those (D12; the membership
+    // query filters by `user_id`). `team_override` is EVERY team's override,
+    // unfiltered and unresolved, because the team that matters is the RECORD'S
+    // and never the caller's (ADR-0522; `yadgar.common.v1.InheritedSetting`;
+    // `owner_reads_own_record` in `src/service/credential.rs`). A team with no
+    // override has no entry, membership or not.
+    //
+    // MUTATIONS THIS CATCHES: restricting the override query to the caller's
+    // teams (C disappears), and dropping the membership `WHERE user_id = ?`
+    // (C leaks into `team_ids`).
+    let svc = fresh("iam_db_test_teams_and_overrides").await;
+    let (me, _) = seed(&svc, &[71u8; 32], &[71u8; 32]).await;
+    let (other, _) = seed(&svc, &[72u8; 32], &[72u8; 32]).await;
+
+    for team in ["yadgar:team:a", "yadgar:team:b", "yadgar:team:c"] {
+        seed_team(&svc, team).await;
+    }
+    for (team, user) in [
+        ("yadgar:team:a", &me),
+        ("yadgar:team:b", &me),
+        ("yadgar:team:c", &other),
+    ] {
+        svc.add_team_member(Request::new(AddTeamMemberRequest {
+            team_id: team.into(),
+            user_id: user.clone(),
+            ..Default::default()
+        }))
+        .await
+        .expect("add member");
+    }
+    // A: the caller's team, with an override. B: the caller's team, without one.
+    // C: NOT the caller's team, with an override. Different values, so a swap
+    // between the two entries is visible too.
+    for (team, value) in [
+        ("yadgar:team:a", SettingValue::On),
+        ("yadgar:team:c", SettingValue::Off),
+    ] {
+        sqlx::query(
+            "INSERT INTO iam_team_setting_override (name, team_id, value) VALUES (?, ?, ?)",
+        )
+        .bind(OWNER_READS_OWN_RECORD)
+        .bind(team)
+        .bind(value as i32)
+        .execute(svc.pool())
+        .await
+        .expect("seed override");
+    }
+
+    let got = svc
+        .resolve_credential(Request::new(ResolveCredentialRequest {
+            token_hash: vec![71u8; 32],
+        }))
+        .await
+        .expect("resolve")
+        .into_inner();
+
+    // SORTED, because the membership query carries no ORDER BY.
+    let mut team_ids = got.team_ids.clone();
+    team_ids.sort();
+    assert_eq!(
+        team_ids,
+        vec!["yadgar:team:a".to_string(), "yadgar:team:b".to_string()],
+        "team_ids is the caller's memberships: B without an override is in, C with one is out"
+    );
+
+    let setting = got
+        .owner_reads_own_record
+        .expect("the setting travels with the identity");
+    let expected: std::collections::HashMap<String, i32> = [
+        ("yadgar:team:a".to_string(), SettingValue::On as i32),
+        ("yadgar:team:c".to_string(), SettingValue::Off as i32),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        setting.team_override, expected,
+        "team_override is every stated override: C outside the caller's teams is in, B without one is out"
+    );
+}
+
+#[tokio::test]
 async fn an_absent_organisation_row_is_unspecified_and_never_off() {
     // SETTING_VALUE_UNSPECIFIED IS NOT A DEFAULT AND IS NEVER A VALUE. A store
     // with no row states no policy, and the enforcing -db refuses rather than
