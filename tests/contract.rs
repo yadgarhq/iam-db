@@ -5133,7 +5133,7 @@ async fn a_caller_supplied_segment_is_escaped_so_a_target_cannot_be_forged() {
 #[tokio::test]
 async fn a_caller_supplied_string_reaches_the_actor_record_capped() {
     // A request may be 4 MB, and the actor id and every target segment are the
-    // caller's own strings. Each is cut at 256 characters with a `…` marker,
+    // caller's own strings. Each is cut at 256 characters with a `...` marker,
     // so the line stays bounded and says that it was cut.
     let svc = fresh("iam_db_test_actor_cap").await;
     let (person, _) = seed(&svc, &[99u8; 32], &[100u8; 32]).await;
@@ -5153,7 +5153,7 @@ async fn a_caller_supplied_string_reaches_the_actor_record_capped() {
     };
     let line = actor_line(&log);
 
-    let module_cut = format!("{}…", "m".repeat(256));
+    let module_cut = format!("{}...", "m".repeat(256));
     assert!(
         line.contains(&format!(r#"target="{person}/{module_cut}/KIND_READ/set""#)),
         "the module segment must be cut at 256 characters and marked: {line}"
@@ -5162,7 +5162,7 @@ async fn a_caller_supplied_string_reaches_the_actor_record_capped() {
         !line.contains(&"m".repeat(257)),
         "no more than 256 characters of the module reach the log: {line}"
     );
-    let actor_cut = format!("{}…", "y".repeat(256));
+    let actor_cut = format!("{}...", "y".repeat(256));
     assert!(
         line.contains(&format!(r#"unverified_actor="{actor_cut}""#)),
         "the actor id must be cut at 256 characters and marked: {line}"
@@ -5184,7 +5184,7 @@ async fn a_long_request_id_is_capped_identically_on_the_actor_line_and_the_call_
     // of the join see the IDENTICAL capped string, not just that the log does.
     let svc = fresh("iam_db_test_actor_request_id_cap").await;
     let long_rid = "z".repeat(1000);
-    let expected_cut = format!("{}…", "z".repeat(256));
+    let expected_cut = format!("{}...", "z".repeat(256));
 
     let records = RecordCapture::default();
     let log = {
