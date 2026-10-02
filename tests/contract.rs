@@ -4454,7 +4454,11 @@ async fn set_user_admin_without_a_usable_actor_records_it_as_unattributed() {
 // ---------------------------------------------------------------------------
 
 /// The two claims every unattributed round makes, shared by the verbs below.
-fn assert_unattributed(log: &str, round: usize) {
+fn assert_unattributed(log: &str, rpc: &str, round: usize) {
+    assert!(
+        log.contains(&format!(r#"rpc="{rpc}""#)),
+        "round {round}: the record must name the verb {rpc}: {log}"
+    );
     assert!(
         log.contains(r#"unverified_actor="<unattributed>""#),
         "round {round}: an unusable actor is recorded as unattributed: {log}"
@@ -4467,7 +4471,11 @@ fn assert_unattributed(log: &str, round: usize) {
 
 /// The actor reached the log, the target is named in full, and the person the
 /// act was done to is never recorded as the one who asked.
-fn assert_attributed(log: &str, actor: &str, target: &str, done_to: &str) {
+fn assert_attributed(log: &str, rpc: &str, actor: &str, target: &str, done_to: &str) {
+    assert!(
+        log.contains(&format!(r#"rpc="{rpc}""#)),
+        "the record must name the verb {rpc}: {log}"
+    );
     assert!(
         log.contains(&format!(r#"unverified_actor="{actor}""#)),
         "the actor must reach the log: {log}"
@@ -4510,7 +4518,22 @@ async fn create_credential_records_the_actor_and_names_the_holder_and_the_creden
     // `{user_id}/{credential_id}`: the credential id is what joins this record
     // to a later `RevokeCredential`'s.
     let target = format!("{holder}/{}", minted.credential_id);
-    assert_attributed(&log, "yadgar:user:actor-four", &target, &holder);
+    assert_attributed(
+        &log,
+        "CreateCredential",
+        "yadgar:user:actor-four",
+        &target,
+        &holder,
+    );
+
+    // D72: this boundary never logs a token. `token_hash` is 32 bytes of 43, so
+    // its hex is `2b2b…` and its `Debug` is `[43, 43, …`; neither may appear.
+    for rendering in ["2b2b2b2b", "2B2B2B2B", "43, 43, 43"] {
+        assert!(
+            !log.contains(rendering),
+            "the actor record must carry no rendering of the token hash ({rendering}): {log}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -4536,7 +4559,7 @@ async fn create_credential_without_a_usable_actor_records_it_as_unattributed() {
             .expect("an actor decides nothing, including whether this succeeds");
             rendered(&buf)
         };
-        assert_unattributed(&log, i);
+        assert_unattributed(&log, "CreateCredential", i);
     }
 }
 
@@ -4557,7 +4580,13 @@ async fn revoke_credential_records_the_actor_and_names_the_credential() {
         rendered(&buf)
     };
 
-    assert_attributed(&log, "yadgar:user:actor-five", &credential, &holder);
+    assert_attributed(
+        &log,
+        "RevokeCredential",
+        "yadgar:user:actor-five",
+        &credential,
+        &holder,
+    );
 }
 
 #[tokio::test]
@@ -4582,7 +4611,7 @@ async fn revoke_credential_without_a_usable_actor_records_it_as_unattributed() {
             .expect("an actor decides nothing, including whether this succeeds");
             rendered(&buf)
         };
-        assert_unattributed(&log, i);
+        assert_unattributed(&log, "RevokeCredential", i);
     }
 }
 
@@ -4628,7 +4657,13 @@ async fn set_rate_limit_override_records_the_actor_and_names_the_bucket() {
         };
 
         let target = format!("{person}/recall/KIND_READ/{verb}");
-        assert_attributed(&log, "yadgar:user:actor-six", &target, &person);
+        assert_attributed(
+            &log,
+            "SetRateLimitOverride",
+            "yadgar:user:actor-six",
+            &target,
+            &person,
+        );
     }
 }
 
@@ -4651,7 +4686,7 @@ async fn set_rate_limit_override_without_a_usable_actor_records_it_as_unattribut
             .expect("an actor decides nothing, including whether this succeeds");
             rendered(&buf)
         };
-        assert_unattributed(&log, i);
+        assert_unattributed(&log, "SetRateLimitOverride", i);
     }
 }
 
@@ -4675,7 +4710,13 @@ async fn add_team_member_records_the_actor_and_names_the_team_and_the_person() {
     };
 
     let target = format!("yadgar:team:a/{person}");
-    assert_attributed(&log, "yadgar:user:actor-seven", &target, &person);
+    assert_attributed(
+        &log,
+        "AddTeamMember",
+        "yadgar:user:actor-seven",
+        &target,
+        &person,
+    );
 }
 
 #[tokio::test]
@@ -4702,7 +4743,7 @@ async fn add_team_member_without_a_usable_actor_records_it_as_unattributed() {
             .expect("an actor decides nothing, including whether this succeeds");
             rendered(&buf)
         };
-        assert_unattributed(&log, i);
+        assert_unattributed(&log, "AddTeamMember", i);
     }
 }
 
@@ -4733,7 +4774,13 @@ async fn remove_team_member_records_the_actor_and_names_the_team_and_the_person(
     };
 
     let target = format!("yadgar:team:a/{person}");
-    assert_attributed(&log, "yadgar:user:actor-eight", &target, &person);
+    assert_attributed(
+        &log,
+        "RemoveTeamMember",
+        "yadgar:user:actor-eight",
+        &target,
+        &person,
+    );
 }
 
 #[tokio::test]
@@ -4767,7 +4814,7 @@ async fn remove_team_member_without_a_usable_actor_records_it_as_unattributed() 
             .expect("an actor decides nothing, including whether this succeeds");
             rendered(&buf)
         };
-        assert_unattributed(&log, i);
+        assert_unattributed(&log, "RemoveTeamMember", i);
     }
 }
 
@@ -4799,7 +4846,13 @@ async fn set_inherited_setting_records_the_actor_and_names_the_level_it_writes()
             .expect("write one level");
             rendered(&buf)
         };
-        assert_attributed(&log, "yadgar:user:actor-nine", &target, "yadgar:team:a");
+        assert_attributed(
+            &log,
+            "SetInheritedSetting",
+            "yadgar:user:actor-nine",
+            &target,
+            "yadgar:team:a",
+        );
     }
 }
 
@@ -4822,7 +4875,7 @@ async fn set_inherited_setting_without_a_usable_actor_records_it_as_unattributed
             .expect("an actor decides nothing, including whether this succeeds");
             rendered(&buf)
         };
-        assert_unattributed(&log, i);
+        assert_unattributed(&log, "SetInheritedSetting", i);
     }
 }
 
