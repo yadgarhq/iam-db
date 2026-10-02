@@ -24,7 +24,19 @@ fn refusal(vars: &[(&str, &str)]) -> String {
         "a refused boot must exit non-zero: {:?}",
         out.status
     );
-    String::from_utf8_lossy(&out.stderr).into_owned()
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    // PLAIN DISPLAY, NOT DEBUG OF A STRING. Rust prints `main`'s `Err` with
+    // Debug, so even a refusal converted to its sentence arrived wrapped in
+    // quotes with every inner quote escaped: `Error: "… is \"0\" …"`.
+    let line = stderr
+        .lines()
+        .rfind(|l| l.starts_with("Error: "))
+        .unwrap_or_else(|| panic!("no `Error: ` line on stderr: {stderr}"));
+    assert!(
+        !line.starts_with("Error: \"") && !line.contains("\\\""),
+        "the refusal was printed as a Debug string: {line}"
+    );
+    stderr
 }
 
 /// `pool_config` refuses this key before reading any other, so nothing else

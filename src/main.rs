@@ -230,14 +230,35 @@ async fn serve_until_drained(
     Ok(())
 }
 
+/// The process entry point: run the service, and print a refusal as its SENTENCE.
+///
+/// **NOT `main() -> Result`.** Rust prints a `main` that returns `Err` with
+/// DEBUG, so a `BootError` arrived as its variant name (`ObsoleteRequireTls`)
+/// and even a refusal already converted to its sentence arrived as a quoted,
+/// escaped string — `Error: "… is \"0\" …"`. ADR-0569 asks a refusal to name the
+/// knob and where it is set; an operator reading a crash loop must get that as
+/// plain text. `tests/boot_message.rs` runs the binary and holds it.
+///
+/// The exit status is unchanged: an `Err` from `main` exits 1, and so does
+/// `ExitCode::FAILURE`.
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> std::process::ExitCode {
+    match run().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     install_logging();
 
     // Every default, every refusal and the transport mode live in `boot`, which
-    // a test can reach. `.to_string()` because `main`'s `Box<dyn Error>` prints
-    // DEBUG — a variant name, not the sentence naming the knob (ADR-0569);
-    // `tests/boot_message.rs` holds it. The lock wait has no default (ledger 814).
+    // a test can reach. `main` prints a refusal with Display, so it reaches the
+    // operator as the sentence naming the knob (ADR-0569); `tests/boot_message.rs`
+    // holds it. The lock wait has no default (ledger 814).
     let config = boot::pool_config(|key| std::env::var(key).ok()).map_err(|e| e.to_string())?;
     let migration_lock =
         boot::migration_lock(|key| std::env::var(key).ok()).map_err(|e| e.to_string())?;

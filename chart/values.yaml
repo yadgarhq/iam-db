@@ -172,18 +172,21 @@ database:
   # Size it to this installation's slowest migration: two replicas start at
   # once (D55), one migrates under the lock and the other waits this long.
   #
-  # THE BOUND IS 1..590, enforced by chart/values.schema.json:
+  # THE BOUND IS 1..590, and chart/values.schema.json is its one source:
   #   - minimum 1, because MariaDB 11.8 answers GET_LOCK with a negative wait
   #     with NULL at once and with 0 does not wait at all, so the second replica
   #     would fail every rollout that migrates (measured; `store` refuses both);
-  #   - maximum 590 = the Deployment's default progressDeadlineSeconds, 600
-  #     (this chart sets none), less the readiness ramp of the probe below:
-  #     initialDelaySeconds 2 + periodSeconds 2 x failureThreshold 2 = 6s, so
-  #     594, rounded down to 590. A longer wait would let the rollout be marked
-  #     failed while a replica is still legitimately waiting. 590 is a ceiling,
-  #     not a target: the migration itself and the probe also spend that budget.
-  #     (The Argo sync timeout, 25200s, is far above this and not the binding
-  #     bound.)
+  #   - maximum 590. NOTHING KILLS A WAITING POD: this chart ships no liveness
+  #     or startup probe, and the readiness probe below only withholds traffic.
+  #     What a long wait does reach is the Deployment's default
+  #     progressDeadlineSeconds, 600 (this chart sets none), which marks the
+  #     rollout Progressing=False — Degraded in Argo — while a replica may still
+  #     be legitimately waiting. A pod turns Ready on the first passing probe
+  #     (successThreshold is unset, so 1), so the ramp after boot is about
+  #     initialDelaySeconds 2 + periodSeconds 2 = 4s; 600 - 4 = 596, and 590
+  #     keeps a margin. It is a ceiling, not a target: the migration itself and
+  #     the probe spend the same budget. The Argo sync timeout (25200s) is far
+  #     above it and not binding.
   migrationLockTimeoutSeconds: 60
 
   # ── THE ENGINE ITSELF, WHICH THIS CHART CAN NOW CREATE ─────────────────────

@@ -19,6 +19,16 @@ fn refused(value: &str) -> String {
         "{value:?} is a value, not an absence: {err:?}"
     );
     let message = err.to_string();
+    // `store`'s own refusal ends in a full stop; a template that appends one
+    // after it prints "..".
+    assert!(!message.contains(".."), "a doubled full stop: {message}");
+    // THE SCHEMA IS THE ONE SOURCE OF THE BOUND. A number repeated here drifts
+    // the day chart/values.schema.json changes and this sentence does not.
+    assert!(
+        !message.contains("590"),
+        "the bound restated outside the schema: {message}"
+    );
+    assert!(message.contains("values.schema.json"), "{message}");
     for needle in [
         MIGRATION_LOCK_TIMEOUT_KEY,
         MIGRATION_LOCK_TIMEOUT_CHART_KEY,

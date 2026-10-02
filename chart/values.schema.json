@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "values",
-  "$comment": "DELIBERATELY OPEN: this schema bounds ONE knob, database.migrationLockTimeoutSeconds (ledger 814, ADR-0837), and declares nothing else, so every other value stays exactly as unvalidated as it was. A closed schema covering the whole chart is ledger 990's job, not this one's. The bound's arithmetic is in chart/values.yaml beside the value.",
+  "$comment": "DELIBERATELY OPEN: this schema bounds ONE knob, database.migrationLockTimeoutSeconds (ledger 814, ADR-0837), and constrains nothing else, so every other value stays exactly as unvalidated as it was. A closed schema covering the whole chart is ledger 990's job, not this one's. `required` on database makes an explicit null of the knob a RENDER-time refusal naming the key. NO root `required: [database]`: the chart's own render check already refuses a nulled `database` with its own sentence (`database` is absent from the values), and a schema refusal would pre-empt it with a less specific one, measured by scripts/tests/test_render_checks.py. leaving the key out of an override is not a null, because helm deep-merges over chart/values.yaml and inherits the shipped value. THIS FILE IS THE ONE SOURCE OF THE BOUND; the binary refuses only what can never be a wait, and chart/values.yaml beside the value carries the arithmetic.",
   "type": "object",
   "properties": {
     "database": {
@@ -11,9 +11,10 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 590,
-          "description": "Seconds a replica waits for another one's migration before failing its boot. Rendered as DB_MIGRATION_LOCK_TIMEOUT_SECONDS, read with no fallback. 1 because GET_LOCK with 0 never waits and with a negative wait never takes the lock; 590 because the Deployment's default progressDeadlineSeconds is 600 and the readiness ramp is 6s."
+          "description": "Seconds a replica waits for another one's migration before failing its boot. Rendered as DB_MIGRATION_LOCK_TIMEOUT_SECONDS and read with no fallback. Minimum 1: GET_LOCK with 0 never waits and with a negative wait never takes the lock. Maximum 590: see chart/values.yaml."
         }
-      }
+      },
+      "required": ["migrationLockTimeoutSeconds"]
     }
   }
 }

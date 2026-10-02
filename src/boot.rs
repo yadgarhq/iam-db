@@ -202,12 +202,15 @@ pub enum BootError {
     /// The migration lock's wait is set and unusable (ledger 814, ADR-0837).
     /// Absent and empty are [`BootError::Missing`]; this is a value that is
     /// there and cannot be a wait. It names the variable AND the chart key,
-    /// because ADR-0569 asks a refusal to say where the knob is set.
+    /// because ADR-0569 asks a refusal to say where the knob is set. The
+    /// reason goes LAST, since `store`'s ends in a full stop and a parse error's
+    /// does not, and the bound is NOT restated: chart/values.schema.json is its
+    /// one source.
     #[error(
         "DB_MIGRATION_LOCK_TIMEOUT_SECONDS is {value:?}, which is not a usable migration \
-         lock wait: {reason}. Set the chart value database.migrationLockTimeoutSeconds to \
-         a whole number of seconds from 1 to 590; chart/values.schema.json carries the \
-         bound and chart/values.yaml its arithmetic."
+         lock wait. Set the chart value database.migrationLockTimeoutSeconds to a whole \
+         number of seconds, at least 1, within the bound chart/values.schema.json sets. \
+         Why: {reason}"
     )]
     MigrationLockWait { value: String, reason: String },
 
