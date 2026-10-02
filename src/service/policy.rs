@@ -72,12 +72,9 @@ impl IamDb {
         r: SetRateLimitOverrideRequest,
         call: Call,
     ) -> Result<Response<SetRateLimitOverrideResponse>, Status> {
-        // ADR-0534's RECORDING HALF. `r.user_id` is the TARGET, the person limited.
-        record_actor(
-            r.unverified_actor.as_ref(),
-            "SetRateLimitOverride",
-            &r.user_id,
-        );
+        // ADR-0534's RECORDING HALF. The TARGET is the bucket and the verb.
+        let target = rate_limit_target(&r);
+        record_actor(r.unverified_actor.as_ref(), "SetRateLimitOverride", &target);
 
         refuse_unstored_kind(r.kind)?;
 
@@ -193,4 +190,16 @@ fn refuse_unstored_kind(kind: i32) -> Result<(), Status> {
         ));
     }
     Ok(())
+}
+
+/// `SetRateLimitOverride`'s `record_actor` target: `{user_id}/{module}/{kind}/{set|clear}`.
+///
+/// Rendered BEFORE the kind is checked, so an unrecognised kind is written as
+/// its number rather than refused here: the line records the attempt.
+fn rate_limit_target(r: &SetRateLimitOverrideRequest) -> String {
+    let kind = ContractKind::try_from(r.kind)
+        .map(|k| k.as_str_name().to_string())
+        .unwrap_or_else(|_| r.kind.to_string());
+    let verb = if r.limit.is_some() { "set" } else { "clear" };
+    format!("{}/{}/{kind}/{verb}", r.user_id, r.module)
 }

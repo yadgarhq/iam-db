@@ -127,10 +127,6 @@ impl IamDb {
         r: CreateCredentialRequest,
         call: Call,
     ) -> Result<Response<CreateCredentialResponse>, Status> {
-        // ADR-0534's RECORDING HALF. `r.user_id` is the TARGET — the person the
-        // credential is minted for — on `CreateEnrolment`'s argument.
-        record_actor(r.unverified_actor.as_ref(), "CreateCredential", &r.user_id);
-
         // `idempotency` IS DISCARDED HERE, AND A RETRY IS NOT A REPLAY. Measured
         // against mariadb:11.8.8: a second call carrying the SAME `token_hash`
         // hits `uq_iam_credential_token` and renders through `db()` as
@@ -164,6 +160,13 @@ impl IamDb {
         // account nobody expects to act again; the constraint proves existence
         // and never liveness, which is this handler's own argument above.
         let id = format!("yadgar:credential:{}", uuid::Uuid::now_v7());
+
+        // ADR-0534's RECORDING HALF, AFTER the id on `CreateUser`'s argument:
+        // minting it cannot fail, and the credential id is what joins this
+        // record to a later `RevokeCredential`'s.
+        let target = format!("{}/{}", r.user_id, id);
+        record_actor(r.unverified_actor.as_ref(), "CreateCredential", &target);
+
         let done = sqlx::query(
             // FROM_UNIXTIME, because the contract carries epoch SECONDS and the
             // column is a TIMESTAMP. Binding the integer directly makes MariaDB

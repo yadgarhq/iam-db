@@ -225,6 +225,29 @@ fn tel(request_id: String, user_id: &str) -> yadgar_telemetry::observe::Scope {
 /// would attribute every promotion to the person promoted. An attribution with no
 /// object is also useless during an incident, which is why both are on one line.
 ///
+/// **EACH VERB'S `target`, AND WHY IT IS COMPOSITE WHERE IT IS.** A `/` joins
+/// the segments, container first. The minted ids never contain one; a team id
+/// or a module name is caller-supplied and is not checked for one.
+///
+/// | RPC                    | `target`                                       |
+/// | ---------------------- | ---------------------------------------------- |
+/// | `CreateUser`           | `{user_id}`, the id just minted                |
+/// | `CreateEnrolment`      | `{user_id}`, the person enrolled               |
+/// | `SetUserAdmin`         | `{user_id}`, the person promoted or demoted    |
+/// | `CreateCredential`     | `{user_id}/{credential_id}`, the id just minted |
+/// | `RevokeCredential`     | `{credential_id}`                              |
+/// | `SetRateLimitOverride` | `{user_id}/{module}/{kind}/{set\|clear}`       |
+/// | `AddTeamMember`        | `{team_id}/{user_id}`                          |
+/// | `RemoveTeamMember`     | `{team_id}/{user_id}`                          |
+/// | `SetInheritedSetting`  | `{scope}/{team_id}/{name}`                     |
+///
+/// `CreateCredential` names the credential so its record joins a later
+/// `RevokeCredential`'s on the id. `{kind}` and `{scope}` are the contract's enum
+/// names (`KIND_READ`, `SETTING_SCOPE_TEAM`), or the raw number when the request
+/// carries one the contract does not define — the target is rendered before the
+/// request is checked. An absent `team_id` is the empty segment, so an
+/// organisation write reads `SETTING_SCOPE_ORG//{name}`.
+///
 /// **ABSENT AND PRESENT-HOLDING-EMPTY ARE ONE CASE** and are recorded as
 /// unattributed, NEVER as an actor whose id is the empty string — ADR-0512's
 /// collapse, pointed at the audit trail. `prost` cannot tell an absent message

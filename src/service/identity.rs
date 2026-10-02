@@ -77,8 +77,9 @@ impl IamDb {
         r: AddTeamMemberRequest,
         call: Call,
     ) -> Result<Response<AddTeamMemberResponse>, Status> {
-        // ADR-0534's RECORDING HALF. `r.user_id` is the TARGET, the person added.
-        record_actor(r.unverified_actor.as_ref(), "AddTeamMember", &r.user_id);
+        // ADR-0534's RECORDING HALF. The TARGET is the membership, team first.
+        let target = format!("{}/{}", r.team_id, r.user_id);
+        record_actor(r.unverified_actor.as_ref(), "AddTeamMember", &target);
 
         // `INSERT IGNORE` SWALLOWED BOTH FOREIGN KEYS, WHICH IS WHY THIS RPC
         // REPORTED SUCCESS FOR A ROW THAT NEVER LANDED. IGNORE downgrades a
@@ -188,8 +189,9 @@ impl IamDb {
         r: RemoveTeamMemberRequest,
         call: Call,
     ) -> Result<Response<RemoveTeamMemberResponse>, Status> {
-        // ADR-0534's RECORDING HALF. `r.user_id` is the TARGET, the person removed.
-        record_actor(r.unverified_actor.as_ref(), "RemoveTeamMember", &r.user_id);
+        // ADR-0534's RECORDING HALF. The TARGET is the membership, team first.
+        let target = format!("{}/{}", r.team_id, r.user_id);
+        record_actor(r.unverified_actor.as_ref(), "RemoveTeamMember", &target);
 
         // NO `live_user`, NO `live_team`, AND NO EXISTENCE CHECK — DECIDED,
         // rather than the sweep stopping one short again. `AddTeamMember` above
