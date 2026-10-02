@@ -72,6 +72,12 @@ impl IamDb {
         r: SetRateLimitOverrideRequest,
         call: Call,
     ) -> Result<Response<SetRateLimitOverrideResponse>, Status> {
+        // ADR-0534's RECORDING HALF. `r.user_id` is the TARGET, the person limited.
+        record_actor(
+            r.unverified_actor.as_ref(),
+            "SetRateLimitOverride",
+            &r.user_id,
+        );
         // D74 puts system-initiated work outside this mechanism, so KIND_JOB and
         // KIND_UNSPECIFIED are never stored. Refused rather than written: a
         // bucket the gateway will never consult is a limit an operator believes

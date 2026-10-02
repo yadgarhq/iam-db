@@ -4353,6 +4353,311 @@ async fn set_user_admin_without_a_usable_actor_records_it_as_unattributed() {
 }
 
 // ---------------------------------------------------------------------------
+// THE OTHER FIVE (ledger 870): `CreateCredential`, `RevokeCredential`,
+// `SetRateLimitOverride`, `AddTeamMember` and `RemoveTeamMember` carried the
+// field and recorded nothing. Same two tests per verb as the four above, and the
+// same trap asserted wherever the target is a `user_id`: that id is also the
+// record's telemetry scope, so logging it as the actor would attribute the act
+// to the person it was done to.
+// ---------------------------------------------------------------------------
+
+/// The two claims every unattributed round makes, shared by the five verbs below.
+fn assert_unattributed(log: &str, round: usize) {
+    assert!(
+        log.contains(r#"unverified_actor="<unattributed>""#),
+        "round {round}: an unusable actor is recorded as unattributed: {log}"
+    );
+    assert!(
+        !log.contains(r#"unverified_actor="""#),
+        "round {round}: the empty string must never be written as an actor: {log}"
+    );
+}
+
+/// The actor reached the log, the target is named, and the two never swapped.
+fn assert_attributed(log: &str, actor: &str, target: &str) {
+    assert!(
+        log.contains(&format!(r#"unverified_actor="{actor}""#)),
+        "the actor must reach the log: {log}"
+    );
+    assert!(
+        !log.contains(&format!(r#"unverified_actor="{target}""#)),
+        "the target must never be recorded as the actor: {log}"
+    );
+    assert!(
+        log.contains(&format!(r#"target="{target}""#)),
+        "the record must name what was acted on: {log}"
+    );
+}
+
+fn actor(id: &str) -> Option<UnverifiedActor> {
+    Some(UnverifiedActor { user_id: id.into() })
+}
+
+#[tokio::test]
+async fn create_credential_records_the_actor_and_never_the_holder() {
+    let svc = fresh("iam_db_test_actor_create_credential").await;
+    let (target, _) = seed(&svc, &[41u8; 32], &[42u8; 32]).await;
+
+    let log = {
+        let (_guard, buf) = capturing();
+        svc.create_credential(Request::new(CreateCredentialRequest {
+            user_id: target.clone(),
+            token_hash: vec![43u8; 32],
+            label: "laptop".into(),
+            unverified_actor: actor("yadgar:user:actor-four"),
+            ..Default::default()
+        }))
+        .await
+        .expect("create credential");
+        rendered(&buf)
+    };
+
+    assert_attributed(&log, "yadgar:user:actor-four", &target);
+}
+
+#[tokio::test]
+async fn create_credential_without_a_usable_actor_records_it_as_unattributed() {
+    let svc = fresh("iam_db_test_actor_create_credential_none").await;
+    let (target, _) = seed(&svc, &[44u8; 32], &[45u8; 32]).await;
+
+    for (i, unverified_actor) in [None, Some(UnverifiedActor::default())]
+        .into_iter()
+        .enumerate()
+    {
+        let log = {
+            let (_guard, buf) = capturing();
+            svc.create_credential(Request::new(CreateCredentialRequest {
+                user_id: target.clone(),
+                // FRESH per round: `uq_iam_credential_token` refuses a repeat.
+                token_hash: vec![46u8 + i as u8; 32],
+                label: "laptop".into(),
+                unverified_actor,
+                ..Default::default()
+            }))
+            .await
+            .expect("an actor decides nothing, including whether this succeeds");
+            rendered(&buf)
+        };
+        assert_unattributed(&log, i);
+    }
+}
+
+#[tokio::test]
+async fn revoke_credential_records_the_actor_and_names_the_credential() {
+    let svc = fresh("iam_db_test_actor_revoke_credential").await;
+    let (_, credential) = seed(&svc, &[51u8; 32], &[52u8; 32]).await;
+
+    let log = {
+        let (_guard, buf) = capturing();
+        svc.revoke_credential(Request::new(RevokeCredentialRequest {
+            credential_id: credential.clone(),
+            unverified_actor: actor("yadgar:user:actor-five"),
+            ..Default::default()
+        }))
+        .await
+        .expect("revoke");
+        rendered(&buf)
+    };
+
+    assert_attributed(&log, "yadgar:user:actor-five", &credential);
+}
+
+#[tokio::test]
+async fn revoke_credential_without_a_usable_actor_records_it_as_unattributed() {
+    let svc = fresh("iam_db_test_actor_revoke_credential_none").await;
+    let (_, credential) = seed(&svc, &[53u8; 32], &[54u8; 32]).await;
+
+    // The second round revokes an already-revoked credential, which the WHERE
+    // clause makes a no-op answered OK — so both rounds reach the record.
+    for (i, unverified_actor) in [None, Some(UnverifiedActor::default())]
+        .into_iter()
+        .enumerate()
+    {
+        let log = {
+            let (_guard, buf) = capturing();
+            svc.revoke_credential(Request::new(RevokeCredentialRequest {
+                credential_id: credential.clone(),
+                unverified_actor,
+                ..Default::default()
+            }))
+            .await
+            .expect("an actor decides nothing, including whether this succeeds");
+            rendered(&buf)
+        };
+        assert_unattributed(&log, i);
+    }
+}
+
+fn rate_limit_request(user_id: &str) -> SetRateLimitOverrideRequest {
+    SetRateLimitOverrideRequest {
+        user_id: user_id.into(),
+        module: "recall".into(),
+        kind: yadgar_iam_db::pb::yadgar::telemetry::v1::Kind::Read as i32,
+        limit: Some(RateLimit {
+            rate: 1.0,
+            burst: 1,
+        }),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn set_rate_limit_override_records_the_actor_and_never_the_person_limited() {
+    let svc = fresh("iam_db_test_actor_rate_limit").await;
+    let (target, _) = seed(&svc, &[55u8; 32], &[56u8; 32]).await;
+
+    let log = {
+        let (_guard, buf) = capturing();
+        svc.set_rate_limit_override(Request::new(SetRateLimitOverrideRequest {
+            unverified_actor: actor("yadgar:user:actor-six"),
+            ..rate_limit_request(&target)
+        }))
+        .await
+        .expect("set override");
+        rendered(&buf)
+    };
+
+    assert_attributed(&log, "yadgar:user:actor-six", &target);
+}
+
+#[tokio::test]
+async fn set_rate_limit_override_without_a_usable_actor_records_it_as_unattributed() {
+    let svc = fresh("iam_db_test_actor_rate_limit_none").await;
+    let (target, _) = seed(&svc, &[57u8; 32], &[58u8; 32]).await;
+
+    for (i, unverified_actor) in [None, Some(UnverifiedActor::default())]
+        .into_iter()
+        .enumerate()
+    {
+        let log = {
+            let (_guard, buf) = capturing();
+            svc.set_rate_limit_override(Request::new(SetRateLimitOverrideRequest {
+                unverified_actor,
+                ..rate_limit_request(&target)
+            }))
+            .await
+            .expect("an actor decides nothing, including whether this succeeds");
+            rendered(&buf)
+        };
+        assert_unattributed(&log, i);
+    }
+}
+
+#[tokio::test]
+async fn add_team_member_records_the_actor_and_never_the_person_added() {
+    let svc = fresh("iam_db_test_actor_add_member").await;
+    let (target, _) = seed(&svc, &[61u8; 32], &[62u8; 32]).await;
+    seed_team(&svc, "yadgar:team:a").await;
+
+    let log = {
+        let (_guard, buf) = capturing();
+        svc.add_team_member(Request::new(AddTeamMemberRequest {
+            team_id: "yadgar:team:a".into(),
+            user_id: target.clone(),
+            unverified_actor: actor("yadgar:user:actor-seven"),
+            ..Default::default()
+        }))
+        .await
+        .expect("add member");
+        rendered(&buf)
+    };
+
+    assert_attributed(&log, "yadgar:user:actor-seven", &target);
+}
+
+#[tokio::test]
+async fn add_team_member_without_a_usable_actor_records_it_as_unattributed() {
+    let svc = fresh("iam_db_test_actor_add_member_none").await;
+    let (target, _) = seed(&svc, &[63u8; 32], &[64u8; 32]).await;
+    seed_team(&svc, "yadgar:team:a").await;
+
+    // The second round repeats the first, which the composite key makes a no-op
+    // answered OK — so both rounds reach the record.
+    for (i, unverified_actor) in [None, Some(UnverifiedActor::default())]
+        .into_iter()
+        .enumerate()
+    {
+        let log = {
+            let (_guard, buf) = capturing();
+            svc.add_team_member(Request::new(AddTeamMemberRequest {
+                team_id: "yadgar:team:a".into(),
+                user_id: target.clone(),
+                unverified_actor,
+                ..Default::default()
+            }))
+            .await
+            .expect("an actor decides nothing, including whether this succeeds");
+            rendered(&buf)
+        };
+        assert_unattributed(&log, i);
+    }
+}
+
+#[tokio::test]
+async fn remove_team_member_records_the_actor_and_never_the_person_removed() {
+    let svc = fresh("iam_db_test_actor_remove_member").await;
+    let (target, _) = seed(&svc, &[65u8; 32], &[66u8; 32]).await;
+    seed_team(&svc, "yadgar:team:a").await;
+    svc.add_team_member(Request::new(AddTeamMemberRequest {
+        team_id: "yadgar:team:a".into(),
+        user_id: target.clone(),
+        ..Default::default()
+    }))
+    .await
+    .expect("add member");
+
+    let log = {
+        let (_guard, buf) = capturing();
+        svc.remove_team_member(Request::new(RemoveTeamMemberRequest {
+            team_id: "yadgar:team:a".into(),
+            user_id: target.clone(),
+            unverified_actor: actor("yadgar:user:actor-eight"),
+            ..Default::default()
+        }))
+        .await
+        .expect("remove member");
+        rendered(&buf)
+    };
+
+    assert_attributed(&log, "yadgar:user:actor-eight", &target);
+}
+
+#[tokio::test]
+async fn remove_team_member_without_a_usable_actor_records_it_as_unattributed() {
+    let svc = fresh("iam_db_test_actor_remove_member_none").await;
+    let (target, _) = seed(&svc, &[67u8; 32], &[68u8; 32]).await;
+    seed_team(&svc, "yadgar:team:a").await;
+    svc.add_team_member(Request::new(AddTeamMemberRequest {
+        team_id: "yadgar:team:a".into(),
+        user_id: target.clone(),
+        ..Default::default()
+    }))
+    .await
+    .expect("add member");
+
+    // The second round removes a membership already gone, answered OK with
+    // `rows: 0` — so both rounds reach the record.
+    for (i, unverified_actor) in [None, Some(UnverifiedActor::default())]
+        .into_iter()
+        .enumerate()
+    {
+        let log = {
+            let (_guard, buf) = capturing();
+            svc.remove_team_member(Request::new(RemoveTeamMemberRequest {
+                team_id: "yadgar:team:a".into(),
+                user_id: target.clone(),
+                unverified_actor,
+                ..Default::default()
+            }))
+            .await
+            .expect("an actor decides nothing, including whether this succeeds");
+            rendered(&buf)
+        };
+        assert_unattributed(&log, i);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // THE KEY-IDENTITY MARKER (ADR-0764, ADR-0765).
 //
 // **THREE OBLIGATIONS NOTHING IN EITHER REPOSITORY ENFORCES, AND THIS BLOCK IS

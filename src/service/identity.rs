@@ -77,6 +77,9 @@ impl IamDb {
         r: AddTeamMemberRequest,
         call: Call,
     ) -> Result<Response<AddTeamMemberResponse>, Status> {
+        // ADR-0534's RECORDING HALF. `r.user_id` is the TARGET, the person added.
+        record_actor(r.unverified_actor.as_ref(), "AddTeamMember", &r.user_id);
+
         // `INSERT IGNORE` SWALLOWED BOTH FOREIGN KEYS, WHICH IS WHY THIS RPC
         // REPORTED SUCCESS FOR A ROW THAT NEVER LANDED. IGNORE downgrades a
         // foreign-key violation to a WARNING: an unknown team or an unknown
@@ -185,6 +188,9 @@ impl IamDb {
         r: RemoveTeamMemberRequest,
         call: Call,
     ) -> Result<Response<RemoveTeamMemberResponse>, Status> {
+        // ADR-0534's RECORDING HALF. `r.user_id` is the TARGET, the person removed.
+        record_actor(r.unverified_actor.as_ref(), "RemoveTeamMember", &r.user_id);
+
         // NO `live_user`, NO `live_team`, AND NO EXISTENCE CHECK — DECIDED,
         // rather than the sweep stopping one short again. `AddTeamMember` above
         // refuses an unrecognised id; this one answers OK with `rows: 0`.

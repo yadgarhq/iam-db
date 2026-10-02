@@ -208,7 +208,7 @@ fn tel(request_id: String, user_id: &str) -> yadgar_telemetry::observe::Scope {
 /// and it MUST NOT be an authorisation input.
 ///
 /// **ONE READER OF THE FIELD IN THIS CRATE**, so a grep for `unverified_actor`
-/// lands on this paragraph rather than on four copies of it, and so a later verb
+/// lands on this paragraph rather than on nine copies of it, and so a later verb
 /// that starts carrying an actor gets the absent-and-empty handling for free
 /// instead of re-deriving it.
 ///
@@ -231,16 +231,14 @@ fn tel(request_id: String, user_id: &str) -> yadgar_telemetry::observe::Scope {
 /// from a default one, so `filter` is what keeps the two together;
 /// `unwrap_or_default` would write "" as an actor.
 ///
-/// **FOUR OF THE NINE RPCs THAT CARRY THE FIELD CALL THIS, AND THE OTHER FIVE ARE
-/// A GAP RATHER THAN A MECHANISM.** Stated here for the reason the module header
-/// states the same thing about `Idempotency`: a reader who greps
-/// `unverified_actor` and finds five handlers that accept one and never mention it
-/// cannot tell an omission from a decision. `CreateUser`, `CreateEnrolment`,
-/// `SetUserAdmin` and `SetInheritedSetting` record. `CreateCredential`,
+/// **ALL NINE RPCs THAT CARRY THE FIELD CALL THIS**, each before any refusal or
+/// SQL in its operation. `CreateUser`, `CreateEnrolment`,
+/// `SetUserAdmin` and `SetInheritedSetting` came first; `CreateCredential`,
 /// `RevokeCredential`, `SetRateLimitOverride`, `AddTeamMember` and
-/// `RemoveTeamMember` do not, and nothing about them argues they should not —
-/// wiring them is additive and wants the same test per verb. Booked as follow-on
-/// work rather than done here.
+/// `RemoveTeamMember` were wired later (ledger 870), with the same test per verb
+/// in `tests/contract.rs`. A tenth verb that starts carrying an actor joins this
+/// list and that test pattern, or the grep that lands here finds an omission
+/// indistinguishable from a decision again.
 ///
 /// **THERE IS NO AUDIT STORE ON THIS BOUNDARY**, so the structured log is where an
 /// attribution can land today (ADR-0620). Said plainly rather than implied: the

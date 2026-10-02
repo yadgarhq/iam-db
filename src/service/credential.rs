@@ -127,6 +127,10 @@ impl IamDb {
         r: CreateCredentialRequest,
         call: Call,
     ) -> Result<Response<CreateCredentialResponse>, Status> {
+        // ADR-0534's RECORDING HALF. `r.user_id` is the TARGET — the person the
+        // credential is minted for — on `CreateEnrolment`'s argument.
+        record_actor(r.unverified_actor.as_ref(), "CreateCredential", &r.user_id);
+
         // `idempotency` IS DISCARDED HERE, AND A RETRY IS NOT A REPLAY. Measured
         // against mariadb:11.8.8: a second call carrying the SAME `token_hash`
         // hits `uq_iam_credential_token` and renders through `db()` as
@@ -224,6 +228,13 @@ impl IamDb {
         r: RevokeCredentialRequest,
         call: Call,
     ) -> Result<Response<RevokeCredentialResponse>, Status> {
+        // ADR-0534's RECORDING HALF. The target is the credential revoked.
+        record_actor(
+            r.unverified_actor.as_ref(),
+            "RevokeCredential",
+            &r.credential_id,
+        );
+
         // A tombstone, not a delete (D26). Idempotent by the WHERE clause:
         // revoking twice leaves the first timestamp, so the record still says
         // when access actually ended rather than when someone last asked.
