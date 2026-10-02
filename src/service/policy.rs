@@ -78,18 +78,8 @@ impl IamDb {
             "SetRateLimitOverride",
             &r.user_id,
         );
-        // D74 puts system-initiated work outside this mechanism, so KIND_JOB and
-        // KIND_UNSPECIFIED are never stored. Refused rather than written: a
-        // bucket the gateway will never consult is a limit an operator believes
-        // is in force and is not.
-        if !matches!(
-            ContractKind::try_from(r.kind),
-            Ok(ContractKind::Read) | Ok(ContractKind::Write) | Ok(ContractKind::Generate)
-        ) {
-            return Err(Status::invalid_argument(
-                "a rate-limit override must name READ, WRITE or GENERATE",
-            ));
-        }
+
+        refuse_unstored_kind(r.kind)?;
 
         // The liveness check SetUserAdmin carries, on the neighbouring RPC. The
         // FOREIGN KEY proves the user row exists and says nothing about whether
@@ -187,4 +177,20 @@ impl IamDb {
         });
         Ok(Response::new(SetRateLimitOverrideResponse {}))
     }
+}
+
+/// D74 puts system-initiated work outside the rate-limit mechanism, so KIND_JOB
+/// and KIND_UNSPECIFIED are never stored. Refused rather than written: a bucket
+/// the gateway will never consult is a limit an operator believes is in force
+/// and is not.
+fn refuse_unstored_kind(kind: i32) -> Result<(), Status> {
+    if !matches!(
+        ContractKind::try_from(kind),
+        Ok(ContractKind::Read) | Ok(ContractKind::Write) | Ok(ContractKind::Generate)
+    ) {
+        return Err(Status::invalid_argument(
+            "a rate-limit override must name READ, WRITE or GENERATE",
+        ));
+    }
+    Ok(())
 }
