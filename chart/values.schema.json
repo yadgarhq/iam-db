@@ -1,20 +1,122 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "values",
-  "$comment": "DELIBERATELY OPEN: this schema bounds ONE knob, database.migrationLockTimeoutSeconds (ledger 814, ADR-0837), and constrains nothing else, so every other value stays exactly as unvalidated as it was. A closed schema covering the whole chart is ledger 990's job, not this one's. `required` on database makes an explicit null of the knob a RENDER-time refusal naming the key. NO root `required: [database]`: the chart's own render check already refuses a nulled `database` with its own sentence (`database` is absent from the values), and a schema refusal would pre-empt it with a less specific one, measured by scripts/tests/test_render_checks.py. leaving the key out of an override is not a null, because helm deep-merges over chart/values.yaml and inherits the shipped value. THIS FILE IS THE ONE SOURCE OF THE BOUND; the binary refuses only what can never be a wait, and chart/values.yaml beside the value carries the arithmetic.",
-  "type": "object",
+  "title": "yadgar/iam-db",
+  "$comment": "CLOSED PER CHART (ADR-0847, ADR-0850, ledger 990): this schema closes every key iam-db's own values.yaml declares and refuses an unknown one at render. It closes only what this chart owns -- a parent or platform that embeds iam-db leaves this whole section open instead of re-declaring it. OPEN MAPS, left as `{}` on purpose: `global` (injected by a parent/platform at render time; this chart reads none of it itself, but a closed root would refuse the key the moment it is embedded); `resources` and `database.instance.resources` (plain Kubernetes ResourceRequirements, handed straight to `toYaml`, whose own shape is not this chart's to validate); `rollingUpdate` (same, handed to `toYaml` under `strategy.rollingUpdate`). EXTRAS, declared as leaves though `values.yaml` never states them: `image.digest` (absent from `values.yaml` by design -- `ci-release` rewrites it at package time, D65); `networkPolicy.scrapeFrom.namespace` (`values.yaml` ships `scrapeFrom: {}`; `templates/networkpolicy.yaml` reads the key under it). TYPES, TOGGLES AND `required` ON A NEW KEY ARE NOT THIS FILE'S JOB (ADR-0847): `chart/templates/render-checks.yaml` validates `database.create` and `autoscaling.enabled` with `kindIs \"bool\"` and raises its own named refusal; nothing here duplicates that. The two exceptions predate this closure and are kept unchanged: `database` carries `type: object` and `required: [migrationLockTimeoutSeconds]` (ledger 814, ADR-0837) -- `database.migrationLockTimeoutSeconds` is the one knob this file bounds as `integer, 1..590`, because the binary reads it with no fallback. There is no root `required`: `database` deleted outright is still refused by the chart's own render check (`database` is absent from the values), with a more specific sentence than a schema line would give, and `tls.enabled` is not required here -- that lands in C-DB1 (ADR-0845, K-8), never in D-S.",
   "properties": {
-    "database": {
-      "type": "object",
+    "image": {
       "properties": {
+        "repository": {},
+        "tag": {},
+        "digest": {}
+      },
+      "additionalProperties": false
+    },
+    "replicaCount": {},
+    "resources": {},
+    "tls": {
+      "properties": {
+        "enabled": {},
+        "certSecret": {},
+        "certSecretKey": {},
+        "keySecretKey": {}
+      },
+      "additionalProperties": false
+    },
+    "database": {
+      "properties": {
+        "host": {},
+        "port": {},
+        "name": {},
+        "user": {},
+        "passwordSecret": {},
+        "sslMode": {},
+        "sslCaSecret": {},
+        "sslCaSecretKey": {},
+        "maxConnections": {},
+        "engineMaxConnections": {},
         "migrationLockTimeoutSeconds": {
           "type": "integer",
           "minimum": 1,
           "maximum": 590,
           "description": "Seconds a replica waits for another one's migration before failing its boot. Rendered as DB_MIGRATION_LOCK_TIMEOUT_SECONDS and read with no fallback. Minimum 1: GET_LOCK with 0 never waits and with a negative wait never takes the lock. Maximum 590: see chart/values.yaml."
+        },
+        "create": {},
+        "mariadbOperator": {
+          "properties": {
+            "apiVersion": {}
+          },
+          "additionalProperties": false
+        },
+        "instance": {
+          "properties": {
+            "image": {},
+            "replicas": {},
+            "tls": {
+              "properties": {
+                "enabled": {},
+                "required": {}
+              },
+              "additionalProperties": false
+            },
+            "storage": {
+              "properties": {
+                "size": {},
+                "className": {}
+              },
+              "additionalProperties": false
+            },
+            "rootPasswordSecret": {},
+            "resources": {}
+          },
+          "additionalProperties": false
         }
       },
+      "additionalProperties": false,
+      "type": "object",
       "required": ["migrationLockTimeoutSeconds"]
-    }
-  }
+    },
+    "autoscaling": {
+      "properties": {
+        "enabled": {},
+        "kedaOperator": {
+          "properties": {
+            "apiVersion": {}
+          },
+          "additionalProperties": false
+        },
+        "minReplicas": {},
+        "maxReplicas": {},
+        "threshold": {},
+        "prometheusAddress": {}
+      },
+      "additionalProperties": false
+    },
+    "networkPolicy": {
+      "properties": {
+        "enabled": {},
+        "clients": {},
+        "scrapeFrom": {
+          "properties": {
+            "namespace": {}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "preStopSleepSeconds": {},
+    "terminationGracePeriodSeconds": {},
+    "rollingUpdate": {},
+    "topologySpread": {
+      "properties": {
+        "enabled": {},
+        "maxSkew": {},
+        "topologyKey": {},
+        "whenUnsatisfiable": {}
+      },
+      "additionalProperties": false
+    },
+    "global": {}
+  },
+  "additionalProperties": false
 }
