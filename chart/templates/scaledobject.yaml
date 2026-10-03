@@ -1,4 +1,22 @@
-{{- if .Values.autoscaling.enabled }}
+{{/*
+THE FIRST READER CARRIES ITS OWN GUARD (ADR-0850): helm renders templates in
+reverse path order, so this file runs BEFORE `templates/render-checks.yaml`, whose
+`fail` is what names `autoscaling` when it is not a map. A bare
+`.Values.autoscaling.enabled` here, with `autoscaling` itself a string or a list,
+crashes with go/template's own uninformative field-access error before that named
+refusal ever runs (measured on helm 4.3.0, through the strip-`kindIs` reconstruction
+in `scripts/tests/test_render_checks.py`). `kindIs "map"` short-circuits this `if`
+to false instead — no render, no crash, no second message — and lets
+`render-checks.yaml`'s refusal be the only thing an adopter sees.
+
+THIS BLOCK IS A TEMPLATE-LEVEL COMMENT RATHER THAN `#` LINES, AND THAT IS
+LOAD-BEARING: every `#` line here sits ABOVE the `if` that gates this file's only
+object, so a `#` comment here would render into every install's output, on or off
+— helm skips a template only when its OUTPUT is pure whitespace, and a comment is
+not whitespace. A template-level comment is stripped before that check runs; a
+bare `#` line is not.
+*/}}
+{{- if and (kindIs "map" .Values.autoscaling) .Values.autoscaling.enabled }}
 # KEDA, not a bare HPA (D68): it wraps a plain HPA for the concurrency cases,
 # handles queue depth natively for the write path, and gives scale-to-zero for a
 # disabled plugin (D1). One mechanism instead of prometheus-adapter plus special

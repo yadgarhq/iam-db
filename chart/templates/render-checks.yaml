@@ -112,6 +112,69 @@ eleven-shape table beside it is the gate on this block.
 {{- end }}
 
 {{/*
+THE SHAPE OF `autoscaling.enabled`, REFUSED BEFORE ANY TOGGLE READS IT.
+
+DECLARED BEFORE THE KEDA CAPABILITY CHECK BELOW, for the same reason `database.create`'s
+shape guard above sits before its own capability check: a bare
+`{{ if .Values.autoscaling.enabled }}` is FAIL-OPEN on a string (Go template
+truthiness is non-zero-ness, not boolean equality), measured identically to
+`database.create` on helm 3.20.2 and 4.3.0: `"false"`, `"no"`, `"true"` and `1` all
+turn autoscaling ON; `false`, `0`, `null`, `{}` and `[]` do not.
+
+`autoscaling` ITSELF IS GUARDED FIRST, WITH THE ADR-0794 IDIOM (`hasKey` then
+`kindIs "map"`), because it is a BLOCK a toggle read reaches through —
+`autoscaling.enabled` here, and `minReplicas`/`maxReplicas`/`threshold` once enabled
+is true — and a non-map `autoscaling` has no `.enabled` to test for bool-ness. Only
+once `autoscaling` is confirmed a map is `autoscaling.enabled` itself validated with
+ADR-0797's `kindIs "bool"` ON THE RAW VALUE, never on the result of a `default`,
+for the reason `database.create`'s block above states at length.
+
+`hasKey` COMES FIRST AT EACH LEVEL, for the same reason it does above: `kindOf`
+answers `invalid` both for a DELETED key (helm deletes a null-valued key this
+chart's own `values.yaml` declares, and restores no default) and for an ABSENT one,
+and the two need different messages. The refusal texts below do not quote the raise
+text they replace (ADR-0794); `scripts/tests/test_render_checks.py`'s
+`RAISE_MARKERS` is the gate.
+
+`templates/scaledobject.yaml` CARRIES THE SAME `kindIs "map"` TEST ON ITS OWN `if`
+(ADR-0850): helm renders templates in reverse path order, so that file runs BEFORE
+this one, and a bare `.Values.autoscaling.enabled` there would crash on a non-map
+`autoscaling` with go/template's own uninformative field-access error rather than
+reach this file's named refusal. Measured: with no guard there, `autoscaling: "x"`
+raises at `scaledobject.yaml` and never reaches this file at all.
+*/}}
+{{- if not (hasKey .Values "autoscaling") }}
+{{- fail (join "" (list
+      "iam-db: `autoscaling` is absent from the values, so `autoscaling.enabled` cannot be "
+      "read. Helm deletes a null-valued key that a chart in the tree declares, and restores "
+      "no default, so a values file writing `autoscaling:` with no value leaves this chart "
+      "with nothing under it. Write the keys you mean, or omit `autoscaling` entirely and "
+      "this chart's own defaults apply.")) }}
+{{- end }}
+{{- if not (kindIs "map" .Values.autoscaling) }}
+{{- fail (printf (join "" (list
+      "iam-db: `autoscaling` must be a map and is %s (%s). `autoscaling.enabled` and its "
+      "other scaling knobs live under it, and a string, number or list here has none of "
+      "them. Write a map, for example `autoscaling: { enabled: false }`."))
+      (kindOf .Values.autoscaling) (toJson .Values.autoscaling)) }}
+{{- end }}
+{{- if not (hasKey .Values.autoscaling "enabled") }}
+{{- fail (join "" (list
+      "iam-db: `autoscaling.enabled` is absent. This chart's `values.yaml` declares it "
+      "false, so it is missing only when a values file wrote `enabled:` with NO VALUE — "
+      "helm deletes a null-valued key a chart declares and restores no default. Write "
+      "`autoscaling.enabled: false` to leave autoscaling off, or `true` to turn it on.")) }}
+{{- end }}
+{{- if not (kindIs "bool" .Values.autoscaling.enabled) }}
+{{- fail (printf (join "" (list
+      "iam-db: `autoscaling.enabled` must be true or false and is %s (%s). A string, number, "
+      "map or list here is not a toggle: the template gates on bare truthiness, so \"false\", "
+      "\"no\", \"true\" and 1 all turn autoscaling ON while {}, 0 and [] do not, and nothing "
+      "tells you which one you wrote. Write the bare word `true` or `false`."))
+      (kindOf .Values.autoscaling.enabled) (toJson .Values.autoscaling.enabled)) }}
+{{- end }}
+
+{{/*
 KEDA, BEHIND THE TOGGLE THAT RENDERS THE ScaledObject.
 
 `autoscaling.enabled` renders `templates/scaledobject.yaml`, whose one kind is
