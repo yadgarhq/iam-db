@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -47,6 +48,34 @@ import yaml
 
 CHART = Path(__file__).resolve().parents[2] / "chart"
 SCHEMA_PATH = CHART / "values.schema.json"
+
+# Adopted from task-db#83's test_values_schema.py (ledger 990 opus review): the
+# JSON path (as a tuple of segments) and the key name out of a schema refusal
+# — on EITHER measured helm shape — never the sentence around them, so a
+# caller can compare the exact (path, key) pair instead of a loose substring.
+REFUSAL_SLASH_PATH = re.compile(
+    r"at '([^']*)': additional propert(?:y|ies) '([^']+)'(?:, '[^']+')* (?:is |are )?not allowed"
+)
+REFUSAL_DOTTED_PATH = re.compile(
+    r"^-\s+(\(root\)|[A-Za-z0-9_.\-]+):\s+Additional propert(?:y|ies)\s+(\S+)\s+(?:is|are)\s+not allowed",
+    re.MULTILINE,
+)
+
+
+def extract_refusal(stderr: str) -> tuple[tuple[str, ...], str] | None:
+    match = REFUSAL_SLASH_PATH.search(stderr)
+    if match:
+        raw_path, key = match.group(1), match.group(2)
+        segments = tuple(raw_path.strip("/").split("/")) if raw_path.strip("/") else ()
+        return segments, key
+
+    match = REFUSAL_DOTTED_PATH.search(stderr)
+    if match:
+        raw_path, key = match.group(1), match.group(2)
+        segments = () if raw_path == "(root)" else tuple(raw_path.split("."))
+        return segments, key
+
+    return None
 
 # Paths the schema leaves open (declared as a bare `{}`), though `values.yaml`
 # either nests real structure under them or omits them outright. §3.4 of the
@@ -268,6 +297,7 @@ def test_root_typo_is_refused_naming_the_key_and_the_root_path(tmp_path: Path) -
         result = render(binary, "-f", values_file(tmp_path, "r1", {"databse": {"create": True}}))
         assert result.returncode != 0, "a root-level typo rendered"
         assert "databse" in result.stderr, result.stderr
+        assert "(root)" in result.stderr or "at ''" in result.stderr, result.stderr
 
 
 def test_lint_strict_refuses_the_root_typo_naming_the_key(tmp_path: Path) -> None:
@@ -285,8 +315,11 @@ def test_one_down_typo_is_refused_naming_the_key_under_its_parent(tmp_path: Path
     for binary in helm_binaries():
         result = render(binary, "-f", values_file(tmp_path, "r2", {"database": {"creat": True}}))
         assert result.returncode != 0, "a nested typo rendered"
-        assert "creat" in result.stderr, result.stderr
-        assert "database" in result.stderr, result.stderr
+        found = extract_refusal(result.stderr)
+        assert found, result.stderr
+        path, key = found
+        assert path == ("database",), (path, result.stderr)
+        assert key == "creat", (key, result.stderr)  # exact, not "create" substring-matched
 
 
 def test_two_down_typo_is_refused_naming_the_key_under_its_path(tmp_path: Path) -> None:
@@ -296,6 +329,30 @@ def test_two_down_typo_is_refused_naming_the_key_under_its_path(tmp_path: Path) 
         assert result.returncode != 0, "a two-levels-down typo rendered"
         assert "siz" in result.stderr, result.stderr
         assert "storage" in result.stderr, result.stderr
+
+
+def test_autoscaling_typo_is_refused_naming_the_key_and_the_autoscaling_path(tmp_path: Path) -> None:
+    overlay = {"autoscaling": {"enabeld": True}}
+    for binary in helm_binaries():
+        result = render(binary, "-f", values_file(tmp_path, "r4", overlay))
+        assert result.returncode != 0, "an autoscaling typo rendered"
+        found = extract_refusal(result.stderr)
+        assert found, result.stderr
+        path, key = found
+        assert path == ("autoscaling",), (path, result.stderr)
+        assert key == "enabeld", (key, result.stderr)
+
+
+def test_scrape_from_typo_is_refused_naming_the_key_and_the_scrape_from_path(tmp_path: Path) -> None:
+    overlay = {"networkPolicy": {"scrapeFrom": {"namespac": "x"}}}
+    for binary in helm_binaries():
+        result = render(binary, "-f", values_file(tmp_path, "r5", overlay))
+        assert result.returncode != 0, "a scrapeFrom typo rendered"
+        found = extract_refusal(result.stderr)
+        assert found, result.stderr
+        path, key = found
+        assert path == ("networkPolicy", "scrapeFrom"), (path, result.stderr)
+        assert key == "namespac", (key, result.stderr)
 
 
 def test_shipped_database_scalar_is_still_a_schema_type_refusal(tmp_path: Path) -> None:
