@@ -82,7 +82,8 @@ tls:
   # that and contracts these three keys the way `enabled` above is
   # contracted today.
   #
-  #   clientAuth: off               # the only value accepted today
+  #   clientAuth: "off"             # the only value accepted today — QUOTED:
+  #                                  # YAML 1.1 reads a bare off as false
   #   clientCaSecret: iam-db-tls    # defaults to tls.certSecret once B-U5
   #                                  # contracts this key; a Secret NAME, not
   #                                  # a switch, so ADR-0569 allows a default

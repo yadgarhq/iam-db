@@ -167,7 +167,13 @@ impl ServerTls {
         // render the flag at all binds a cleartext listener indistinguishable
         // from one chosen on purpose. It is the same rule the client side
         // applies to its own flag, now widened to refuse the absent case too.
-        match get("TLS_ENABLED").as_deref() {
+        //
+        // RAW, NOT `get`: absent and set-but-empty must produce DIFFERENT
+        // sentences (`EnabledNotSet` vs `EnabledEmpty`, the same discrimination
+        // `boot::env_required` makes for every DB_* knob), and `get`'s own
+        // trim-and-empty-filter collapses that distinction into one `None`.
+        let raw_enabled = lookup(&format!("{prefix}_TLS_ENABLED")).map(|v| v.trim().to_string());
+        match raw_enabled.as_deref() {
             Some("1") => Ok(Some(Self {
                 cert_file: PathBuf::from(
                     get("TLS_CERT_FILE").ok_or(ServerTlsError::NoCertFile(prefix))?,
@@ -191,22 +197,20 @@ impl ServerTls {
                 }
                 Ok(None)
             }
-            // `other` already went through `get`'s trim-and-empty-filter, so
-            // this arm is reached only by a NON-EMPTY value that is neither
-            // "1" nor "0" — "true", "false", "yes", anything.
+            // SET BUT EMPTY — Helm renders a nulled chart value as "", which
+            // is a DIFFERENT state from absence and gets its own message.
+            Some("") => Err(ServerTlsError::EnabledEmpty(prefix)),
+            // Present, non-empty, and neither "1" nor "0" — "true", "false",
+            // "yes", anything.
             Some(other) => Err(ServerTlsError::EnabledInvalid {
                 prefix,
-                value: format!("{other:?}"),
+                value: other.to_string(),
             }),
-            // ABSENT, or set and empty — Helm renders a nulled value as "",
-            // and `get` does not distinguish the two. Both used to mean
-            // cleartext; H1 makes both a refusal instead, because an operator
-            // who meant to turn TLS off has "0" to write, and a value that
-            // never arrived is not that.
-            None => Err(ServerTlsError::EnabledInvalid {
-                prefix,
-                value: "not set".to_string(),
-            }),
+            // ABSENT. Used to mean cleartext, the same as an explicit "0";
+            // H1 makes it a refusal instead, because an operator who meant
+            // to turn TLS off has "0" to write, and a value that never
+            // arrived is not that.
+            None => Err(ServerTlsError::EnabledNotSet(prefix)),
         }
     }
 

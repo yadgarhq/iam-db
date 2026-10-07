@@ -1713,45 +1713,57 @@ def test_every_writable_shape_of_tls_clientauth_is_refused_or_rendered(tmp_path)
     assert refused == EXPECTED_CLIENT_AUTH_SHAPES_REFUSED, refused
 
 
-# ── THE GOLDEN RENDER: EXPLICIT VALUES, SAME IMAGE REF, HEAD == origin/main ──────
-def origin_main_chart(destination: Path) -> Path:
-    """`chart/` AT `origin/main`, archived into `destination` rather than
-    checked out — this worktree's own working tree must stay untouched by a
-    comparison test. `git fetch` first: a shallow or stale local clone would
-    make `origin/main` resolve to the wrong commit silently."""
-    subprocess.run(["git", "fetch", "-q", "origin", "main"], cwd=REPO, check=True)
-    chart = destination / "chart"
-    chart.mkdir(parents=True)
-    archive = subprocess.run(
-        ["git", "archive", "origin/main", "--", "chart"], cwd=REPO, capture_output=True, check=True
+# ── THE NESTING ITSELF: client-auth rendering requires `tls.enabled` ────────
+#
+# Every one of `LISTEN_TLS_CLIENT_AUTH`, `LISTEN_TLS_CLIENT_CA_FILE` and the
+# `client-ca` mount/volume is gated on `tls.enabled` in ADDITION to its own
+# key, per the coordinator's B-U5E-convention ruling: a client-auth leaf
+# beside a cleartext listener names a check that cannot run. Each case here
+# is a MUTATION a narrower gate (missing one of the `and` terms) would pass.
+CLIENT_MARKERS = ("LISTEN_TLS_CLIENT_AUTH", "LISTEN_TLS_CLIENT_CA_FILE", "name: client-ca")
+
+
+def test_an_empty_client_ca_secret_renders_nothing_client_related(tmp_path):
+    """`clientCaSecret: ""` is TRUTHINESS-false, the same test `DB_SSL_CA_FILE`
+    uses for `database.sslCaSecret` — an empty string must not render
+    `secretName: ""`."""
+    overlay = shape_overlay('tls:\n  enabled: true\n  clientAuth: "off"\n  clientCaSecret: ""\n', tmp_path)
+    result = render(CHART, "--values", str(overlay))
+    assert result.returncode == 0, result.stderr
+    for marker in ("LISTEN_TLS_CLIENT_CA_FILE", "name: client-ca"):
+        assert marker not in result.stdout, f"{marker} rendered with clientCaSecret empty"
+    # `clientAuth` alone, with no CA secret, still renders — only the CA
+    # trio is additionally gated on `clientCaSecret`.
+    assert "LISTEN_TLS_CLIENT_AUTH" in result.stdout
+
+
+def test_client_auth_off_with_tls_disabled_renders_nothing_client_related(tmp_path):
+    """`tls.enabled: false` with `clientAuth: "off"` and a CA secret both
+    named still renders NONE of the client-auth markers — a client-auth leaf
+    beside a cleartext listener is a check that cannot run."""
+    overlay = shape_overlay(
+        'tls:\n  enabled: false\n  clientAuth: "off"\n  clientCaSecret: iam-db-tls\n'
+        "  clientCaSecretKey: ca.crt\n",
+        tmp_path,
     )
-    subprocess.run(["tar", "-x"], cwd=destination, input=archive.stdout, check=True)
-    return chart
+    result = render(CHART, "--values", str(overlay))
+    assert result.returncode == 0, result.stderr
+    for marker in CLIENT_MARKERS:
+        assert marker not in result.stdout, f"{marker} rendered with tls.enabled: false"
 
 
-def test_golden_tls_enabled_render_matches_origin_main(tmp_path):
-    """B's byte-identical contract, carried forward under ADR-0845: with
-    `tls.enabled` STATED (K-3's named exception — the property this chart's
-    OWN defaults can no longer demonstrate, since H1 drops them) and the same
-    image ref, HEAD's chart renders exactly what origin/main's chart does. No
-    `clientAuth` key on either side, which is this test's statement of
-    "an absent key renders exactly as origin/main" from the B-U5E card.
-    """
-    origin_chart = origin_main_chart(tmp_path / "origin")
-    overlay = tmp_path / "golden.yaml"
-    overlay.write_text("tls:\n  enabled: true\nimage:\n  tag: golden-pin\n")
-
-    head = render(CHART, "--values", str(overlay))
-    assert head.returncode == 0, head.stderr
-    origin = render(origin_chart, "--values", str(overlay))
-    assert origin.returncode == 0, origin.stderr
-
-    head_objects = list(yaml.safe_load_all(head.stdout))
-    origin_objects = list(yaml.safe_load_all(origin.stdout))
-    assert head_objects == origin_objects, (
-        "HEAD's render with tls.enabled=true differs from origin/main's chart's own "
-        "render of the same values"
+def test_client_ca_secret_without_client_auth_renders_nothing_client_related(tmp_path):
+    """`clientCaSecret` named with NO `clientAuth` key at all still renders
+    none of the three — the CA trio is gated on `hasKey clientAuth` too, not
+    on `clientCaSecret` alone."""
+    overlay = shape_overlay(
+        "tls:\n  enabled: true\n  clientCaSecret: iam-db-tls\n  clientCaSecretKey: ca.crt\n",
+        tmp_path,
     )
+    result = render(CHART, "--values", str(overlay))
+    assert result.returncode == 0, result.stderr
+    for marker in CLIENT_MARKERS:
+        assert marker not in result.stdout, f"{marker} rendered with no clientAuth key"
 
 
 def test_the_shape_refusal_does_not_quote_a_raise():

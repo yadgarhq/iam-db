@@ -10,20 +10,39 @@ use std::path::PathBuf;
 /// that is what an operator who set the flag was trying to stop.
 #[derive(Debug, thiserror::Error)]
 pub enum ServerTlsError {
-    /// H1 of the ADR-0705 census, carried out as ADR-0845: `_TLS_ENABLED`
-    /// has no compiled-in default (ADR-0569) and accepts exactly `"1"` or
-    /// `"0"`. `value` already carries its own grammar — either `"not set"`
-    /// (covering absent and set-but-empty, which Helm cannot tell apart) or
-    /// a quoted string for anything else — so the message reads naturally
-    /// either way rather than printing `is not set` wrapped in quotes.
+    /// H1 of the ADR-0705 census, carried out as ADR-0845: `_TLS_ENABLED` is
+    /// NOT SET at all — the same "absent, no default" shape `boot::env_required`
+    /// gives every DB_* knob, with its own distinct sentence for the same
+    /// reason: absence used to mean cleartext, which is the silent downgrade
+    /// this refusal exists to stop — a chart that failed to render the flag
+    /// produced exactly the listener a deployment that chose cleartext on
+    /// purpose would, with nothing telling the two apart.
+    #[error(
+        "{0}_TLS_ENABLED is NOT SET. There is no compiled-in default (ADR-0569): set it to \
+         \"1\" (serve TLS) or \"0\" (serve cleartext). The chart renders this as \
+         tls.enabled, unconditionally and with no default of its own (ADR-0845)."
+    )]
+    EnabledNotSet(&'static str),
+
+    /// The DISCRIMINATING case: set but EMPTY. Helm renders a nulled chart
+    /// value as `""`, so this is the shape a values override that nulls
+    /// `tls.enabled` actually produces — a DIFFERENT state from absence, and
+    /// the two must not share one message (the same rule `boot::env_required`
+    /// states for every DB_* knob).
+    #[error(
+        "{0}_TLS_ENABLED is set but EMPTY. There is no compiled-in default (ADR-0569), so \
+         there is nothing to fall back to: a values override that nulls tls.enabled \
+         produces exactly this. Set it to \"1\" (serve TLS) or \"0\" (serve cleartext). \
+         The chart renders this as tls.enabled, unconditionally and with no default of \
+         its own (ADR-0845)."
+    )]
+    EnabledEmpty(&'static str),
+
+    /// Present, non-empty, and neither `"1"` nor `"0"`.
     #[error(
         "{prefix}_TLS_ENABLED must be exactly \"1\" (serve TLS) or \"0\" (serve cleartext) \
-         and is {value}. There is no compiled-in default: absence used to mean cleartext, \
-         which is the silent downgrade this refusal exists to stop — a chart that failed \
-         to render the flag produced exactly the listener a deployment that chose \
-         cleartext on purpose would, with nothing telling the two apart. The chart \
-         renders this as tls.enabled, unconditionally and with no default of its own \
-         (ADR-0845)."
+         and is {value:?}. The chart renders this as tls.enabled, unconditionally and with \
+         no default of its own (ADR-0845)."
     )]
     EnabledInvalid { prefix: &'static str, value: String },
 

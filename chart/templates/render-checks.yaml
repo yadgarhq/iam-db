@@ -201,7 +201,7 @@ ships nothing the binary cannot act on.
       "repository does not read yadgar-lifecycle's client-verification side (ledger "
       "925, ADR-0846): a later release adopts it and starts checking a caller's "
       "certificate, and promising that now with `optional` or `required` would be a "
-      "check nothing performs. Write `tls.clientAuth: off`, or leave the key unset."))
+      "check nothing performs. Write `tls.clientAuth: \"off\"`, or leave the key unset."))
       .Values.tls.clientAuth) }}
 {{- end }}
 {{- end }}

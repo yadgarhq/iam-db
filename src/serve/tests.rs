@@ -21,11 +21,30 @@ fn lookup<'a>(pairs: &'a [(&'static str, &'static str)]) -> impl Fn(&str) -> Opt
 fn nothing_configured_refuses_naming_the_flag() {
     let err = ServerTls::from_lookup(LISTEN, lookup(&[])).unwrap_err();
     assert!(
-        matches!(err, ServerTlsError::EnabledInvalid { prefix: LISTEN, .. }),
+        matches!(err, ServerTlsError::EnabledNotSet(LISTEN)),
         "{err}"
     );
     assert!(err.to_string().contains("LISTEN_TLS_ENABLED"), "{err}");
     assert!(err.to_string().contains("tls.enabled"), "{err}");
+    assert!(err.to_string().contains("NOT SET"), "{err}");
+}
+
+/// Set but EMPTY is a DIFFERENT state from absent — Helm renders a nulled
+/// chart value as `""`, which is what a values override that nulls
+/// `tls.enabled` actually produces — and the two must not share one message,
+/// the same discrimination `boot::env_required` makes for every DB_* knob.
+#[test]
+fn an_empty_flag_refuses_with_a_message_of_its_own() {
+    let vars = [("LISTEN_TLS_ENABLED", "")];
+    let err = ServerTls::from_lookup(LISTEN, lookup(&vars)).unwrap_err();
+    assert!(matches!(err, ServerTlsError::EnabledEmpty(LISTEN)), "{err}");
+    let empty = err.to_string();
+    assert!(empty.contains("EMPTY"), "{empty}");
+
+    let absent = ServerTls::from_lookup(LISTEN, lookup(&[]))
+        .unwrap_err()
+        .to_string();
+    assert_ne!(absent, empty, "absent and empty must not share one message");
 }
 
 /// Paths with no flag at all refuse too — H1 does not carve out an exception
@@ -40,7 +59,7 @@ fn a_certificate_alone_with_no_flag_still_refuses() {
     ];
     let err = ServerTls::from_lookup(LISTEN, lookup(&vars)).unwrap_err();
     assert!(
-        matches!(err, ServerTlsError::EnabledInvalid { .. }),
+        matches!(err, ServerTlsError::EnabledNotSet(LISTEN)),
         "{err}"
     );
 }
@@ -66,7 +85,9 @@ fn explicit_zero_with_a_certificate_still_disables_tls() {
 /// refusal, not a silent choice.
 #[test]
 fn anything_but_one_and_zero_refuses() {
-    for value in ["false", "no", "true", "yes", "", " "] {
+    // "" and " " trim to EMPTY, the discriminated case; everything else is a
+    // present, non-empty value that is still neither "1" nor "0".
+    for value in ["false", "no", "true", "yes"] {
         let vars = [
             ("LISTEN_TLS_ENABLED", value),
             ("LISTEN_TLS_CERT_FILE", SENTINEL_CERT),
@@ -76,6 +97,18 @@ fn anything_but_one_and_zero_refuses() {
         assert!(
             matches!(err, ServerTlsError::EnabledInvalid { .. }),
             "{value:?} must refuse, not silently choose a transport: {err}"
+        );
+    }
+    for value in ["", " "] {
+        let vars = [
+            ("LISTEN_TLS_ENABLED", value),
+            ("LISTEN_TLS_CERT_FILE", SENTINEL_CERT),
+            ("LISTEN_TLS_KEY_FILE", SENTINEL_KEY),
+        ];
+        let err = ServerTls::from_lookup(LISTEN, lookup(&vars)).unwrap_err();
+        assert!(
+            matches!(err, ServerTlsError::EnabledEmpty(LISTEN)),
+            "{value:?} must refuse as EMPTY, not silently choose a transport: {err}"
         );
     }
 }
@@ -157,7 +190,7 @@ fn variables_under_another_prefix_do_not_configure_the_listener() {
     ];
     let err = ServerTls::from_lookup(LISTEN, lookup(&vars)).unwrap_err();
     assert!(
-        matches!(err, ServerTlsError::EnabledInvalid { prefix: LISTEN, .. }),
+        matches!(err, ServerTlsError::EnabledNotSet(LISTEN)),
         "{err}"
     );
 }
