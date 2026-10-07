@@ -49,6 +49,15 @@ import yaml
 CHART = Path(__file__).resolve().parents[2] / "chart"
 SCHEMA_PATH = CHART / "values.schema.json"
 
+# `tls.enabled` ships no default any more (ledger 1257, H1, ADR-0845), so a
+# BARE `helm template`/`lint` now refuses before any of the structure this
+# file checks is ever reached. Every render below passes this file, and a
+# test-specific `-f`/`--set` after it still wins on whatever it states.
+# `test_a_bare_render_refuses_naming_tls_enabled` and
+# `test_lint_strict_refuses_on_defaults_with_no_tls_enabled_stated` are the
+# two cases that deliberately do NOT pass it.
+CI_VALUES = CHART / "ci" / "values.yaml"
+
 # Adopted from task-db#83's test_values_schema.py (ledger 990 opus review): the
 # JSON path (as a tuple of segments) and the key name out of a schema refusal
 # — on EITHER measured helm shape — never the sentence around them, so a
@@ -85,7 +94,31 @@ OPEN = {"global", "resources", "rollingUpdate", "database.instance.resources"}
 # Paths the schema declares as leaves though `values.yaml` never states them —
 # a template reads each one and no mapping in `values.yaml` owns it. §2 step 2,
 # §3.6 of the D-S brief.
-EXTRAS = {"image.digest", "networkPolicy.scrapeFrom.namespace"}
+#
+# `tls.clientAuth`, `tls.clientCaSecret` and `tls.clientCaSecretKey` join this
+# set in C-DB1 (B-U5E, folded; ledger 925, ADR-0846): `templates/render-checks.yaml`
+# validates `clientAuth`'s TYPE and value when present (ADR-0847's carve-out, the
+# same lane `database.create` and `autoscaling.enabled` use), `values.yaml` ships
+# none of the three, and `templates/deployment.yaml` reads each only when present.
+EXTRAS = {
+    "image.digest",
+    "networkPolicy.scrapeFrom.namespace",
+    "tls.clientAuth",
+    "tls.clientCaSecret",
+    "tls.clientCaSecretKey",
+}
+
+# Paths the schema makes `required` with a `type`, and for which `values.yaml`
+# ships NO default (ADR-0569: a behavioural switch takes no compiled-in
+# default). `tls.enabled` is the one member today (ledger 1257, H1, ADR-0845).
+# THIS IS A DIFFERENT REASON TO BE ABSENT FROM `values.yaml` THAN EXTRAS IS,
+# and `extras_mismatch_failures` excludes it separately rather than folding it
+# into EXTRAS: an EXTRA is a leaf nothing needs `values.yaml` to state: a
+# REQUIRED_NO_DEFAULT leaf is one `values.yaml` is FORBIDDEN from defaulting.
+# Relaxing the census by putting `tls.enabled` in EXTRAS instead would stop
+# `test_every_values_yaml_leaf_is_declared`-style drift detection from ever
+# being able to tell the two reasons apart again.
+REQUIRED_NO_DEFAULT = {"tls.enabled"}
 
 
 def load_schema() -> dict[str, Any]:
@@ -178,10 +211,12 @@ def undeclared_value_failures(schema: dict[str, Any], values: dict[str, Any]) ->
 
 
 def extras_mismatch_failures(schema: dict[str, Any], values: dict[str, Any]) -> list[str]:
-    """Every schema leaf absent from values.yaml (and not `global`, which is
-    its own check below) must be exactly the EXTRAS tuple — no more, no
-    fewer."""
-    extra_in_schema = schema_leaf_paths(schema) - values_leaf_paths(values) - {"global"}
+    """Every schema leaf absent from values.yaml (and not `global`, nor a
+    REQUIRED_NO_DEFAULT leaf — both their own checks) must be exactly the
+    EXTRAS tuple — no more, no fewer."""
+    extra_in_schema = (
+        schema_leaf_paths(schema) - values_leaf_paths(values) - {"global"} - REQUIRED_NO_DEFAULT
+    )
     failures = []
     for missing in sorted(EXTRAS - extra_in_schema):
         failures.append(f"{missing}: expected as an extra, not declared in the schema")
@@ -194,6 +229,32 @@ def global_failures(schema: dict[str, Any]) -> list[str]:
     if schema.get("properties", {}).get("global") != {}:
         return ["global: not declared as an open map ({}) at the root"]
     return []
+
+
+def required_no_default_failures(schema: dict[str, Any], values: dict[str, Any]) -> list[str]:
+    """Every REQUIRED_NO_DEFAULT path is a typed, `required` leaf in the
+    schema AND absent from `values.yaml` — both halves of the property that
+    makes it a different reason to be missing than an EXTRA, so a mutation
+    that restores either half (a default in `values.yaml`, or a schema that
+    stops requiring the key) must redden here."""
+    failures: list[str] = []
+    schema_leaves = schema_leaf_paths(schema)
+    present_values = values_leaf_paths(values)
+    for path in sorted(REQUIRED_NO_DEFAULT):
+        if path not in schema_leaves:
+            failures.append(f"{path}: not declared as a schema leaf")
+            continue
+        *parent_segments, leaf = path.split(".")
+        node = schema
+        for segment in parent_segments:
+            node = node["properties"][segment]
+        if leaf not in node.get("required", []):
+            failures.append(f"{path}: not in its parent's schema 'required' list")
+        if node["properties"][leaf].get("type") is None:
+            failures.append(f"{path}: schema leaf carries no 'type'")
+        if path in present_values:
+            failures.append(f"{path}: present in values.yaml, which REQUIRED_NO_DEFAULT says ships none")
+    return failures
 
 
 def test_every_object_is_closed_unless_declared_open() -> None:
@@ -216,6 +277,11 @@ def test_global_is_declared_open() -> None:
     assert not failures, failures
 
 
+def test_every_required_no_default_leaf_is_typed_required_and_unstated() -> None:
+    failures = required_no_default_failures(load_schema(), load_values())
+    assert not failures, failures
+
+
 # --------------------------------------------------------------------------
 # Mutation checks — each breaks ONE property the checks above assert, then
 # asserts the SAME function reddens. A structural suite that cannot fail
@@ -233,6 +299,24 @@ def test_deleting_global_reddens_the_global_check() -> None:
     mutated = copy.deepcopy(load_schema())
     del mutated["properties"]["global"]
     assert global_failures(mutated), "deleting `global` should have reddened"
+
+
+def test_restoring_a_values_yaml_default_reddens_the_required_no_default_check() -> None:
+    """The mutation this whole set exists to catch: `tls.enabled: false` back
+    in `values.yaml`, the way it shipped before H1."""
+    mutated_values = copy.deepcopy(load_values())
+    mutated_values["tls"]["enabled"] = False
+    assert required_no_default_failures(load_schema(), mutated_values), (
+        "restoring tls.enabled's default in values.yaml should have reddened"
+    )
+
+
+def test_dropping_the_schema_required_reddens_the_required_no_default_check() -> None:
+    mutated_schema = copy.deepcopy(load_schema())
+    mutated_schema["properties"]["tls"]["required"] = []
+    assert required_no_default_failures(mutated_schema, load_values()), (
+        "dropping tls.enabled from the schema's required list should have reddened"
+    )
 
 
 def test_deleting_an_extra_reddens_the_extras_check() -> None:
@@ -265,7 +349,11 @@ def helm_binaries() -> list[str]:
 
 
 def render(binary: str, *arguments: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run([binary, "template", "x", str(CHART), *arguments], capture_output=True, text=True)
+    return subprocess.run(
+        [binary, "template", "x", str(CHART), "-f", str(CI_VALUES), *arguments],
+        capture_output=True,
+        text=True,
+    )
 
 
 def values_file(tmp_path: Path, name: str, body: Any) -> str:
@@ -288,8 +376,22 @@ def test_defaults_still_render_unchanged() -> None:
 def test_lint_strict_passes_on_defaults() -> None:
     for name in ("helm",):
         binary = shutil.which(name)
-        result = subprocess.run([binary, "lint", "--strict", str(CHART)], capture_output=True, text=True)
+        result = subprocess.run(
+            [binary, "lint", "--strict", str(CHART), "-f", str(CI_VALUES)], capture_output=True, text=True
+        )
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_lint_strict_refuses_a_bare_render_with_tls_enabled_unstated() -> None:
+    """Correction 1's claim, measured rather than assumed: a template-only
+    `fail` is invisible to `helm lint --strict` (it logs at INFO and still
+    exits 0) — the SCHEMA's `required` is what reddens it. Deliberately the
+    one case in this file with no `-f` at all."""
+    for name in ("helm",):
+        binary = shutil.which(name)
+        result = subprocess.run([binary, "lint", "--strict", str(CHART)], capture_output=True, text=True)
+        assert result.returncode != 0, "lint --strict passed with tls.enabled unstated"
+        assert "enabled" in (result.stdout + result.stderr)
 
 
 def test_root_typo_is_refused_naming_the_key_and_the_root_path(tmp_path: Path) -> None:
@@ -305,7 +407,9 @@ def test_lint_strict_refuses_the_root_typo_naming_the_key(tmp_path: Path) -> Non
     for name in ("helm",):
         binary = shutil.which(name)
         result = subprocess.run(
-            [binary, "lint", "--strict", str(CHART), "-f", overlay], capture_output=True, text=True
+            [binary, "lint", "--strict", str(CHART), "-f", str(CI_VALUES), "-f", overlay],
+            capture_output=True,
+            text=True,
         )
         assert result.returncode != 0, "lint --strict passed a root-level typo"
         assert "databse" in (result.stdout + result.stderr)

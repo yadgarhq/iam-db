@@ -22,6 +22,11 @@ CHART = Path(__file__).resolve().parents[2] / "chart"
 KNOB = "database.migrationLockTimeoutSeconds"
 VARIABLE = "DB_MIGRATION_LOCK_TIMEOUT_SECONDS"
 
+# `tls.enabled` ships no default any more (ledger 1257, H1, ADR-0845); see
+# `test_render_checks.py`'s own `CI_VALUES` for why every render in this
+# suite now passes it.
+CI_VALUES = CHART / "ci" / "values.yaml"
+
 
 def render(*arguments: str) -> subprocess.CompletedProcess[str]:
     binary = shutil.which("helm")
@@ -30,7 +35,7 @@ def render(*arguments: str) -> subprocess.CompletedProcess[str]:
         "`helm lint and render` pre-commit hook — install helm rather than skip."
     )
     return subprocess.run(
-        [binary, "template", "lock", str(CHART), *arguments],
+        [binary, "template", "lock", str(CHART), "-f", str(CI_VALUES), *arguments],
         capture_output=True,
         text=True,
     )

@@ -22,15 +22,17 @@ repos:
   # at first install and never re-resolves it, so a moving tag would silently
   # freeze each machine at whatever it meant the day it first ran.
   - repo: https://github.com/yadgarhq/actions
-    # THE REV MOVES FROM v1.20.1 TO v1.22.0 FOR THE TWO IDS BELOW, and the whole
-    # block comes with it because pre-commit resolves one rev per repository
-    # entry. `git diff --stat v1.20.1 v1.22.0 -- hooks/ .pre-commit-hooks.yaml`
-    # is 1901 insertions and 0 deletions, touching only the new
-    # `hooks/chart_baseline.py` and the two manifest entries that publish it — so
-    # no hook already in this block changes behaviour. A second `repo:` entry
-    # pinning the same repository at a second rev was the alternative, and it is
-    # the drift the shared manifest exists to prevent.
-    rev: v1.22.0
+    # THE REV MOVES FROM v1.22.0 TO v1.31.0 (ledgers 1257, 748; ADR-0845, C-A1,
+    # C-A2). This pulls every hook tightening since v1.22.0, measured against
+    # this tree: the widened ADR-0569 gate (unit C-A1) is the one that actually
+    # found something here — three hits, all fixed in this same PR (see the PR
+    # body). `git diff --stat v1.22.0 v1.31.0 -- hooks/ .pre-commit-hooks.yaml`
+    # also adds three new hook ids (`seed-no-ask-prompt`, `seed-front-matter`,
+    # `hermetic-git`); none is adopted here — the first two gate a yadgar seed
+    # declaration, which this repository is not, and the third gates a test
+    # that shells a THROWAWAY git repository under `tmp_path`, which nothing
+    # here does (ADR-0577: a hook nobody references gates nothing).
+    rev: v1.31.0
     hooks:
       - id: gitleaks
       - id: prettier

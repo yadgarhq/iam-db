@@ -14,39 +14,68 @@ fn lookup<'a>(pairs: &'a [(&'static str, &'static str)]) -> impl Fn(&str) -> Opt
     }
 }
 
-/// THE DEFAULT, and the property the whole change is built around: nothing
-/// configured means the plaintext listener, unchanged.
+/// H1 (ADR-0845): ABSENCE NO LONGER MEANS CLEARTEXT. It used to; this is the
+/// property the whole change replaces, and the red-first case for it: today
+/// this was `Ok(None)`.
 #[test]
-fn nothing_configured_means_no_tls() {
-    assert_eq!(ServerTls::from_lookup(LISTEN, lookup(&[])).unwrap(), None);
+fn nothing_configured_refuses_naming_the_flag() {
+    let err = ServerTls::from_lookup(LISTEN, lookup(&[])).unwrap_err();
+    assert!(
+        matches!(err, ServerTlsError::EnabledInvalid { prefix: LISTEN, .. }),
+        "{err}"
+    );
+    assert!(err.to_string().contains("LISTEN_TLS_ENABLED"), "{err}");
+    assert!(err.to_string().contains("tls.enabled"), "{err}");
 }
 
-/// Paths without the flag are the REVERTED state, not an error. The flag is
-/// the lever; leaving the files named is how it gets pulled back.
+/// Paths with no flag at all refuse too — H1 does not carve out an exception
+/// for "a certificate is configured", because the failure it exists to stop
+/// is exactly a chart that failed to render the flag, and that chart can
+/// just as easily have rendered the certificate paths beside it.
 #[test]
-fn a_certificate_alone_does_not_enable_tls() {
+fn a_certificate_alone_with_no_flag_still_refuses() {
     let vars = [
+        ("LISTEN_TLS_CERT_FILE", SENTINEL_CERT),
+        ("LISTEN_TLS_KEY_FILE", SENTINEL_KEY),
+    ];
+    let err = ServerTls::from_lookup(LISTEN, lookup(&vars)).unwrap_err();
+    assert!(
+        matches!(err, ServerTlsError::EnabledInvalid { .. }),
+        "{err}"
+    );
+}
+
+/// Explicit "0" is still the REVERTED state, not an error, and a certificate
+/// left in place beside it is still how the lever gets pulled back — that
+/// half of the behaviour is unchanged by H1, which narrows what counts as
+/// "off" to a STATED "0" rather than widening what counts as an error.
+#[test]
+fn explicit_zero_with_a_certificate_still_disables_tls() {
+    let vars = [
+        ("LISTEN_TLS_ENABLED", "0"),
         ("LISTEN_TLS_CERT_FILE", SENTINEL_CERT),
         ("LISTEN_TLS_KEY_FILE", SENTINEL_KEY),
     ];
     assert_eq!(ServerTls::from_lookup(LISTEN, lookup(&vars)).unwrap(), None);
 }
 
-/// Anything but "1" is off. A permissive parse is how a setting meant to be
-/// off ends up on — and here also how one meant to be revertible stops
-/// being.
+/// Exactly "1" or "0" and nothing else, in either direction. A permissive
+/// parse is how a setting meant to be off ends up on, and the reverse
+/// mistake is worse: nothing here, including "" and " ", degrades to the
+/// old default of cleartext any more — every one of them is now a named
+/// refusal, not a silent choice.
 #[test]
-fn only_exactly_one_enables_tls() {
-    for value in ["0", "false", "no", "true", "yes", "", " "] {
+fn anything_but_one_and_zero_refuses() {
+    for value in ["false", "no", "true", "yes", "", " "] {
         let vars = [
             ("LISTEN_TLS_ENABLED", value),
             ("LISTEN_TLS_CERT_FILE", SENTINEL_CERT),
             ("LISTEN_TLS_KEY_FILE", SENTINEL_KEY),
         ];
-        assert_eq!(
-            ServerTls::from_lookup(LISTEN, lookup(&vars)).unwrap(),
-            None,
-            "{value:?} must not enable TLS"
+        let err = ServerTls::from_lookup(LISTEN, lookup(&vars)).unwrap_err();
+        assert!(
+            matches!(err, ServerTlsError::EnabledInvalid { .. }),
+            "{value:?} must refuse, not silently choose a transport: {err}"
         );
     }
 }
@@ -113,7 +142,11 @@ fn both_paths_arrive() {
 }
 
 /// The prefix is what selects the variables, so a value meant for something
-/// else cannot configure the listener.
+/// else cannot configure the listener. `LISTEN_TLS_ENABLED` itself is still
+/// absent here, so this refuses exactly as the no-variables case does — the
+/// property under test is that it refuses NAMING "LISTEN", never "TLS",
+/// "SERVER_TLS" or "IAM_DB_TLS", which would mean one of the wrong-prefix
+/// variables was read instead.
 #[test]
 fn variables_under_another_prefix_do_not_configure_the_listener() {
     let vars = [
@@ -122,7 +155,11 @@ fn variables_under_another_prefix_do_not_configure_the_listener() {
         ("IAM_DB_TLS_ENABLED", "1"),
         ("TLS_CERT_FILE", SENTINEL_CERT),
     ];
-    assert_eq!(ServerTls::from_lookup(LISTEN, lookup(&vars)).unwrap(), None);
+    let err = ServerTls::from_lookup(LISTEN, lookup(&vars)).unwrap_err();
+    assert!(
+        matches!(err, ServerTlsError::EnabledInvalid { prefix: LISTEN, .. }),
+        "{err}"
+    );
 }
 
 /// A CONFIGURATION error and a FILE error are different failures, and only

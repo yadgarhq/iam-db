@@ -403,3 +403,62 @@ fn an_unrendered_ssl_mode_refuses_rather_than_encrypting_on_a_mode_nobody_chose(
     let message = err.to_string();
     assert!(message.contains(SSL_MODE_KEY), "{message}");
 }
+
+/// Ledger 1257: a present-but-not-numeric knob is [`BootError::Unparsable`],
+/// which names the variable, the chart key AND the value given. The
+/// `#[error(transparent)] Int(#[from] ParseIntError)` this replaced named
+/// none of them — just sqlx's own "invalid digit found in string", which an
+/// operator cannot act on without first knowing which of the four numeric
+/// knobs produced it.
+///
+/// MUTATION: restoring `Int(#[from] ParseIntError)` and the bare `?` at each
+/// parse site reddens this test — `Unparsable` would no longer exist to
+/// match against, and `Int` carries no `key`/`chart_key`/`value` fields to
+/// assert on.
+#[test]
+fn a_non_numeric_knob_refuses_naming_the_key_the_chart_key_and_the_value() {
+    for (key, chart_key) in [
+        ("DB_PORT", "database.port"),
+        ("DB_MAX_CONNECTIONS", "database.maxConnections"),
+        ("REPLICAS", REPLICAS_CHART_KEY),
+        ("DB_ENGINE_MAX_CONNECTIONS", "database.engineMaxConnections"),
+    ] {
+        let err = pool_config(env_with(&[(key, "not-a-number")]))
+            .expect_err("a non-numeric value must refuse the boot");
+        match &err {
+            BootError::Unparsable {
+                key: got_key,
+                chart_key: got_chart_key,
+                value,
+                ..
+            } => {
+                assert_eq!(*got_key, key, "{err}");
+                assert_eq!(*got_chart_key, chart_key, "{err}");
+                assert_eq!(value, "not-a-number", "{err}");
+            }
+            other => panic!("{key} with a non-numeric value must be Unparsable, got: {other:?}"),
+        }
+        let message = err.to_string();
+        assert!(message.contains(key), "{message}");
+        assert!(message.contains(chart_key), "{message}");
+        assert!(message.contains("not-a-number"), "{message}");
+    }
+}
+
+/// Each `Missing` refusal now names the chart key too. Today's message said
+/// only "The chart renders it.", which told an operator reading a crash loop
+/// THAT a chart was responsible and left them to go find WHICH line; this
+/// names the line.
+#[test]
+fn an_absent_knob_names_the_chart_key_too() {
+    for (key, chart_key) in [
+        ("DB_HOST", "database.host"),
+        ("DB_NAME", "database.name"),
+        ("DB_USER", "database.user"),
+        (SSL_MODE_KEY, "database.sslMode"),
+    ] {
+        let err = pool_config(env_without(key)).expect_err("absent must refuse");
+        assert!(matches!(err, BootError::Missing(_)), "{err}");
+        assert!(err.to_string().contains(chart_key), "{err}");
+    }
+}

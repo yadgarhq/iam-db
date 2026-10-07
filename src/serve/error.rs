@@ -10,6 +10,23 @@ use std::path::PathBuf;
 /// that is what an operator who set the flag was trying to stop.
 #[derive(Debug, thiserror::Error)]
 pub enum ServerTlsError {
+    /// H1 of the ADR-0705 census, carried out as ADR-0845: `_TLS_ENABLED`
+    /// has no compiled-in default (ADR-0569) and accepts exactly `"1"` or
+    /// `"0"`. `value` already carries its own grammar — either `"not set"`
+    /// (covering absent and set-but-empty, which Helm cannot tell apart) or
+    /// a quoted string for anything else — so the message reads naturally
+    /// either way rather than printing `is not set` wrapped in quotes.
+    #[error(
+        "{prefix}_TLS_ENABLED must be exactly \"1\" (serve TLS) or \"0\" (serve cleartext) \
+         and is {value}. There is no compiled-in default: absence used to mean cleartext, \
+         which is the silent downgrade this refusal exists to stop — a chart that failed \
+         to render the flag produced exactly the listener a deployment that chose \
+         cleartext on purpose would, with nothing telling the two apart. The chart \
+         renders this as tls.enabled, unconditionally and with no default of its own \
+         (ADR-0845)."
+    )]
+    EnabledInvalid { prefix: &'static str, value: String },
+
     #[error(
         "{0}_TLS_ENABLED is set but {0}_TLS_CERT_FILE names no certificate. TLS was \
          asked for, so this is a deployment mistake rather than a reason to listen in \

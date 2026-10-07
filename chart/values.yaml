@@ -37,16 +37,22 @@ resources:
 # by hand produces something neither the chart nor the binary can tell apart.
 # Nothing here requires a CRD, an issuer or a mesh.
 tls:
-  # OFF, and it stays off until both halves of the hop can be turned on
-  # together. The code ships first and the cut-over is a separate, revertible
-  # change — the same discipline the attestation cut-over used.
+  # NO DEFAULT (H1 of the ADR-0705 census, ADR-0845). `enabled` used to ship
+  # `false` here, so an adopter who inherited this file unread got the
+  # plaintext listener on purpose; it also meant a chart that failed to
+  # render the key at all got the SAME plaintext listener by accident, with
+  # nothing telling the two apart. `values.schema.json` now makes the key
+  # `required`; set it explicitly:
   #
-  # THERE IS NO SILENT MIDDLE STATE. `true` with no usable certificate fails at
-  # boot naming the file, before the capability probe runs; it never falls back
-  # to a plaintext listener. `false` with a certificate still configured is the
-  # reverted state, and iam-db logs a warning saying the listener is in cleartext
-  # so nobody has to infer it.
-  enabled: false
+  #   enabled: true   # the cut-over: a usable certificate is REQUIRED; a
+  #                    # `true` with none fails at boot naming the file,
+  #                    # before the capability probe runs, and never falls
+  #                    # back to a plaintext listener.
+  #   enabled: false  # the reverted state. A certificate still configured
+  #                    # beside it is fine — it is how the cut-over gets
+  #                    # pulled back — and iam-db logs a warning saying the
+  #                    # listener is in cleartext so nobody has to infer it.
+  #
   # The Secret holding the certificate this service serves AND its private key.
   #
   # BOTH KEYS ARE MOUNTED HERE, which is the one place in this estate where that
@@ -65,6 +71,24 @@ tls:
   # The key inside that Secret holding the private key, mounted as
   # `tls-key.pem`. Named for the same reason.
   keySecretKey: tls.key
+  # UNSET, DELIBERATELY (B-U5E, folded; ledger 925, ADR-0846). `clientAuth`,
+  # `clientCaSecret` and `clientCaSecretKey` let an operator ask iam-db to
+  # verify ITS caller's certificate — the other direction from `certSecret`
+  # above, which is what iam-db presents. `templates/render-checks.yaml`
+  # accepts only `clientAuth: off` for now and refuses `optional` or
+  # `required` with a sentence saying so: this repository does not yet read
+  # `yadgar-lifecycle::serve_tls`'s client-verification side, so promising
+  # either would be a check nothing performs. A later release (B-U5) lifts
+  # that and contracts these three keys the way `enabled` above is
+  # contracted today.
+  #
+  #   clientAuth: off               # the only value accepted today
+  #   clientCaSecret: iam-db-tls    # defaults to tls.certSecret once B-U5
+  #                                  # contracts this key; a Secret NAME, not
+  #                                  # a switch, so ADR-0569 allows a default
+  #   clientCaSecretKey: ca.crt     # the key inside clientCaSecret holding
+  #                                  # the authority iam-db checks a caller's
+  #                                  # certificate against
 
 # D80: the platform is a deployment choice, so every number the binary needs is
 # a value here rather than a default only a fork can reach. These four were

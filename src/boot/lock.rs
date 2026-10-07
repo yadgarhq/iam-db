@@ -28,17 +28,18 @@ pub const MIGRATION_LOCK_TIMEOUT_CHART_KEY: &str = "database.migrationLockTimeou
 /// # Errors
 ///
 /// - absent or empty: [`BootError::Missing`], with [`env_required`]'s own
-///   sentence and the chart key appended;
+///   sentence, which already names [`MIGRATION_LOCK_TIMEOUT_CHART_KEY`];
 /// - not a whole number of seconds that fits an `i32`, or below one second (the
 ///   refusal `LockOptions::new` makes, measured on MariaDB 11.8.9 — a negative
 ///   wait never takes the lock and zero never waits):
 ///   [`BootError::MigrationLockWait`].
 pub fn migration_lock(env: impl Fn(&str) -> Option<String>) -> Result<LockOptions, BootError> {
-    let raw = env_required(&env, MIGRATION_LOCK_TIMEOUT_KEY).map_err(|sentence| {
-        BootError::Missing(format!(
-            "{sentence} Set the chart value {MIGRATION_LOCK_TIMEOUT_CHART_KEY}."
-        ))
-    })?;
+    let raw = env_required(
+        &env,
+        MIGRATION_LOCK_TIMEOUT_KEY,
+        MIGRATION_LOCK_TIMEOUT_CHART_KEY,
+    )
+    .map_err(BootError::Missing)?;
     let refuse = |reason: String| BootError::MigrationLockWait {
         value: raw.clone(),
         reason,
