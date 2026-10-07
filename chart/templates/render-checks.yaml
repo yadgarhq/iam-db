@@ -150,8 +150,8 @@ The refusal text does not quote the raise text it replaces (ADR-0794);
       "iam-db: `tls` is absent from the values, so `tls.enabled` cannot be read. "
       "Helm deletes a null-valued key that a chart in the tree declares, and restores "
       "no default, so a values file writing `tls:` with no value leaves this chart with "
-      "nothing under it. Write the keys you mean, or omit `tls` entirely and this "
-      "chart's own defaults apply.")) }}
+      "nothing under it. Write the keys you mean: `tls.enabled` has no default "
+      "(ADR-0845) and must be `true` or `false`.")) }}
 {{- end }}
 {{- if not (kindIs "map" .Values.tls) }}
 {{- fail (printf (join "" (list
@@ -185,21 +185,19 @@ ships nothing the binary cannot act on.
 {{- if hasKey .Values.tls "clientAuth" }}
 {{- if not (kindIs "string" .Values.tls.clientAuth) }}
 {{- fail (printf (join "" (list
-      "iam-db: `tls.clientAuth` must be a string and is %s (%s). YAML 1.1 reads an "
-      "UNQUOTED off, on, yes, no, true or false as a BOOLEAN, which is the usual way "
-      "to land here by accident — quote the value: write `clientAuth: \"off\"`, not "
-      "`clientAuth: off`. Write one of off, "
-      "optional, required."))
+      "iam-db: `tls.clientAuth` must be a quoted string (\"off\", \"optional\" or "
+      "\"required\") and is %s (%s). YAML 1.1 reads a bare off as false: write "
+      "`clientAuth: \"off\"`."))
       (kindOf .Values.tls.clientAuth) (toJson .Values.tls.clientAuth)) }}
 {{- end }}
 {{- if not (has .Values.tls.clientAuth (list "off" "optional" "required")) }}
 {{- fail (printf
-      "iam-db: `tls.clientAuth` must be one of off, optional, required and is %q."
+      "iam-db: `tls.clientAuth` must be `off`, `optional` or `required` and is %q."
       .Values.tls.clientAuth) }}
 {{- end }}
 {{- if ne .Values.tls.clientAuth "off" }}
 {{- fail (printf (join "" (list
-      "iam-db: `tls.clientAuth` is %q, which this chart does not enforce yet. This "
+      "iam-db: `tls.clientAuth` is %q, which is not enforced yet — B-U5 lands it. This "
       "repository does not read yadgar-lifecycle's client-verification side (ledger "
       "925, ADR-0846): a later release adopts it and starts checking a caller's "
       "certificate, and promising that now with `optional` or `required` would be a "

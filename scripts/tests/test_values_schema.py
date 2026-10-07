@@ -391,7 +391,12 @@ def test_lint_strict_refuses_a_bare_render_with_tls_enabled_unstated() -> None:
         binary = shutil.which(name)
         result = subprocess.run([binary, "lint", "--strict", str(CHART)], capture_output=True, text=True)
         assert result.returncode != 0, "lint --strict passed with tls.enabled unstated"
-        assert "enabled" in (result.stdout + result.stderr)
+        output = result.stdout + result.stderr
+        # THE STABLE WRAPPER, never the per-leaf phrase: helm 3.18.4 prints
+        # "tls: enabled is required" and 4.3.0 prints "missing property
+        # 'enabled'" for the SAME violation — both carry this sentence.
+        assert "values don't meet the specifications of the schema(s)" in output, output
+        assert "tls" in output, output
 
 
 def test_root_typo_is_refused_naming_the_key_and_the_root_path(tmp_path: Path) -> None:

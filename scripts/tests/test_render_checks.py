@@ -1542,6 +1542,14 @@ def examine_the_tls_shapes(chart: Path, destination: Path) -> tuple[list[str], i
 
         if expectation[0] == "schema":
             _, key = expectation
+            # THE STABLE WRAPPER AND THE PATH SEGMENT, never the per-leaf
+            # phrase: helm 3.18.4 and 4.3.0 word the SAME violation
+            # differently ("tls: enabled is required" vs. "missing property
+            # 'enabled'"), but both carry this sentence and the path.
+            if "values don't meet the specifications of the schema(s)" not in result.stderr:
+                failures.append(f"{label}: refused without the schema wrapper sentence: {result.stderr.strip()}")
+            if "tls" not in result.stderr:
+                failures.append(f"{label}: refused without naming the tls path segment: {result.stderr.strip()}")
             if key not in result.stderr:
                 failures.append(f"{label}: refused without naming {key!r}: {result.stderr.strip()}")
             schema_refused += 1
@@ -1610,6 +1618,31 @@ def test_stripping_the_tls_map_guard_reddens_its_own_shape(tmp_path):
     )
 
 
+def test_the_unconditional_ternary_agrees_with_tls_enabled_in_both_directions(tmp_path):
+    """K-1: `LISTEN_TLS_ENABLED` renders `"0"` when `tls.enabled` is false and
+    `"1"` when it is true — both directions, asserted on the LITERAL rendered
+    value rather than on presence alone.
+
+    MUTATION: `ternary "1" "0" .Values.tls.enabled` rewritten to
+    `ternary "1" "1" .Values.tls.enabled` (always `"1"`) passes every OTHER
+    test in this file — the shape tables above assert refusals, and the
+    golden render below states `tls.enabled: true` throughout, so neither
+    sees the false case at all. This is the one test that would redden."""
+    for enabled, want in [(False, '"0"'), (True, '"1"')]:
+        overlay = shape_overlay(f"tls:\n  enabled: {str(enabled).lower()}\n", tmp_path / str(enabled))
+        result = render(CHART, "--values", str(overlay))
+        assert result.returncode == 0, result.stderr
+        lines = result.stdout.splitlines()
+        rendered = next(
+            (lines[i + 1].strip() for i, l in enumerate(lines) if l.strip() == "- name: LISTEN_TLS_ENABLED"),
+            None,
+        )
+        assert rendered is not None, "LISTEN_TLS_ENABLED is not rendered at all"
+        assert rendered == f"value: {want}", (
+            f"tls.enabled: {enabled} rendered LISTEN_TLS_ENABLED as {rendered}, expected value: {want}"
+        )
+
+
 # ── THE SHAPE OF `tls.clientAuth`, B-U5E (folded into C-DB1; ledger 925, ADR-0846) ──
 #
 # VALIDATED ONLY WHEN PRESENT — unlike `tls.enabled`, this key has no default and is
@@ -1619,15 +1652,15 @@ def test_stripping_the_tls_map_guard_reddens_its_own_shape(tmp_path):
 # "renders exactly as origin/main" is actually checked.
 CLIENT_AUTH_SHAPE_ARMS = {
     "not-a-string": (
-        "`tls.clientAuth` must be a string",
+        "`tls.clientAuth` must be a quoted string",
         '{{- if not (kindIs "string" .Values.tls.clientAuth) }}',
     ),
     "bad-mode": (
-        "must be one of off, optional, required",
+        "must be `off`, `optional` or `required`",
         '{{- if not (has .Values.tls.clientAuth (list "off" "optional" "required")) }}',
     ),
     "not-enforced-yet": (
-        "this chart does not enforce yet",
+        "is not enforced yet",
         '{{- if ne .Values.tls.clientAuth "off" }}',
     ),
 }

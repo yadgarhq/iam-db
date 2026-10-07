@@ -92,22 +92,28 @@ fn test_dsn() -> Dsn {
         "YADGAR_TEST_DSN is unset; this harness boots the real binary against a real engine, \
          the same requirement tests/contract.rs states",
     );
-    let (base, _database) = dsn
-        .rsplit_once('/')
-        .unwrap_or_else(|| panic!("YADGAR_TEST_DSN {dsn:?} has no database component"));
+    // NONE OF THESE PANICS PRINT `dsn`. It carries the engine password in
+    // plaintext (`mysql://user:pass@host:port/db`), and a panic message
+    // lands in this harness's own captured stdout/stderr — which
+    // `Booted::fail` then echoes into the test output on every failure.
+    // Naming the STRUCTURE that is missing is enough to act on; the value
+    // never needs to be.
+    let (base, _database) = dsn.rsplit_once('/').unwrap_or_else(|| {
+        panic!("YADGAR_TEST_DSN has no database component (no '/' after the host:port)")
+    });
     let after_scheme = dsn
         .strip_prefix("mysql://")
-        .unwrap_or_else(|| panic!("YADGAR_TEST_DSN {dsn:?} is not a mysql:// DSN"));
+        .unwrap_or_else(|| panic!("YADGAR_TEST_DSN is not a mysql:// DSN"));
     let (credentials, host_and_port) = after_scheme
         .split_once('@')
-        .unwrap_or_else(|| panic!("YADGAR_TEST_DSN {dsn:?} has no user@host component"));
+        .unwrap_or_else(|| panic!("YADGAR_TEST_DSN has no user@host component"));
     let (host_and_port, _) = host_and_port
         .rsplit_once('/')
-        .unwrap_or_else(|| panic!("YADGAR_TEST_DSN {dsn:?} has no database component"));
+        .unwrap_or_else(|| panic!("YADGAR_TEST_DSN has no database component"));
     let (user, password) = credentials.split_once(':').unwrap_or((credentials, ""));
     let (host, port) = host_and_port
         .split_once(':')
-        .unwrap_or_else(|| panic!("YADGAR_TEST_DSN {dsn:?} has no host:port component"));
+        .unwrap_or_else(|| panic!("YADGAR_TEST_DSN has no host:port component"));
     Dsn {
         host: host.to_string(),
         port: port.to_string(),
