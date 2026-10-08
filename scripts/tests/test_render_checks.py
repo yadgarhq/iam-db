@@ -1643,14 +1643,23 @@ def test_the_unconditional_ternary_agrees_with_tls_enabled_in_both_directions(tm
         )
 
 
-# ── THE SHAPE OF `tls.clientAuth`, B-U5E (folded into C-DB1; ledger 925, ADR-0846) ──
+# ── THE CONTRACT ON `tls.clientAuth`, B-U5 (ledger 925, ADR-0846, X-ADR-1) ──
 #
-# VALIDATED ONLY WHEN PRESENT — unlike `tls.enabled`, this key has no default and is
-# not required (K-8 step 1 stays open until B-U5). `values.yaml` ships none of the
-# three client-auth keys, so EVERY shape below states `clientAuth` itself; an
-# absent key is covered by the golden render test below instead, which is where
-# "renders exactly as origin/main" is actually checked.
+# REQUIRED, WITH NO DEFAULT. The binary refuses to boot without
+# `LISTEN_TLS_CLIENT_AUTH` whether or not TLS is on, so the chart refuses an
+# absent `tls.clientAuth` too, and renders the variable UNCONDITIONALLY — never
+# behind `tls.enabled`, which would hand a cleartext deployment a refusing
+# binary. `values.schema.json` makes the key `required` and leaves it UNTYPED
+# (ADR-0847, ruling R1), so absence is a SCHEMA refusal and every other wrong
+# shape — a bare YAML `off`, null, a bad mode, a verifying mode beside a
+# cleartext listener or with no authority named — meets its own render-check
+# sentence WITH schema validation on. The absent arm is reached only with the
+# schema skipped (`--skip-schema-validation`).
 CLIENT_AUTH_SHAPE_ARMS = {
+    "client-auth-absent": (
+        "`tls.clientAuth` is absent",
+        '{{- if not (hasKey .Values.tls "clientAuth") }}',
+    ),
     "not-a-string": (
         "`tls.clientAuth` must be a quoted string",
         '{{- if not (kindIs "string" .Values.tls.clientAuth) }}',
@@ -1659,111 +1668,205 @@ CLIENT_AUTH_SHAPE_ARMS = {
         "must be `off`, `optional` or `required`",
         '{{- if not (has .Values.tls.clientAuth (list "off" "optional" "required")) }}',
     ),
-    "not-enforced-yet": (
-        "is not enforced yet",
-        '{{- if ne .Values.tls.clientAuth "off" }}',
+    "verifying-without-tls": (
+        "but `tls.enabled` is false: a cleartext listener",
+        '{{- if and (ne .Values.tls.clientAuth "off") (not .Values.tls.enabled) }}',
+    ),
+    "verifying-without-ca": (
+        "but `tls.clientCaSecret` names no authority to",
+        '{{- if and (ne .Values.tls.clientAuth "off") (not .Values.tls.clientCaSecret) }}',
     ),
 }
 
-# (label, overlay body, outcome). `"render"` means exit 0.
+CA = "  clientCaSecret: iam-db-client-ca\n  clientCaSecretKey: ca.crt\n"
+
+# (label, overlay body, outcome). `("render", mode, ca)` means exit 0 with
+# `LISTEN_TLS_CLIENT_AUTH` rendered as `mode`, and the client CA env, mount and
+# volume rendered exactly when `ca` (TLS on AND a CA Secret named). `("schema",)` means refused by
+# `values.schema.json` naming `clientAuth`; `("refuse", arm)` by THAT arm.
 CLIENT_AUTH_SHAPES = (
-    ("off-quoted", 'tls:\n  enabled: true\n  clientAuth: "off"\n', "render"),
-    # THE YAML 1.1 TRAP: an UNQUOTED off/on/yes/no/true/false is a BOOLEAN, not the
-    # string this key takes — measured, this is how an author who skips the quotes
-    # lands on `not-a-string` rather than on the mode they meant.
+    ("off", 'tls:\n  enabled: true\n  clientAuth: "off"\n', ("render", "off", False)),
+    # A CA named beside `off` is still mounted (the expand's gate, kept so an
+    # `off` render is unchanged): it lets a hop stage the CA before it moves
+    # to `optional`. The binary logs that it verifies nothing.
+    ("off-with-ca", 'tls:\n  enabled: true\n  clientAuth: "off"\n' + CA, ("render", "off", True)),
+    ("off-tls-disabled", 'tls:\n  enabled: false\n  clientAuth: "off"\n' + CA, ("render", "off", False)),
+    ("optional", 'tls:\n  enabled: true\n  clientAuth: "optional"\n' + CA, ("render", "optional", True)),
+    ("required", 'tls:\n  enabled: true\n  clientAuth: "required"\n' + CA, ("render", "required", True)),
+    ("absent", "tls:\n  enabled: true\n", ("schema",)),
+    # `required` passes a null, so the kind arm is what refuses it.
+    ("null", "tls:\n  enabled: true\n  clientAuth:\n", ("refuse", "not-a-string")),
+    # THE YAML 1.1 TRAP: an UNQUOTED off is the BOOLEAN false.
     ("off-unquoted", "tls:\n  enabled: true\n  clientAuth: off\n", ("refuse", "not-a-string")),
+    ("number", "tls:\n  enabled: true\n  clientAuth: 1\n", ("refuse", "not-a-string")),
     ("bad-mode", 'tls:\n  enabled: true\n  clientAuth: "nope"\n', ("refuse", "bad-mode")),
-    ("optional", 'tls:\n  enabled: true\n  clientAuth: "optional"\n', ("refuse", "not-enforced-yet")),
-    ("required", 'tls:\n  enabled: true\n  clientAuth: "required"\n', ("refuse", "not-enforced-yet")),
+    ("wrong-case", 'tls:\n  enabled: true\n  clientAuth: "Required"\n', ("refuse", "bad-mode")),
+    (
+        "required-tls-disabled",
+        'tls:\n  enabled: false\n  clientAuth: "required"\n' + CA,
+        ("refuse", "verifying-without-tls"),
+    ),
+    (
+        "required-no-ca",
+        'tls:\n  enabled: true\n  clientAuth: "required"\n',
+        ("refuse", "verifying-without-ca"),
+    ),
+    (
+        "optional-empty-ca",
+        'tls:\n  enabled: true\n  clientAuth: "optional"\n  clientCaSecret: ""\n',
+        ("refuse", "verifying-without-ca"),
+    ),
 )
 
-EXPECTED_CLIENT_AUTH_SHAPES = 5
-EXPECTED_CLIENT_AUTH_SHAPES_REFUSED = 4
+EXPECTED_CLIENT_AUTH_SHAPES = 14
+EXPECTED_CLIENT_AUTH_SHAPES_RENDERED = 5
+EXPECTED_CLIENT_AUTH_SHAPES_SCHEMA = 1
+EXPECTED_CLIENT_AUTH_SHAPES_REFUSED = 8
+
+# The one shape the schema catches (absence, by `required`), rendered WITH THE
+# SCHEMA SKIPPED: it must then reach its own render-check arm rather than a Go
+# type error. This keeps that arm falsifiable while the schema pre-empts it.
+CLIENT_AUTH_SHAPES_SCHEMA_SKIPPED = (
+    ("absent", "tls:\n  enabled: true\n", "client-auth-absent"),
+)
+
+CLIENT_CA_MARKERS = ("LISTEN_TLS_CLIENT_CA_FILE", "name: client-ca")
 
 
-def test_every_writable_shape_of_tls_clientauth_is_refused_or_rendered(tmp_path):
+def env_value(stdout: str, name: str) -> str | None:
+    """The rendered `value:` of env var `name`, or None if it is not rendered."""
+    lines = stdout.splitlines()
+    return next(
+        (lines[i + 1].strip() for i, line in enumerate(lines) if line.strip() == f"- name: {name}"),
+        None,
+    )
+
+
+def render_the_client_auth_shape(chart: Path, body: str, destination: Path, *extra: str):
+    """One shape rendered BARE — NOT through `render()`, whose `-f CI_VALUES`
+    states `clientAuth: "off"` and would deep-merge straight into a shape that
+    exists to leave the key ABSENT."""
+    overlay = shape_overlay(body, destination)
+    return helm("template", CHART_NAME, str(chart), "--values", str(overlay), *extra)
+
+
+def examine_the_client_auth_shapes(chart: Path, destination: Path) -> tuple[list[str], dict[str, int]]:
     failures: list[str] = []
-    refused = 0
+    counts = {"render": 0, "schema": 0, "refuse": 0}
 
     for label, body, expectation in CLIENT_AUTH_SHAPES:
-        overlay = shape_overlay(body, tmp_path / label)
-        result = render(CHART, "--values", str(overlay))
+        result = render_the_client_auth_shape(chart, body, destination / label)
+        kind = expectation[0]
+        counts[kind] += 1
 
-        if expectation == "render":
+        if kind == "render":
+            _, mode, ca = expectation
             if result.returncode != 0:
                 failures.append(f"{label}: expected a render, refused instead: {result.stderr.strip()}")
-            elif "LISTEN_TLS_CLIENT_AUTH" not in result.stdout:
-                failures.append(f"{label}: rendered but LISTEN_TLS_CLIENT_AUTH is missing")
+                continue
+            rendered = env_value(result.stdout, "LISTEN_TLS_CLIENT_AUTH")
+            if rendered != f'value: "{mode}"':
+                failures.append(f"{label}: LISTEN_TLS_CLIENT_AUTH rendered as {rendered!r}, expected {mode!r}")
+            want_ca = ca
+            for marker in CLIENT_CA_MARKERS:
+                if (marker in result.stdout) != want_ca:
+                    failures.append(f"{label}: {marker} rendered={marker in result.stdout}, expected {want_ca}")
+            continue
+
+        if result.returncode == 0:
+            failures.append(f"{label}: rendered and was NOT refused")
+            continue
+
+        if kind == "schema":
+            for arm, (phrase, _opening) in CLIENT_AUTH_SHAPE_ARMS.items():
+                if phrase in result.stderr:
+                    failures.append(f"{label}: expected a SCHEMA refusal, got the {arm} arm's sentence")
+            if "values don't meet the specifications of the schema(s)" not in result.stderr:
+                failures.append(f"{label}: refused without the schema wrapper sentence: {result.stderr.strip()}")
+            if "clientAuth" not in result.stderr:
+                failures.append(f"{label}: refused without naming clientAuth: {result.stderr.strip()}")
             continue
 
         _, arm = expectation
         phrase = CLIENT_AUTH_SHAPE_ARMS[arm][0]
-        if result.returncode == 0:
-            failures.append(f"{label}: rendered and was NOT refused")
-            continue
-        refused += 1
         if phrase not in result.stderr:
             failures.append(f"{label}: refused without the {arm} arm's message ({phrase!r}): {result.stderr.strip()}")
+        # Ruling R1: these shapes must meet the NAMED sentence with schema
+        # validation ON, so a schema line here means a `type`/`enum` came back.
+        if "values don't meet the specifications of the schema(s)" in result.stderr:
+            failures.append(f"{label}: the SCHEMA refused it, pre-empting the {arm} arm's sentence")
         for marker in RAISE_MARKERS:
             if marker in result.stderr:
                 failures.append(f"{label}: helm RAISED rather than refusing — {marker!r} is in the output")
 
+    return failures, counts
+
+
+def test_every_writable_shape_of_tls_clientauth_is_refused_or_rendered(tmp_path):
+    failures, counts = examine_the_client_auth_shapes(CHART, tmp_path)
+
     assert len(CLIENT_AUTH_SHAPES) == EXPECTED_CLIENT_AUTH_SHAPES
     assert failures == [], "\n".join(failures)
-    assert refused == EXPECTED_CLIENT_AUTH_SHAPES_REFUSED, refused
+    assert counts == {
+        "render": EXPECTED_CLIENT_AUTH_SHAPES_RENDERED,
+        "schema": EXPECTED_CLIENT_AUTH_SHAPES_SCHEMA,
+        "refuse": EXPECTED_CLIENT_AUTH_SHAPES_REFUSED,
+    }, counts
 
 
-# ── THE NESTING ITSELF: client-auth rendering requires `tls.enabled` ────────
-#
-# Every one of `LISTEN_TLS_CLIENT_AUTH`, `LISTEN_TLS_CLIENT_CA_FILE` and the
-# `client-ca` mount/volume is gated on `tls.enabled` in ADDITION to its own
-# key, per the coordinator's B-U5E-convention ruling: a client-auth leaf
-# beside a cleartext listener names a check that cannot run. Each case here
-# is a MUTATION a narrower gate (missing one of the `and` terms) would pass.
-CLIENT_MARKERS = ("LISTEN_TLS_CLIENT_AUTH", "LISTEN_TLS_CLIENT_CA_FILE", "name: client-ca")
+def test_with_the_schema_skipped_each_shape_reaches_its_own_arm(tmp_path):
+    """The template guard holds where the schema does not run. Each shape the
+    schema refuses must, with the schema skipped, produce its arm's sentence —
+    not a render, and not go/template's `incompatible types` raise."""
+    failures: list[str] = []
+    for label, body, arm in CLIENT_AUTH_SHAPES_SCHEMA_SKIPPED:
+        result = render_the_client_auth_shape(CHART, body, tmp_path / label, "--skip-schema-validation")
+        phrase = CLIENT_AUTH_SHAPE_ARMS[arm][0]
+        if result.returncode == 0:
+            failures.append(f"{label}: rendered with the schema skipped")
+        elif phrase not in result.stderr:
+            failures.append(f"{label}: refused without the {arm} arm's message ({phrase!r}): {result.stderr.strip()}")
+        for marker in RAISE_MARKERS:
+            if marker in result.stderr:
+                failures.append(f"{label}: helm RAISED rather than refusing — {marker!r} is in the output")
+    assert failures == [], "\n".join(failures)
 
 
-def test_an_empty_client_ca_secret_renders_nothing_client_related(tmp_path):
-    """`clientCaSecret: ""` is TRUTHINESS-false, the same test `DB_SSL_CA_FILE`
-    uses for `database.sslCaSecret` — an empty string must not render
-    `secretName: ""`."""
-    overlay = shape_overlay('tls:\n  enabled: true\n  clientAuth: "off"\n  clientCaSecret: ""\n', tmp_path)
+def test_client_auth_renders_unconditionally_beside_both_tls_switches(tmp_path):
+    """K-1 for the mode: `LISTEN_TLS_CLIENT_AUTH` renders whether `tls.enabled`
+    is true or false, because the binary reads it either way.
+
+    MUTATION: nest the env var back under `tls.enabled` (the expand's shape)
+    and the `false` row reddens — a cleartext deployment would get a binary
+    that refuses to boot."""
+    for enabled in (False, True):
+        overlay = shape_overlay(
+            f'tls:\n  enabled: {str(enabled).lower()}\n  clientAuth: "off"\n', tmp_path / str(enabled)
+        )
+        result = render(CHART, "--values", str(overlay))
+        assert result.returncode == 0, result.stderr
+        assert env_value(result.stdout, "LISTEN_TLS_CLIENT_AUTH") == 'value: "off"', (
+            f"tls.enabled: {enabled} did not render LISTEN_TLS_CLIENT_AUTH as \"off\""
+        )
+
+
+def test_the_client_ca_mount_is_the_path_the_env_names(tmp_path):
+    """The CA file the binary is told to read is inside the directory the
+    volume mounts, and the volume selects `tls.clientCaSecretKey` into it."""
+    overlay = shape_overlay('tls:\n  enabled: true\n  clientAuth: "required"\n' + CA, tmp_path)
     result = render(CHART, "--values", str(overlay))
     assert result.returncode == 0, result.stderr
-    for marker in ("LISTEN_TLS_CLIENT_CA_FILE", "name: client-ca"):
-        assert marker not in result.stdout, f"{marker} rendered with clientCaSecret empty"
-    # `clientAuth` alone, with no CA secret, still renders — only the CA
-    # trio is additionally gated on `clientCaSecret`.
-    assert "LISTEN_TLS_CLIENT_AUTH" in result.stdout
-
-
-def test_client_auth_off_with_tls_disabled_renders_nothing_client_related(tmp_path):
-    """`tls.enabled: false` with `clientAuth: "off"` and a CA secret both
-    named still renders NONE of the client-auth markers — a client-auth leaf
-    beside a cleartext listener is a check that cannot run."""
-    overlay = shape_overlay(
-        'tls:\n  enabled: false\n  clientAuth: "off"\n  clientCaSecret: iam-db-tls\n'
-        "  clientCaSecretKey: ca.crt\n",
-        tmp_path,
-    )
-    result = render(CHART, "--values", str(overlay))
-    assert result.returncode == 0, result.stderr
-    for marker in CLIENT_MARKERS:
-        assert marker not in result.stdout, f"{marker} rendered with tls.enabled: false"
-
-
-def test_client_ca_secret_without_client_auth_renders_nothing_client_related(tmp_path):
-    """`clientCaSecret` named with NO `clientAuth` key at all still renders
-    none of the three — the CA trio is gated on `hasKey clientAuth` too, not
-    on `clientCaSecret` alone."""
-    overlay = shape_overlay(
-        "tls:\n  enabled: true\n  clientCaSecret: iam-db-tls\n  clientCaSecretKey: ca.crt\n",
-        tmp_path,
-    )
-    result = render(CHART, "--values", str(overlay))
-    assert result.returncode == 0, result.stderr
-    for marker in CLIENT_MARKERS:
-        assert marker not in result.stdout, f"{marker} rendered with no clientAuth key"
+    ca_file = env_value(result.stdout, "LISTEN_TLS_CLIENT_CA_FILE")
+    assert ca_file is not None, "LISTEN_TLS_CLIENT_CA_FILE is not rendered"
+    path = ca_file.removeprefix("value: ").strip('"')
+    deployment = next(d for d in objects(result.stdout) if d["kind"] == "Deployment")
+    spec = deployment["spec"]["template"]["spec"]
+    mount = next(m for m in spec["containers"][0]["volumeMounts"] if m["name"] == "client-ca")
+    volume = next(v for v in spec["volumes"] if v["name"] == "client-ca")
+    item = volume["secret"]["items"][0]
+    assert path == f"{mount['mountPath']}/{item['path']}", (path, mount, item)
+    assert volume["secret"]["secretName"] == "iam-db-client-ca"
+    assert item["key"] == "ca.crt"
 
 
 def test_the_shape_refusal_does_not_quote_a_raise():

@@ -95,15 +95,14 @@ OPEN = {"global", "resources", "rollingUpdate", "database.instance.resources"}
 # a template reads each one and no mapping in `values.yaml` owns it. §2 step 2,
 # §3.6 of the D-S brief.
 #
-# `tls.clientAuth`, `tls.clientCaSecret` and `tls.clientCaSecretKey` join this
-# set in C-DB1 (B-U5E, folded; ledger 925, ADR-0846): `templates/render-checks.yaml`
-# validates `clientAuth`'s TYPE and value when present (ADR-0847's carve-out, the
-# same lane `database.create` and `autoscaling.enabled` use), `values.yaml` ships
-# none of the three, and `templates/deployment.yaml` reads each only when present.
+# `tls.clientCaSecret` and `tls.clientCaSecretKey` joined this set in C-DB1
+# (B-U5E, folded; ledger 925, ADR-0846): `values.yaml` ships neither, and
+# `templates/deployment.yaml` reads them only when a Secret is named.
+# `tls.clientAuth` LEFT it in B-U5 for REQUIRED_NO_DEFAULT below — the
+# contract makes it required with no default, a different reason to be absent.
 EXTRAS = {
     "image.digest",
     "networkPolicy.scrapeFrom.namespace",
-    "tls.clientAuth",
     "tls.clientCaSecret",
     "tls.clientCaSecretKey",
 }
@@ -119,6 +118,14 @@ EXTRAS = {
 # `test_every_values_yaml_leaf_is_declared`-style drift detection from ever
 # being able to tell the two reasons apart again.
 REQUIRED_NO_DEFAULT = {"tls.enabled"}
+
+# Paths the schema makes `required` with NO `type` and NO `enum`, and for which
+# `values.yaml` ships no default. `tls.clientAuth` (card B-U5, X-ADR-1): it
+# renders LISTEN_TLS_CLIENT_AUTH, which the binary refuses to boot without, so
+# the key is required — but its type and value are `templates/render-checks.yaml`'s
+# job (ADR-0847, coordinator ruling R1), so a bare `off` meets the named
+# sentence rather than a generic schema line that an `enum` would print first.
+REQUIRED_UNTYPED_NO_DEFAULT = {"tls.clientAuth"}
 
 
 def load_schema() -> dict[str, Any]:
@@ -215,7 +222,11 @@ def extras_mismatch_failures(schema: dict[str, Any], values: dict[str, Any]) -> 
     REQUIRED_NO_DEFAULT leaf — both their own checks) must be exactly the
     EXTRAS tuple — no more, no fewer."""
     extra_in_schema = (
-        schema_leaf_paths(schema) - values_leaf_paths(values) - {"global"} - REQUIRED_NO_DEFAULT
+        schema_leaf_paths(schema)
+        - values_leaf_paths(values)
+        - {"global"}
+        - REQUIRED_NO_DEFAULT
+        - REQUIRED_UNTYPED_NO_DEFAULT
     )
     failures = []
     for missing in sorted(EXTRAS - extra_in_schema):
@@ -254,6 +265,30 @@ def required_no_default_failures(schema: dict[str, Any], values: dict[str, Any])
             failures.append(f"{path}: schema leaf carries no 'type'")
         if path in present_values:
             failures.append(f"{path}: present in values.yaml, which REQUIRED_NO_DEFAULT says ships none")
+    return failures
+
+
+def required_untyped_failures(schema: dict[str, Any], values: dict[str, Any]) -> list[str]:
+    """Every REQUIRED_UNTYPED_NO_DEFAULT path is `required`, carries neither
+    `type` nor `enum`, and is absent from `values.yaml`. Re-adding an `enum`
+    (the shape ruling R1 removed) reddens here."""
+    failures: list[str] = []
+    present_values = values_leaf_paths(values)
+    for path in sorted(REQUIRED_UNTYPED_NO_DEFAULT):
+        *parent_segments, leaf = path.split(".")
+        node = schema
+        for segment in parent_segments:
+            node = node["properties"][segment]
+        if leaf not in node.get("properties", {}):
+            failures.append(f"{path}: not declared as a schema leaf")
+            continue
+        if leaf not in node.get("required", []):
+            failures.append(f"{path}: not in its parent's schema 'required' list")
+        for keyword in ("type", "enum"):
+            if keyword in node["properties"][leaf]:
+                failures.append(f"{path}: schema leaf carries {keyword!r}, which pre-empts the render check's sentence")
+        if path in present_values:
+            failures.append(f"{path}: present in values.yaml, which ships no default for it")
     return failures
 
 
@@ -397,6 +432,35 @@ def test_lint_strict_refuses_a_bare_render_with_tls_enabled_unstated() -> None:
         # 'enabled'" for the SAME violation — both carry this sentence.
         assert "values don't meet the specifications of the schema(s)" in output, output
         assert "tls" in output, output
+
+
+def test_lint_strict_refuses_tls_client_auth_unstated(tmp_path: Path) -> None:
+    """Card B-U5: with `tls.enabled` stated and `tls.clientAuth` not, the
+    SCHEMA's `required` reddens `helm lint --strict` — the template's own
+    refusal would log at INFO and pass, as above."""
+    overlay = values_file(tmp_path, "no-client-auth", "tls:\n  enabled: true\n")
+    for name in ("helm",):
+        binary = shutil.which(name)
+        result = subprocess.run(
+            [binary, "lint", "--strict", str(CHART), "-f", overlay], capture_output=True, text=True
+        )
+        assert result.returncode != 0, "lint --strict passed with tls.clientAuth unstated"
+        output = result.stdout + result.stderr
+        assert "values don't meet the specifications of the schema(s)" in output, output
+        assert "clientAuth" in output, output
+
+
+def test_tls_client_auth_is_required_untyped_and_unstated() -> None:
+    failures = required_untyped_failures(load_schema(), load_values())
+    assert failures == [], "\n".join(failures)
+
+
+def test_an_enum_on_tls_client_auth_reddens_the_untyped_check() -> None:
+    mutated_schema = copy.deepcopy(load_schema())
+    mutated_schema["properties"]["tls"]["properties"]["clientAuth"]["enum"] = ["off", "optional", "required"]
+    assert required_untyped_failures(mutated_schema, load_values()), (
+        "an enum on tls.clientAuth should have reddened the untyped check"
+    )
 
 
 def test_root_typo_is_refused_naming_the_key_and_the_root_path(tmp_path: Path) -> None:

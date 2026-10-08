@@ -202,6 +202,9 @@ pub fn boot_env(root: &Path) -> Vec<(&'static str, String)> {
         ("LISTEN", "127.0.0.1:0".to_string()),
         ("METRICS_LISTEN", "127.0.0.1:0".to_string()),
         ("LISTEN_TLS_ENABLED", "0".to_string()),
+        // X-ADR-1 (card B-U5): the client-auth mode has no default either,
+        // and is read even when TLS is off — `off` is the stated value.
+        ("LISTEN_TLS_CLIENT_AUTH", "off".to_string()),
     ]
 }
 

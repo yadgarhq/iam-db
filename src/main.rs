@@ -350,17 +350,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // 0. THE TRANSPORT THIS SERVICE LISTENS ON, before anything else runs. A
     //    missing certificate, an unreadable one, a file holding no certificate
-    //    at all and a key belonging to a different certificate are all refused
-    //    HERE — never downgraded to the plaintext listener, because a listener
-    //    that quietly stayed in the clear is the one failure an operator who
-    //    asked for TLS cannot see.
+    //    at all, a key belonging to a different certificate, an absent
+    //    client-auth mode and a client CA holding no authority are all refused
+    //    HERE — never downgraded to the plaintext listener.
     //
-    //    `.to_string()` on the way out, and not decoration: `main` returns
-    //    `Box<dyn Error>`, which Rust prints with DEBUG — so a bare `?` would
-    //    put `CertUnreadable { .. }` on the operator's terminal instead of the
-    //    sentence naming the file and saying why cleartext is not the answer.
-    let listen_tls = serve::ServerTls::from_env(serve::LISTEN).map_err(|e| e.to_string())?;
-    let server = serve::builder(listen_tls.as_ref()).map_err(|e| e.to_string())?;
+    //    `serve::refusal` on the way out, and not decoration: a bare `?` would
+    //    print the error with DEBUG, and `to_string()` would drop tonic's
+    //    `source` — the only layer that says WHY a key was refused.
+    let listen_tls = serve::from_env().map_err(|e| serve::refusal(&e))?;
+    let server = serve::builder(listen_tls.as_ref()).map_err(|e| serve::refusal(&e))?;
 
     // THE TWO LISTENER ADDRESSES, hoisted here rather than read where each is
     // used (ledger 1257). Neither depends on anything the probe or the

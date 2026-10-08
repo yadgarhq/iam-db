@@ -196,6 +196,7 @@ fn a_malformed_db_acquire_timeout_seconds_names_the_variable_and_the_chart_key()
 fn a_bad_listen_address_is_refused_naming_the_variable_with_no_engine_needed() {
     let mut vars: Vec<(&str, &str)> = FULL_POOL_ENV.to_vec();
     vars.push(("LISTEN_TLS_ENABLED", "0"));
+    vars.push(("LISTEN_TLS_CLIENT_AUTH", "off"));
     vars.push(("LISTEN", "notanaddr"));
     let stderr = refusal(&vars);
     assert!(stderr.contains("LISTEN is \"notanaddr\""), "{stderr}");
@@ -213,4 +214,40 @@ fn an_absent_tls_flag_is_refused_naming_the_variable_and_the_chart_key() {
     let stderr = refusal(FULL_POOL_ENV);
     assert!(stderr.contains("LISTEN_TLS_ENABLED"), "{stderr}");
     assert!(stderr.contains("tls.enabled"), "{stderr}");
+}
+
+/// X-ADR-1 (extends ADR-0845), card B-U5: `LISTEN_TLS_CLIENT_AUTH` has no
+/// default either, and it is read WHETHER OR NOT TLS is on — so a cleartext
+/// deployment that never states it refuses too, naming the variable and the
+/// chart key the operator edits. Everything after the transport is left
+/// unset on purpose: a binary that ignored the variable would refuse on
+/// `LISTEN` instead, and this assertion would see that.
+#[test]
+fn an_absent_client_auth_mode_is_refused_naming_the_variable_and_the_chart_key() {
+    let mut vars: Vec<(&str, &str)> = FULL_POOL_ENV.to_vec();
+    vars.push(("LISTEN_TLS_ENABLED", "0"));
+    let stderr = refusal(&vars);
+    assert!(stderr.contains("LISTEN_TLS_CLIENT_AUTH"), "{stderr}");
+    assert!(stderr.contains("tls.clientAuth"), "{stderr}");
+    assert!(
+        !stderr.contains("ClientAuthMissing"),
+        "the operator got the Debug variant, not the sentence: {stderr}"
+    );
+}
+
+/// The three modes are EXACT. `on`, `Required` and `true` are how a typo
+/// becomes a posture, so each refuses naming the variable and the chart key.
+#[test]
+fn a_client_auth_mode_outside_the_three_is_refused_naming_the_variable_and_the_chart_key() {
+    for value in ["on", "Required", "true"] {
+        let mut vars: Vec<(&str, &str)> = FULL_POOL_ENV.to_vec();
+        vars.push(("LISTEN_TLS_ENABLED", "0"));
+        vars.push(("LISTEN_TLS_CLIENT_AUTH", value));
+        let stderr = refusal(&vars);
+        assert!(
+            stderr.contains("LISTEN_TLS_CLIENT_AUTH"),
+            "{value}: {stderr}"
+        );
+        assert!(stderr.contains("tls.clientAuth"), "{value}: {stderr}");
+    }
 }

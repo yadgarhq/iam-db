@@ -29,7 +29,10 @@
 //! whatever the bytes mean. Four materials:
 //!
 //! - the listener's certificate AND its private key — both halves, or the pair
-//!   rotates half-watched;
+//!   rotates half-watched — and, under a verifying `tls.clientAuth`, the client
+//!   CA it checks callers against. These are the lifted `ServerTls`'s own
+//!   [`Material`] (`yadgar_lifecycle::serve_tls`, card B-U5), so the watch set
+//!   and the files the listener reads are one list;
 //! - **the database password**, which is not a certificate and is the member
 //!   with no other signal at all. It is read once by
 //!   `CredentialSource::SecretFile` and baked into a pool that lives as long as
@@ -60,22 +63,19 @@ pub use yadgar_lifecycle::rotate::{
     CERTIFICATE_NOT_AFTER, WATCHED_FILES_UNREADABLE,
 };
 
-use crate::serve::ServerTls;
+// THE LIBRARY'S OWN PATH, not `crate::serve`'s re-export: the ADR-0523 gate
+// (actions v1.34.0) pairs the `ADR-0523-LIBRARY-WATCHED` marker on
+// `watch_set` with a production `use` of exactly this path.
+use yadgar_lifecycle::serve_tls::ServerTls;
+
 use crate::service::SERVICE;
 
-/// The listener's certificate and the private key belonging to it.
-///
-/// **Both halves, or the pair rotates half-watched.** kubelet swaps a mount
-/// atomically, so a set holding only the certificate still fires on an ordinary
-/// rotation — but a deployment that rewrites the key alone would pass unnoticed.
-impl Material for ServerTls {
-    fn files(&self) -> Vec<File<'_>> {
-        vec![
-            File::certificate(Presented::Serving, self.cert_file()),
-            File::read(self.key_file()),
-        ]
-    }
-}
+// NO `impl Material for ServerTls` HERE ANY MORE (card B-U5). The listener's
+// type is `yadgar_lifecycle::serve_tls::ServerTls`, which implements the trait
+// itself: the serving certificate, its key, and the client CA exactly when a
+// verifying mode reads one. A local copy of that list is how the watch set and
+// the files the listener reads would drift apart. Its reads therefore live in
+// the library, which the marker on `watch_set` below declares (ADR-0523).
 
 /// Everything this deployment read at boot, hashed as it was read.
 ///
@@ -107,6 +107,7 @@ impl Material for ServerTls {
 /// Collecting paths and reading them when the watcher first polls would put the
 /// rest of boot inside a window where a kubelet swap quietly becomes the
 /// baseline, and the real rotation would never be noticed.
+// ADR-0523-LIBRARY-WATCHED: yadgar_lifecycle::serve_tls::ServerTls
 pub fn watch_set(
     listener: Option<&ServerTls>,
     db_password: &Path,

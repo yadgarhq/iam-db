@@ -36,8 +36,9 @@ yadgar-store = { git = "https://github.com/yadgarhq/store.git", tag = "v0.4.0" }
 # already chose for the client side of this hop, so one serves both directions.
 #
 # The feature is what makes `ServerTlsConfig` exist; it does NOT turn TLS on.
-# `serve::builder` binds a plaintext listener unless a deployment sets
-# LISTEN_TLS_ENABLED, and every chart default leaves it unset.
+# `serve::builder` binds a plaintext listener only for an explicit
+# LISTEN_TLS_ENABLED=0 with LISTEN_TLS_CLIENT_AUTH=off; an absent value of
+# either refuses to boot (ADR-0845, ADR-0854).
 tonic = { version = "0.14", default-features = false, features = [
   "codegen",
   "router",
@@ -45,12 +46,9 @@ tonic = { version = "0.14", default-features = false, features = [
   "transport",
   "tls-ring",
 ] }
-# The SAME PEM parser tonic itself uses on the certificate and the key, so "this
-# file holds no certificate" is decided here rather than failing opaquely inside
-# the acceptor. Present in the tree already by way of tokio-rustls; naming it
-# directly costs nothing and is what lets `serve.rs` say WHICH of the two files
-# an operator has to fix.
-rustls-pki-types = { version = "1", features = ["std"] }
+# NO `rustls-pki-types` any more (card B-U5). It was here so the local
+# `serve.rs` could parse the certificate and key itself and name the bad file;
+# `yadgar-lifecycle::serve_tls` does that now, so nothing here names the crate.
 tonic-prost = "0.14"
 prost = "0.14"
 prost-types = "0.14"
@@ -88,7 +86,16 @@ metrics = "0.24"
 # signal handler, so once the rotation arm wins the `select!` a later SIGTERM is
 # swallowed and only SIGKILL remains — the watcher WITHOUT `drain_within` is the
 # bug, not half the fix.
-yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle.git", tag = "v0.2.17" }
+#
+# `serve-tls` (v0.2.20, ADR-0846, card B-U5): the ONE `ServerTls` the six gRPC
+# servers share, client-certificate verification included. This repository's
+# own copy is deleted rather than kept beside it. The feature adds tonic's
+# server and rustls with the `ring` provider only, both already in this tree,
+# so no second crypto provider enters the graph (K-2, measured with
+# `cargo tree -i aws-lc-rs`).
+yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle.git", tag = "v0.2.20", features = [
+  "serve-tls",
+] }
 sqlx = { version = "0.9", default-features = false, features = [
   "runtime-tokio",
   "tls-rustls-ring",

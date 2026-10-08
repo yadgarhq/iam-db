@@ -246,31 +246,27 @@ spec:
             # writes them anywhere else; neither the chart nor the binary can
             # tell the difference, which is the point. STILL CONDITIONAL, unlike
             # the flag above: a path is meaningless when TLS is off, and
-            # `serve::ServerTls::from_lookup` never reads either when its own
+            # the binary's `serve::from_lookup` never reads either when its own
             # flag is "0".
             - name: LISTEN_TLS_CERT_FILE
               value: /var/run/secrets/iam-db-tls/tls.pem
             - name: LISTEN_TLS_KEY_FILE
               value: /var/run/secrets/iam-db-tls/tls-key.pem
             {{- end }}
-            {{- if and .Values.tls.enabled (hasKey .Values.tls "clientAuth") }}
-            # B-U5E (folded), ledger 925, ADR-0846: RENDERED ONLY WHEN TLS
-            # ITSELF IS ON AND THE KEY IS PRESENT (coordinator ruling
-            # 2026-10-07, the same nesting `project-db#54` uses) — a
-            # client-auth env var beside a cleartext listener names a check
-            # that cannot run, and an unconfigured deployment renders exactly
-            # as before this key existed either way. `templates/render-
-            # checks.yaml` has already refused anything but `off` by the time
-            # this line runs, so the value here is always `"off"` today —
-            # this binary does not read `LISTEN_TLS_CLIENT_AUTH` yet, and a
-            # later release (B-U5) is what starts both.
+            # RENDERED UNCONDITIONALLY (card B-U5, X-ADR-1), for the reason the
+            # flag above is: the binary reads `LISTEN_TLS_CLIENT_AUTH` WHETHER
+            # OR NOT TLS IS ON and refuses to boot without it, so nesting it
+            # under `tls.enabled` — the expand's shape, B-U5E — would hand a
+            # cleartext deployment a binary that cannot start.
+            # `templates/render-checks.yaml` has already confirmed the value is
+            # one of `off`, `optional` or `required`, and refused a verifying
+            # mode beside `tls.enabled: false` or with no `tls.clientCaSecret`.
             - name: LISTEN_TLS_CLIENT_AUTH
               value: {{ .Values.tls.clientAuth | quote }}
-            {{- end }}
-            {{- if and .Values.tls.enabled (hasKey .Values.tls "clientAuth") .Values.tls.clientCaSecret }}
-            # THE AUTHORITY iam-db WOULD CHECK A CALLER'S CERTIFICATE AGAINST,
-            # once `clientAuth` is anything but `off` (B-U5). RENDERED ONLY
-            # WHEN TLS IS ON AND A SECRET IS NAMED — the same TRUTHINESS test
+            {{- if and .Values.tls.enabled .Values.tls.clientCaSecret }}
+            # THE AUTHORITY iam-db CHECKS A CALLER'S CERTIFICATE AGAINST under
+            # `optional` or `required` (card B-U5). RENDERED ONLY WHEN TLS IS
+            # ON AND A SECRET IS NAMED — the same TRUTHINESS test
             # `DB_SSL_CA_FILE` below uses for the engine's own authority, so
             # an empty string here renders nothing rather than
             # `secretName: ""`.
@@ -394,11 +390,12 @@ spec:
               mountPath: /var/run/secrets/engine-ca
               readOnly: true
             {{- end }}
-            {{- if and .Values.tls.enabled (hasKey .Values.tls "clientAuth") .Values.tls.clientCaSecret }}
-            # B-U5E (folded), ledger 925, ADR-0846. A DIRECTORY MOUNT, never
-            # subPath — the same argument the serving certificate and the
-            # engine's own authority above make. Nested under `tls.enabled`
-            # for the same reason the env var above is.
+            {{- if and .Values.tls.enabled .Values.tls.clientCaSecret }}
+            # Card B-U5, ADR-0846. A DIRECTORY MOUNT, never subPath — the same
+            # argument the serving certificate and the engine's own authority
+            # above make: the listener watches this file and restarts on its
+            # rotation (ADR-0523), which a one-time subPath copy would defeat.
+            # Gated exactly as `LISTEN_TLS_CLIENT_CA_FILE` above is.
             - name: client-ca
               mountPath: /var/run/secrets/iam-db-client-ca
               readOnly: true
@@ -598,16 +595,15 @@ spec:
               - key: {{ required "database.sslCaSecretKey names the key inside database.sslCaSecret that holds the CA bundle and must be set whenever sslCaSecret is; see the chart's values.yaml" .Values.database.sslCaSecretKey | quote }}
                 path: ca.pem
         {{- end }}
-        {{- if and .Values.tls.enabled (hasKey .Values.tls "clientAuth") .Values.tls.clientCaSecret }}
-        # B-U5E (folded), ledger 925, ADR-0846: the authority iam-db would
-        # check a caller's certificate against, once `clientAuth` is
-        # anything but `off` (B-U5). REQUIRED, not `optional: true`, for the
-        # same reason `engine-ca` above is: nothing in THIS repository opens
-        # this file yet — B-U5 is what adds the reader and the refusal that
-        # names the path — so an empty mount would produce no refusal at
-        # all today, and a FailedMount event is the only signal there is to
-        # have. Nested under `tls.enabled`, the same as its own env var and
-        # mount.
+        {{- if and .Values.tls.enabled .Values.tls.clientCaSecret }}
+        # Card B-U5, ADR-0846: the authority iam-db checks a caller's
+        # certificate against under `optional` or `required`. REQUIRED, not
+        # `optional: true` (coordinator ruling for B-U5E, kept): a Secret
+        # that does not exist holds the pod at a FailedMount event naming
+        # this volume. Under a verifying mode the binary would also refuse
+        # an empty mount naming LISTEN_TLS_CLIENT_CA_FILE's path; under
+        # `off` it never opens the file, so the event is the only signal.
+        # Gated exactly as its env var and mount are.
         - name: client-ca
           secret:
             secretName: {{ .Values.tls.clientCaSecret }}
