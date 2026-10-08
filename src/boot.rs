@@ -131,9 +131,10 @@ const OPERATOR_RESERVE_KEY: &str = "DB_ENGINE_OPERATOR_RESERVE";
 const OPERATOR_RESERVE_CHART_KEY: &str = "database.engineOperatorReserve";
 
 /// Bounded above by `chart/values.schema.json`'s `maximum: 29` — below the
-/// dial client's own `REQUEST_TIMEOUT` (30s), so this pool's own acquire wait
-/// can never be the deadline a caller's whole request runs against.
-/// `tests/chart_request_deadline.rs` pins the two together.
+/// CALLER's own dial `REQUEST_TIMEOUT` (30s; this binary never dials out, so
+/// the budget it has to stay under is `iam`'s, not its own), so this pool's
+/// own acquire wait can never be the deadline a caller's whole request runs
+/// against. `tests/chart_request_deadline.rs` pins the two together.
 const ACQUIRE_TIMEOUT_KEY: &str = "DB_ACQUIRE_TIMEOUT_SECONDS";
 const ACQUIRE_TIMEOUT_CHART_KEY: &str = "database.acquireTimeoutSeconds";
 const IDLE_TIMEOUT_KEY: &str = "DB_IDLE_TIMEOUT_SECONDS";
@@ -306,7 +307,7 @@ pub enum BootError {
     /// Int(#[from] ParseIntError)` this replaced named neither the variable
     /// nor the chart key nor the value given — just sqlx's own "invalid
     /// digit found in string", which an operator cannot act on without
-    /// already knowing which of five numeric knobs produced it.
+    /// already knowing which of the eight numeric knobs produced it.
     #[error(
         "{key} is {value:?}, which is not a whole number ({source}). Set the chart value \
          {chart_key} to a whole number."

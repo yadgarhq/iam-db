@@ -1,20 +1,29 @@
-//! `database.acquireTimeoutSeconds`'s schema bound is pinned BELOW the dial
-//! client's own request deadline, and this is where that pin stops being a
-//! comment (card C-DB2, M-audit-C).
+//! `database.acquireTimeoutSeconds`'s schema bound is pinned BELOW the
+//! CALLER's own dial request deadline, and this is where that pin stops
+//! being a comment (card C-DB2, M-audit-C).
 //!
 //! **WHY THE POOL'S ACQUIRE WAIT MUST STAY SHORTER THAN THE CALLER'S WHOLE
 //! REQUEST.** This binary never dials out — it is a `-db` twin, served over
-//! by `iam`, not a caller of anything — but the chart key it reads is the
-//! SAME SHAPE every other module's request deadline takes: a caller sets a
-//! budget for the whole round trip, and a step inside that round trip must
-//! never be allowed a wait as long as the budget itself, or the step's own
-//! timeout can never be the first thing to fire. `yadgar_dial`'s
-//! `REQUEST_TIMEOUT` (30s, read back here as [`default_request_timeout`])
-//! is that budget for every gRPC caller in this estate; `acquireTimeoutSeconds`
-//! is the step. `chart/values.schema.json` bounds it at 29 — one second under
-//! — and `chart/values.yaml` ships 25, a further margin (gateway's own
-//! `AUTH_DEADLINE` 10s and `RESOLVE_DEADLINE` 5s make the same choice: both
-//! stay shorter than the budget they sit inside).
+//! by `iam`, not a caller of anything — so the budget `acquireTimeoutSeconds`
+//! has to stay under is `iam`'s own dial deadline for the `iam` -> `iam-db`
+//! hop, not a deadline this process sets for itself. `yadgar_dial`'s
+//! `REQUEST_TIMEOUT` (30s, read back here as [`default_request_timeout`]) is
+//! that budget. `chart/values.schema.json` bounds `acquireTimeoutSeconds` at
+//! 29 — one second under — and `chart/values.yaml` ships 25, a further
+//! margin, so a stalled acquire can always be the first thing to report on
+//! THAT hop.
+//!
+//! **THIS IS ONE HOP OF A LONGER CHAIN, AND OTHER HOPS BOUND THEMSELVES THE
+//! SAME WAY, INDEPENDENTLY.** `gateway`'s own `AUTH_DEADLINE` (10s) and
+//! `RESOLVE_DEADLINE` (5s) apply to a DIFFERENT pair of hops — `gateway` ->
+//! `iam`, never `iam` -> `iam-db` — and bound a different outer budget
+//! (`gateway`'s own HTTP deadline, not `yadgar_dial`'s `REQUEST_TIMEOUT`).
+//! They are the same PATTERN (an inner step stays shorter than the budget it
+//! runs inside), not the same chain: on a request that reaches `iam-db`
+//! through `gateway` and `iam`, `AUTH_DEADLINE` or `RESOLVE_DEADLINE` fires
+//! first, well before this pool's 25s acquire wait is ever reached, and
+//! `acquireTimeoutSeconds` only becomes the binding deadline for a caller
+//! that dials `iam-db` directly within `iam`'s own 30s budget.
 //!
 //! **THIS TEST REDS WHEN EITHER NUMBER MOVES AWAY FROM THE OTHER**, not when
 //! somebody edits `yadgar-dial`'s own `main`: a schema bound in THIS

@@ -35,9 +35,11 @@ CI_VALUES = CHART / "ci" / "values.yaml"
 
 # Knob, chart key, variable, shipped value and (if any) the schema's upper
 # bound. `acquireTimeoutSeconds` is the one with a `maximum`: card C-DB2
-# bounds it below this process's own dial client's REQUEST_TIMEOUT (30s), so
-# a stalled acquire can never be the deadline a caller's whole request runs
-# against (see `tests/chart_request_deadline.rs`, the Rust half of that pin).
+# bounds it below the CALLER's own dial REQUEST_TIMEOUT (30s) — this process
+# never dials out, so the budget it has to stay under is the caller's
+# (`iam`'s), not its own — so a stalled acquire can never be the deadline a
+# caller's whole request runs against (see `tests/chart_request_deadline.rs`,
+# the Rust half of that pin).
 KNOBS = [
     pytest.param(
         "database.engineOperatorReserve",

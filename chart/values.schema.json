@@ -50,7 +50,7 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 29,
-          "description": "Seconds `acquire` waits for a free connection before failing. Rendered as DB_ACQUIRE_TIMEOUT_SECONDS and read with no fallback (ADR-0837); replaces sqlx's own 30s default. Maximum 29: below this process's own dial client's REQUEST_TIMEOUT (30s), so a stalled acquire can never be the deadline a caller's whole request runs against (card C-DB2; see tests/chart_request_deadline.rs). Minimum 1: zero fails every acquire that has to wait."
+          "description": "Seconds `acquire` waits for a free connection before failing. Rendered as DB_ACQUIRE_TIMEOUT_SECONDS and read with no fallback (ADR-0837); replaces sqlx's own 30s default. Maximum 29: below the CALLER's own dial REQUEST_TIMEOUT (30s) -- this process never dials out, so the budget it has to stay under is the caller's (iam's), not its own -- so a stalled acquire can never be the deadline a caller's whole request runs against (card C-DB2; see tests/chart_request_deadline.rs). Minimum 1: zero fails every acquire that has to wait."
         },
         "idleTimeoutSeconds": {
           "type": "integer",

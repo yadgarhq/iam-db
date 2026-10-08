@@ -325,7 +325,9 @@ spec:
             # THE THREE POOL DURATIONS `yadgar-store` v0.4.0 stopped filling with
             # sqlx's own compiled-in defaults (ADR-0837). `acquireTimeoutSeconds`
             # is bounded above by chart/values.schema.json's `maximum: 29`, below
-            # this process's own dial REQUEST_TIMEOUT (30s).
+            # the CALLER's own dial REQUEST_TIMEOUT (30s) — this process never
+            # dials out, so the budget it has to stay under is `iam`'s, not its
+            # own.
             - name: DB_ACQUIRE_TIMEOUT_SECONDS
               value: {{ .Values.database.acquireTimeoutSeconds | quote }}
             - name: DB_IDLE_TIMEOUT_SECONDS
