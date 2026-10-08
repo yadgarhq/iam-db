@@ -227,21 +227,55 @@ spec:
             # together. Change either and change both.
             - name: DB_PASSWORD_FILE
               value: /var/run/secrets/iam-db/password
-            {{- if .Values.tls.enabled }}
-            # RENDERED ONLY WHEN TLS IS ASKED FOR, so a deployment that has not
-            # cut over sends the binary nothing at all and binds the plaintext
-            # listener it always bound. Absence is the default, and the flag is
-            # the whole of the lever.
+            # RENDERED UNCONDITIONALLY (ledger 1257, H1, ADR-0845). This used to
+            # sit behind an `if .Values.tls.enabled` guard, so a deployment that
+            # had not cut over sent the binary NOTHING — and a chart that
+            # failed to render this block at all produced the exact same
+            # absence, with nothing telling the two apart. The binary now
+            # refuses an absent `LISTEN_TLS_ENABLED` outright, so this flag is
+            # always stated: `templates/render-checks.yaml` has already
+            # confirmed `.Values.tls.enabled` is a real boolean by the time
+            # this line runs, and `ternary "1" "0"` is the one expression that
+            # agrees with the binary's own exact-"1"-or-"0" check — never
+            # `if`/`else`, which is how the two kinds of agreement drift apart.
             - name: LISTEN_TLS_ENABLED
-              value: "1"
+              value: {{ ternary "1" "0" .Values.tls.enabled | quote }}
+            {{- if .Values.tls.enabled }}
             # PATHS, never an issuer-specific resource (D80). cert-manager writes
             # these files in the reference deployment and a hand-assembled Secret
             # writes them anywhere else; neither the chart nor the binary can
-            # tell the difference, which is the point.
+            # tell the difference, which is the point. STILL CONDITIONAL, unlike
+            # the flag above: a path is meaningless when TLS is off, and
+            # `serve::ServerTls::from_lookup` never reads either when its own
+            # flag is "0".
             - name: LISTEN_TLS_CERT_FILE
               value: /var/run/secrets/iam-db-tls/tls.pem
             - name: LISTEN_TLS_KEY_FILE
               value: /var/run/secrets/iam-db-tls/tls-key.pem
+            {{- end }}
+            {{- if and .Values.tls.enabled (hasKey .Values.tls "clientAuth") }}
+            # B-U5E (folded), ledger 925, ADR-0846: RENDERED ONLY WHEN TLS
+            # ITSELF IS ON AND THE KEY IS PRESENT (coordinator ruling
+            # 2026-10-07, the same nesting `project-db#54` uses) — a
+            # client-auth env var beside a cleartext listener names a check
+            # that cannot run, and an unconfigured deployment renders exactly
+            # as before this key existed either way. `templates/render-
+            # checks.yaml` has already refused anything but `off` by the time
+            # this line runs, so the value here is always `"off"` today —
+            # this binary does not read `LISTEN_TLS_CLIENT_AUTH` yet, and a
+            # later release (B-U5) is what starts both.
+            - name: LISTEN_TLS_CLIENT_AUTH
+              value: {{ .Values.tls.clientAuth | quote }}
+            {{- end }}
+            {{- if and .Values.tls.enabled (hasKey .Values.tls "clientAuth") .Values.tls.clientCaSecret }}
+            # THE AUTHORITY iam-db WOULD CHECK A CALLER'S CERTIFICATE AGAINST,
+            # once `clientAuth` is anything but `off` (B-U5). RENDERED ONLY
+            # WHEN TLS IS ON AND A SECRET IS NAMED — the same TRUTHINESS test
+            # `DB_SSL_CA_FILE` below uses for the engine's own authority, so
+            # an empty string here renders nothing rather than
+            # `secretName: ""`.
+            - name: LISTEN_TLS_CLIENT_CA_FILE
+              value: /var/run/secrets/iam-db-client-ca/ca.crt
             {{- end }}
             - name: DB_HOST
               value: {{ .Values.database.host | quote }}
@@ -342,6 +376,15 @@ spec:
             # verifying against a bundle that no longer signs anything.
             - name: engine-ca
               mountPath: /var/run/secrets/engine-ca
+              readOnly: true
+            {{- end }}
+            {{- if and .Values.tls.enabled (hasKey .Values.tls "clientAuth") .Values.tls.clientCaSecret }}
+            # B-U5E (folded), ledger 925, ADR-0846. A DIRECTORY MOUNT, never
+            # subPath — the same argument the serving certificate and the
+            # engine's own authority above make. Nested under `tls.enabled`
+            # for the same reason the env var above is.
+            - name: client-ca
+              mountPath: /var/run/secrets/iam-db-client-ca
               readOnly: true
             {{- end }}
           # NO readiness probe hitting a /health that returns early. The process
@@ -538,4 +581,26 @@ spec:
             items:
               - key: {{ required "database.sslCaSecretKey names the key inside database.sslCaSecret that holds the CA bundle and must be set whenever sslCaSecret is; see the chart's values.yaml" .Values.database.sslCaSecretKey | quote }}
                 path: ca.pem
+        {{- end }}
+        {{- if and .Values.tls.enabled (hasKey .Values.tls "clientAuth") .Values.tls.clientCaSecret }}
+        # B-U5E (folded), ledger 925, ADR-0846: the authority iam-db would
+        # check a caller's certificate against, once `clientAuth` is
+        # anything but `off` (B-U5). REQUIRED, not `optional: true`, for the
+        # same reason `engine-ca` above is: nothing in THIS repository opens
+        # this file yet — B-U5 is what adds the reader and the refusal that
+        # names the path — so an empty mount would produce no refusal at
+        # all today, and a FailedMount event is the only signal there is to
+        # have. Nested under `tls.enabled`, the same as its own env var and
+        # mount.
+        - name: client-ca
+          secret:
+            secretName: {{ .Values.tls.clientCaSecret }}
+            items:
+              # NO TEMPLATE DEFAULT (ADR-0569: a `default` here is a compiled-
+              # in one under another name). `tls.clientCaSecretKey` has no
+              # value in `values.yaml` either, so a deployment that names
+              # `clientCaSecret` without it is refused by name, the same
+              # shape `database.sslCaSecretKey` above uses.
+              - key: {{ required "tls.clientCaSecretKey names the key inside tls.clientCaSecret that holds the authority iam-db checks a caller's certificate against, and must be set whenever tls.clientCaSecret is; see the chart's values.yaml" .Values.tls.clientCaSecretKey | quote }}
+                path: ca.crt
         {{- end }}

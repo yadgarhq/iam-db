@@ -1,0 +1,19 @@
+# THE ONE `tls.enabled` READ SWITCH THIS CHART OWNS, STATED (ledger 1257, H1,
+# ADR-0845). `values.yaml` ships no default for it any more — ADR-0569 forbids
+# one behind a behavioural switch, and the whole point of this change is that
+# an absent flag must refuse rather than silently bind the plaintext
+# listener. `helm lint --strict` and `helm template` with no `-f` therefore
+# both refuse on a bare render, which is correct for an OPERATOR's values
+# file and wrong for a SUITE that wants to render the chart's defaults for
+# everything else. This file is what `scripts/tests/test_values_schema.py`
+# and the shared `helm-lint` pre-commit hook pass with `-f` so the rest of
+# the chart keeps getting exercised against its actual shipped shape.
+#
+# `true`, not `false`: the golden render this repository's own suite checks
+# (`tls.enabled=true` renders identically to origin/main) needs a render
+# that reaches the TLS branch at all, and the parent chart
+# (`yadgarhq/chart`'s own `example/values.yaml` and ArgoCD's
+# `applications/yadgar.yaml`) already states `true` for this module — this
+# file matches what gets deployed, not a value chosen for this suite alone.
+tls:
+  enabled: true

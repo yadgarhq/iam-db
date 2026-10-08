@@ -15,8 +15,17 @@
 //! did would look healthy while carrying every credential in the module across
 //! the pod network in the clear, which is exactly the failure nobody can see.
 //!
-//! TLS is OPT-IN and OFF by default, so with nothing configured this is the same
-//! plaintext listener it has always bound.
+//! TLS is OPT-IN, and `LISTEN_TLS_ENABLED` must say so explicitly — see
+//! `serve`'s module documentation for why absence no longer means cleartext
+//! (ADR-0845).
+//!
+//! **THE TWO LISTENER ADDRESSES ARE DECIDED HERE TOO, before the probe**
+//! (ledger 1257), for the same reason the transport is: `LISTEN` and
+//! `METRICS_LISTEN` used to be parsed deep inside `serve_until_drained`,
+//! which runs only after the probe and the migration succeed — so a bad
+//! address was reachable only with a real engine behind it, and
+//! `tests/boot_message.rs`'s promise that no engine is needed could not
+//! reach it. Neither address depends on the engine, so both parse up front.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -74,6 +83,24 @@ fn env_required(key: &str) -> Result<String, String> {
     }
 }
 
+/// Ledger 1257: `LISTEN` and `METRICS_LISTEN` used to be parsed with a bare
+/// `.parse()?`, which converts an `AddrParseError` into `Box<dyn Error>`
+/// through its own `Display` — "invalid socket address syntax", naming
+/// NEITHER variable. An operator staring at that sentence in a crash loop
+/// has two candidates and nothing telling them apart.
+///
+/// Neither address has a chart key of its own: `templates/deployment.yaml`
+/// hardcodes both (`"0.0.0.0:50051"`, `"0.0.0.0:9090"`) rather than reading
+/// them from `values.yaml`, so there is nothing to NAME beyond the variable
+/// — unlike the chart-driven knobs in `boot::pool_config`, which name a
+/// chart key too.
+fn parse_required_addr(key: &str) -> Result<SocketAddr, String> {
+    let value = env_required(key)?;
+    value
+        .parse()
+        .map_err(|e| format!("{key} is {value:?}, which is not a valid address (host:port): {e}"))
+}
+
 /// The JSON subscriber, and the default that keeps this process observable.
 ///
 /// Extracted from `main` for the file-and-function ceilings, and it is the one
@@ -92,7 +119,11 @@ fn install_logging() {
         // A service nobody can observe is one D67 cannot measure either.
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                // The log level is observability, not behaviour, and "info" is
+                // the one fallback every binary in the estate shares rather
+                // than a knob this chart renders — see B8 of the ADR-0705
+                // census.
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")), // ADR-0569-EXCEPTION(LIB): the log level is observability, not behaviour.
         )
         .init();
 }
@@ -130,6 +161,53 @@ async fn probe_engine(
     Ok(())
 }
 
+/// Step 2a, and the rotation watch set it joins (ADR-0569, ADR-0570, ADR-0523).
+///
+/// Extracted from `run`, under this file's own 120-line function ceiling.
+/// `run` still calls this at the exact point boot always assembled it — the
+/// ordering this function's own body argues for (built immediately after the
+/// last of its members is read, never deferred to the watcher's first poll)
+/// is unchanged by where the lines live.
+///
+/// STEP 2A OF THE ROTATION-KNOB CUT-OVER (ADR-0569, ADR-0570). The document
+/// `yadgarhq/config` renders into the `shared` ConfigMap, mounted at
+/// `/etc/yadgar/config/shared/shared.yaml`. There is no compiled-in default
+/// behind it any more: an absent, empty, or half-written document refuses
+/// the boot and names the file. The chart still sets TLS_ROTATION_POLL_SECS
+/// and TLS_ROTATION_SPLAY_MAX_SECS — this binary no longer reads either, but
+/// they stay so a rollout that lands this chart before this binary's digest
+/// still resolves a schedule on the old one. The runbook is
+/// `yadgarhq/deploy`'s MIGRATION_NOTES.md, steps 2a and 2b — NOT this
+/// repository's, which has no such section.
+///
+/// THE WATCH SET, ASSEMBLED FROM THE RESOLVED CONFIGURATION AND HASHED AS
+/// THE PROCESS READS IT (ADR-0523). FOUR MATERIALS, THREE OF WHICH ARE NOT
+/// THE CERTIFICATE: the database password is read once and baked into a
+/// pool that outlives every reconnect, the engine's CA is mounted the same
+/// way, and the mounted configuration document joins the same set (step 2a)
+/// — so all three are watched exactly as the leaf is.
+///
+/// ONE CALL, AND THE SAME ONE `tests/assembly.rs` MAKES. Nothing in a binary
+/// entry point is reachable from a test, so a member deleted from a list
+/// built here would compile, pass everything, and ship a process blind to
+/// that file. The list lives in `rotate::watch_set`.
+///
+/// THE SCHEDULE IS READ FROM THE SAME DOCUMENT THE WATCH SET JUST JOINED. A
+/// value the document names and this binary cannot use is a mistake to
+/// refuse, not one to paper over with a default nobody chose — and refusing
+/// it here means it is refused on a cleartext deployment too, which is
+/// where it would otherwise sit unnoticed until the cut-over.
+fn watch_and_schedule(
+    listen_tls: Option<&serve::ServerTls>,
+    db_password_file: &std::path::Path,
+    ssl_ca: Option<&std::path::Path>,
+) -> Result<(rotate::Inputs, rotate::Schedule), Box<dyn std::error::Error>> {
+    let rotation_config = rotate::Configuration::mounted();
+    let watch_inputs = rotate::watch_set(listen_tls, db_password_file, ssl_ca, &rotation_config);
+    let schedule = rotation_config.schedule().map_err(|e| e.to_string())?;
+    Ok((watch_inputs, schedule))
+}
+
 /// Step 3, from the listener address to the last in-flight call.
 ///
 /// The boot log, the signal handlers, the spawned server, the two things that
@@ -141,14 +219,21 @@ async fn probe_engine(
 /// The listener itself arrives LAST and by value, because the boot log is the
 /// only thing left that asks whether it is there. Everything that needed to
 /// borrow it — the server builder and the watch set — has already run.
+///
+/// `addr` ARRIVES ALREADY PARSED, rather than being read here. It used to be
+/// read and parsed inside this function, which runs only after `run` has
+/// probed the engine and migrated — so `LISTEN=notanaddr` refused only once
+/// a real engine had answered, and no test lacking one could reach that
+/// refusal. `run` hoists both listener addresses beside its other boot-order
+/// decisions, none of which need an engine either.
 async fn serve_until_drained(
     mut server: Server,
     pool: MySqlPool,
     watch_inputs: rotate::Inputs,
     schedule: rotate::Schedule,
     listen_tls: Option<serve::ServerTls>,
+    addr: SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let addr: SocketAddr = env_required("LISTEN")?.parse()?;
     // `tls` is recorded because "is this listener encrypted?" must be answerable
     // from the boot log rather than inferred from which variables somebody
     // believes they set. `watching` for the same reason applied to the rotation
@@ -277,6 +362,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let listen_tls = serve::ServerTls::from_env(serve::LISTEN).map_err(|e| e.to_string())?;
     let server = serve::builder(listen_tls.as_ref()).map_err(|e| e.to_string())?;
 
+    // THE TWO LISTENER ADDRESSES, hoisted here rather than read where each is
+    // used (ledger 1257). Neither depends on anything the probe or the
+    // migration produces, so both move beside the other decisions this
+    // function makes before opening anything — and `LISTEN=notanaddr` is now
+    // reachable from `tests/boot_message.rs`, which promises no engine is
+    // needed.
+    let addr = parse_required_addr("LISTEN")?;
+    let metrics_addr = parse_required_addr("METRICS_LISTEN")?;
+
     // The credential never arrives as an environment variable — it is a mounted
     // Secret the operator issued (D58), read through the seam so this module has
     // no idea which deployment target it is on.
@@ -296,48 +390,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let db_password_file: PathBuf = env_required("DB_PASSWORD_FILE")?.into();
     let secret: Secret = CredentialSource::SecretFile(db_password_file.clone()).resolve()?;
 
-    // STEP 2A OF THE ROTATION-KNOB CUT-OVER (ADR-0569, ADR-0570). The document
-    // `yadgarhq/config` renders into the `shared` ConfigMap, mounted at
-    // `/etc/yadgar/config/shared/shared.yaml`. There is no compiled-in default
-    // behind it any more: an absent, empty, or half-written document refuses the
-    // boot and names the file. The chart still sets TLS_ROTATION_POLL_SECS and
-    // TLS_ROTATION_SPLAY_MAX_SECS — this binary no longer reads either, but they
-    // stay so a rollout that lands this chart before this binary's digest still
-    // resolves a schedule on the old one. The runbook is `yadgarhq/deploy`'s
-    // MIGRATION_NOTES.md, steps 2a and 2b — NOT this repository's, which has no
-    // such section.
-    let rotation_config = rotate::Configuration::mounted();
-
-    // THE WATCH SET, ASSEMBLED FROM THE RESOLVED CONFIGURATION AND HASHED AS THE
-    // PROCESS READS IT (ADR-0523). It is built HERE, immediately after the last
-    // of its members is read, rather than at the point the watcher is spawned:
-    // deferring the first reading to the watcher's first poll would put the whole
-    // of probe-migrate-serve inside a window where a kubelet swap quietly becomes
-    // the baseline, and the real rotation would never be noticed.
-    //
-    // FOUR MATERIALS, THREE OF WHICH ARE NOT THE CERTIFICATE. ADR-0523's rule is
-    // about provenance rather than payload — the database password is read once
-    // and baked into a pool that outlives every reconnect, the engine's CA is
-    // mounted the same way, and the mounted configuration document joins the same
-    // set (step 2a) — so all three are watched exactly as the leaf is.
-    //
-    // ONE CALL, AND THE SAME ONE `tests/assembly.rs` MAKES. Nothing in a binary
-    // entry point is reachable from a test, so a member deleted from a list built
-    // HERE would compile, pass everything, and ship a process blind to that file.
-    // The list lives in `rotate::watch_set`.
-    let watch_inputs = rotate::watch_set(
+    let (watch_inputs, schedule) = watch_and_schedule(
         listen_tls.as_ref(),
         &db_password_file,
         config.ssl_ca.as_deref(),
-        &rotation_config,
-    );
-
-    // READ FROM THE SAME DOCUMENT THE WATCH SET JUST JOINED. A value the
-    // document names and this binary cannot use is a mistake to refuse, not one
-    // to paper over with a default nobody chose — and refusing it here means it
-    // is refused on a cleartext deployment too, which is where it would
-    // otherwise sit unnoticed until the cut-over.
-    let schedule = rotation_config.schedule().map_err(|e| e.to_string())?;
+    )?;
 
     // 1. PROBE. The connection it opens, and every reason it opens its own,
     //    are in `probe_engine`.
@@ -353,7 +410,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // installs one picks the backend for every service linking it. A failure here
     // is logged and ignored: a service that cannot export metrics should still
     // serve traffic, which is D25's rule applied to the metrics path too.
-    let metrics_addr: SocketAddr = env_required("METRICS_LISTEN")?.parse()?;
+    //
+    // `metrics_addr` was already parsed above, before the probe — this is just
+    // where it is first USED.
     if let Err(e) = yadgar_telemetry::metrics::install_prometheus(metrics_addr) {
         tracing::warn!(error = %e, "metrics endpoint unavailable; continuing without it");
     }
@@ -364,7 +423,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // shows the loaded leaf ageing out.
     watch_inputs.export_not_after();
 
-    serve_until_drained(server, pool, watch_inputs, schedule, listen_tls).await?;
+    serve_until_drained(server, pool, watch_inputs, schedule, listen_tls, addr).await?;
 
     Ok(())
 }

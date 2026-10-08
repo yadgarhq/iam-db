@@ -85,3 +85,62 @@ fn an_unusable_migration_lock_wait_is_refused_naming_the_variable_and_the_chart_
         "the operator got the Debug variant, not the sentence: {stderr}"
     );
 }
+
+/// EVERY KNOB `pool_config` AND `migration_lock` NEED, stated as a VALID
+/// pool and a VALID wait — so a case layering one bad value on top reaches
+/// exactly that refusal and nothing earlier in the boot order.
+const FULL_POOL_ENV: &[(&str, &str)] = &[
+    ("DB_HOST", "engine.example.invalid"),
+    ("DB_PORT", "13306"),
+    ("DB_NAME", "iam_fixture"),
+    ("DB_USER", "iam_fixture_user"),
+    ("DB_MAX_CONNECTIONS", "4"),
+    ("REPLICAS", "3"),
+    ("DB_ENGINE_MAX_CONNECTIONS", "200"),
+    ("DB_SSL_MODE", "verify-identity"),
+    ("DB_MIGRATION_LOCK_TIMEOUT_SECONDS", "60"),
+];
+
+/// Ledger 1257: a present-but-not-numeric pool knob is refused naming the
+/// variable, the chart key AND the value — `DB_HOST` alone is enough,
+/// because `pool_config`'s struct literal evaluates `host` before `port` and
+/// a `?` on the second short-circuits before `database`, `username` or
+/// anything after it is even read.
+#[test]
+fn a_non_numeric_db_port_is_refused_naming_the_variable_the_chart_key_and_the_value() {
+    let stderr = refusal(&[("DB_HOST", "engine.example.invalid"), ("DB_PORT", "abc")]);
+    assert!(stderr.contains("DB_PORT is \"abc\""), "{stderr}");
+    assert!(stderr.contains("database.port"), "{stderr}");
+    assert!(
+        !stderr.contains("Unparsable"),
+        "the operator got the Debug variant: {stderr}"
+    );
+}
+
+/// Ledger 1257: `LISTEN` and `METRICS_LISTEN` are now parsed BEFORE the probe
+/// (see `main.rs`'s module documentation), so a bad address is reachable
+/// here with NO engine behind it — this file's own promise. Before that
+/// hoist this case could not be expressed at all: the boot would have hung
+/// trying to reach `engine.example.invalid` first.
+#[test]
+fn a_bad_listen_address_is_refused_naming_the_variable_with_no_engine_needed() {
+    let mut vars: Vec<(&str, &str)> = FULL_POOL_ENV.to_vec();
+    vars.push(("LISTEN_TLS_ENABLED", "0"));
+    vars.push(("LISTEN", "notanaddr"));
+    let stderr = refusal(&vars);
+    assert!(stderr.contains("LISTEN is \"notanaddr\""), "{stderr}");
+    assert!(
+        !stderr.contains("METRICS_LISTEN"),
+        "the refusal must name LISTEN, not METRICS_LISTEN: {stderr}"
+    );
+}
+
+/// ADR-0845 / H1: `LISTEN_TLS_ENABLED` has no compiled-in default and no
+/// chart default either — an absent flag refuses rather than silently
+/// binding the plaintext listener it used to.
+#[test]
+fn an_absent_tls_flag_is_refused_naming_the_variable_and_the_chart_key() {
+    let stderr = refusal(FULL_POOL_ENV);
+    assert!(stderr.contains("LISTEN_TLS_ENABLED"), "{stderr}");
+    assert!(stderr.contains("tls.enabled"), "{stderr}");
+}

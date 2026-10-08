@@ -92,10 +92,10 @@ mod setting;
 pub const SERVICE: &str = "iam-db";
 
 /// What `ListCredentials` returns when the caller names no page size.
-const DEFAULT_PAGE_SIZE: i32 = 50;
+const DEFAULT_PAGE_SIZE: i32 = 50; // ADR-0569-EXCEPTION(CB): a caller-facing pagination default, not a deployment knob — contract-bound across every caller of ListCredentials.
 /// The ceiling, because `page_size` is a caller-supplied `int32`. Without it one
 /// request asks for every credential in the table and the memory to hold them.
-const MAX_PAGE_SIZE: i32 = 200;
+const MAX_PAGE_SIZE: i32 = 200; // ADR-0569-EXCEPTION(CB): the same contract-bound pagination ceiling, kept beside DEFAULT_PAGE_SIZE.
 
 /// The name ADR-0522's setting is stored under, in both settings tables.
 ///

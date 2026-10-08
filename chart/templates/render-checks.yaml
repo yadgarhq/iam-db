@@ -112,6 +112,101 @@ eleven-shape table beside it is the gate on this block.
 {{- end }}
 
 {{/*
+THE SHAPE OF `tls.enabled`, REFUSED BEFORE `templates/deployment.yaml` READS IT
+(ledger 1257, H1 of the ADR-0705 census, ADR-0845).
+
+`values.schema.json` ALREADY MAKES `enabled` `required` AND `type: boolean` —
+so the SCHEMA refuses `tls.enabled` plainly absent, or present and not a
+boolean, before any template runs at all (K-3). What the schema CANNOT see is
+`tls` itself: this chart's `values.yaml` declares the whole `tls:` block, so
+an override of `tls: null` DELETES it (helm deletes a null-valued key a chart
+in the tree declares, and restores no default for a key the chart's own
+values no longer ships a default for either), and a schema whose every
+property is "under tls" has nothing left to check. That is this block's one
+job: `tls` confirmed present and a map, with the ADR-0794 idiom
+(`hasKey` then `kindIs "map"`), BEFORE `.Values.tls.enabled` is read anywhere
+— including by the schema's own evaluation of the nested `required`, which
+likewise has nothing to require once `tls` itself is gone.
+
+NO SEPARATE `kindIs "bool"` CHECK ON `.enabled` HERE, unlike `database.create`
+and `autoscaling.enabled` above: those two are ADR-0847's carve-out (a toggle
+the schema deliberately leaves untyped), and `tls.enabled` is not one — it is
+a typed, `required` LEAF (K-3), so the schema's own `type: boolean` is what
+catches a string, a number, a map or a list there, with no default able to
+mask the shape behind it any more (H1 drops it). This block exists ONLY for
+the one gap the schema cannot close: `tls` confirmed a map, nothing about
+`.enabled`'s own shape past that.
+
+Once this block passes, `.Values.tls.enabled` is a real boolean, and
+`templates/deployment.yaml` renders `{{ ternary "1" "0" .Values.tls.enabled }}`
+UNCONDITIONALLY — not behind an `if`, so a reader of that file sees the same
+guarantee this block states rather than having to re-derive it.
+
+The refusal text does not quote the raise text it replaces (ADR-0794);
+`scripts/tests/test_render_checks.py`'s `RAISE_MARKERS` is the gate.
+*/}}
+{{- if not (hasKey .Values "tls") }}
+{{- fail (join "" (list
+      "iam-db: `tls` is absent from the values, so `tls.enabled` cannot be read. "
+      "Helm deletes a null-valued key that a chart in the tree declares, and restores "
+      "no default, so a values file writing `tls:` with no value leaves this chart with "
+      "nothing under it. Write the keys you mean: `tls.enabled` has no default "
+      "(ADR-0845) and must be `true` or `false`.")) }}
+{{- end }}
+{{- if not (kindIs "map" .Values.tls) }}
+{{- fail (printf (join "" (list
+      "iam-db: `tls` must be a map and is %s (%s). `tls.enabled` and its sibling keys "
+      "live under it, and a string, number or list here has none of them. Write a map, "
+      "for example `tls: { enabled: true }`."))
+      (kindOf .Values.tls) (toJson .Values.tls)) }}
+{{- end }}
+
+{{/*
+THE SHAPE OF `tls.clientAuth`, VALIDATED ONLY WHEN PRESENT (B-U5E, folded into
+C-DB1; ledger 925, ADR-0846; K-8 step 1).
+
+UNLIKE `tls.enabled` ABOVE, THIS KEY HAS NO DEFAULT AND IS NOT REQUIRED YET —
+this repository does not read `yadgar-lifecycle::serve_tls`'s client-
+verification side, so there is nothing for an absent `clientAuth` to
+configure, and `values.yaml` ships none. An ABSENT key renders exactly as
+before this block existed: nothing here or in `templates/deployment.yaml`
+runs for it. `values.schema.json` declares the key as an EXTRA leaf for the
+same reason `database.create`'s own carve-out does — its TYPE is this
+block's job, not the schema's (ADR-0847).
+
+THREE OUTCOMES, ONLY WHEN THE KEY IS PRESENT: a non-string value refuses
+naming its kind; a string outside `off | optional | required` refuses naming
+the value; and `optional` or `required` — though spelled correctly — refuse
+with their OWN sentence, because this binary cannot enforce either yet. Only
+`off` reaches `templates/deployment.yaml`, which is what lets
+`tls.clientAuth: off` render `LISTEN_TLS_CLIENT_AUTH` while the chart still
+ships nothing the binary cannot act on.
+*/}}
+{{- if hasKey .Values.tls "clientAuth" }}
+{{- if not (kindIs "string" .Values.tls.clientAuth) }}
+{{- fail (printf (join "" (list
+      "iam-db: `tls.clientAuth` must be a quoted string (\"off\", \"optional\" or "
+      "\"required\") and is %s (%s). YAML 1.1 reads a bare off as false: write "
+      "`clientAuth: \"off\"`."))
+      (kindOf .Values.tls.clientAuth) (toJson .Values.tls.clientAuth)) }}
+{{- end }}
+{{- if not (has .Values.tls.clientAuth (list "off" "optional" "required")) }}
+{{- fail (printf
+      "iam-db: `tls.clientAuth` must be `off`, `optional` or `required` and is %q."
+      .Values.tls.clientAuth) }}
+{{- end }}
+{{- if ne .Values.tls.clientAuth "off" }}
+{{- fail (printf (join "" (list
+      "iam-db: `tls.clientAuth` is %q, which is not enforced yet — B-U5 lands it. This "
+      "repository does not read yadgar-lifecycle's client-verification side (ledger "
+      "925, ADR-0846): a later release adopts it and starts checking a caller's "
+      "certificate, and promising that now with `optional` or `required` would be a "
+      "check nothing performs. Write `tls.clientAuth: \"off\"`, or leave the key unset."))
+      .Values.tls.clientAuth) }}
+{{- end }}
+{{- end }}
+
+{{/*
 THE SHAPE OF `autoscaling.enabled`, REFUSED BEFORE ANY TOGGLE READS IT.
 
 DECLARED BEFORE THE KEDA CAPABILITY CHECK BELOW, for the same reason `database.create`'s

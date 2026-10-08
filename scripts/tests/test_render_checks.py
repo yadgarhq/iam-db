@@ -131,6 +131,14 @@ import yaml
 REPO = Path(__file__).resolve().parents[2]
 CHART = REPO / "chart"
 
+# `tls.enabled` ships no default any more (ledger 1257, H1, ADR-0845), so a
+# BARE `helm template`/`lint` on THIS chart now refuses before anything else
+# in this file runs. `render()` below passes this on every call, which is
+# what keeps every existing case in this suite exercising what it always
+# exercised — a throwaway fixture or probe chart with no `tls` key of its own
+# merges it harmlessly, since neither has a schema to refuse an unknown key.
+CI_VALUES = CHART / "ci" / "values.yaml"
+
 # THE CHART'S OWN NAME, and the prefix of the template this chart defines. Helm
 # template names are global across a chart tree (module docstring), so this prefix
 # is what keeps three sibling `-db` charts from defining one name between them.
@@ -450,7 +458,10 @@ def red_api_versions(declared: Iterable[str], under_test: str) -> tuple[str, ...
 
 
 def render(chart: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
-    return helm("template", CHART_NAME, str(chart), *arguments)
+    # `-f CI_VALUES` FIRST, so any `arguments` passed by a caller — a
+    # test-specific `--values` overlay, a `--set` — still wins on whatever
+    # it states. A later `-f`/`--set` overrides an earlier one.
+    return helm("template", CHART_NAME, str(chart), "-f", str(CI_VALUES), *arguments)
 
 
 def objects(stdout: str) -> list[dict]:
@@ -1458,6 +1469,303 @@ def test_stripping_scaledobjects_own_guard_reproduces_the_adr_0850_crash(tmp_pat
     )
 
 
+# ── THE SHAPE OF `tls.enabled`, LEDGER 1257 / H1 OF THE ADR-0705 CENSUS / ADR-0845 ──
+#
+# UNLIKE `database.create` AND `autoscaling.enabled` ABOVE, `tls.enabled` IS TYPED
+# AND `required` IN THE SCHEMA (K-3) — it is a LEAF, not a block ADR-0847 carves out
+# for this template to type. MEASURED, on helm 3.18.4, 3.20.2 and 4.3.0 alike: three
+# of the four shapes the card names (plain absence, `tls: {enabled: null}`,
+# `tls: {enabled: "true"}`) are refused by helm's OWN schema validation before any
+# template here ever runs. Only `tls: null` reaches `templates/render-checks.yaml`'s
+# own sentence, because helm deletes a null-valued key THIS CHART'S OWN
+# `values.yaml` declares and restores no default — and the schema's nested
+# `required` has nothing left to require once `tls` itself is gone, which is the one
+# gap a schema that only ever looks INSIDE `tls` cannot close.
+#
+# `test_values_schema.py`'s own rule governs the schema-caught shapes here too:
+# never assert helm's wording, which differs by helm line — assert only that the
+# refusal names the chart (where it does) and the key. The render-check-caught shape
+# IS asserted on its exact sentence (ADR-0794), the same as every other arm in this
+# file.
+TLS_SHAPE_ARMS = {
+    "tls-absent": (
+        "`tls` is absent from the values",
+        '{{- if not (hasKey .Values "tls") }}',
+    ),
+    "tls-not-map": (
+        "`tls` must be a map",
+        '{{- if not (kindIs "map" .Values.tls) }}',
+    ),
+}
+
+# (label, overlay body, outcome). `("schema", key)` means refused by
+# `values.schema.json`, asserted only on the key name (never helm's wording).
+# `("refuse", arm)` means refused by THAT arm's exact message.
+TLS_SHAPES = (
+    ("absent", "tls:\n  certSecret: x\n", ("schema", "enabled")),
+    ("enabled-null", "tls:\n  enabled:\n", ("schema", "enabled")),
+    ("enabled-quoted-true", 'tls:\n  enabled: "true"\n', ("schema", "enabled")),
+    ("enabled-number", "tls:\n  enabled: 1\n", ("schema", "enabled")),
+    ("tls-null", "tls:\n", ("refuse", "tls-absent")),
+    ("tls-a-string", 'tls: "x"\n', ("refuse", "tls-not-map")),
+)
+
+EXPECTED_TLS_SHAPES = 6
+EXPECTED_TLS_SHAPES_SCHEMA = 4
+EXPECTED_TLS_SHAPES_REFUSED = 2
+
+
+def render_the_tls_shape(chart: Path, body: str, destination: Path):
+    """One `tls.enabled` shape rendered BARE — deliberately NOT through
+    `render()`, whose own `-f CI_VALUES` states `tls.enabled: true`. Helm
+    DEEP-MERGES values sources rather than replacing a map wholesale, so a
+    shape overlay that writes `tls:` with no `enabled` key would inherit
+    `CI_VALUES`'s `enabled: true` straight through — which is exactly the
+    shape this table exists to exercise as ABSENT. No `--api-versions`
+    either: every shape here is refused, if at all, before any capability
+    check in the chart runs."""
+    overlay = shape_overlay(body, destination)
+    return helm("template", CHART_NAME, str(chart), "--values", str(overlay))
+
+
+def examine_the_tls_shapes(chart: Path, destination: Path) -> tuple[list[str], int, int, int]:
+    """Every shape in TLS_SHAPES against `chart`. PURE, returns its counts."""
+    failures: list[str] = []
+    schema_refused = 0
+    arm_refused = 0
+
+    for label, body, expectation in TLS_SHAPES:
+        result = render_the_tls_shape(chart, body, destination / label)
+        if result.returncode == 0:
+            failures.append(f"{label}: rendered and was NOT refused: {result.stdout[:200]}")
+            continue
+
+        if expectation[0] == "schema":
+            _, key = expectation
+            # THE STABLE WRAPPER AND THE PATH SEGMENT, never the per-leaf
+            # phrase: helm 3.18.4 and 4.3.0 word the SAME violation
+            # differently ("tls: enabled is required" vs. "missing property
+            # 'enabled'"), but both carry this sentence and the path.
+            if "values don't meet the specifications of the schema(s)" not in result.stderr:
+                failures.append(f"{label}: refused without the schema wrapper sentence: {result.stderr.strip()}")
+            if "tls" not in result.stderr:
+                failures.append(f"{label}: refused without naming the tls path segment: {result.stderr.strip()}")
+            if key not in result.stderr:
+                failures.append(f"{label}: refused without naming {key!r}: {result.stderr.strip()}")
+            schema_refused += 1
+            for arm, (phrase, _opening) in TLS_SHAPE_ARMS.items():
+                if phrase in result.stderr:
+                    failures.append(
+                        f"{label}: expected a SCHEMA refusal and got the {arm} arm's own "
+                        f"sentence instead — the schema no longer catches this shape: "
+                        f"{result.stderr.strip()}"
+                    )
+            continue
+
+        _, arm = expectation
+        phrase = TLS_SHAPE_ARMS[arm][0]
+        if phrase not in result.stderr:
+            failures.append(
+                f"{label}: refused without the {arm} arm's message ({phrase!r}): "
+                f"{result.stderr.strip()}"
+            )
+        arm_refused += 1
+        for marker in RAISE_MARKERS:
+            if marker in result.stderr:
+                failures.append(f"{label}: helm RAISED rather than refusing — {marker!r} is in the output")
+
+    return failures, len(TLS_SHAPES), schema_refused, arm_refused
+
+
+def test_every_writable_shape_of_tls_enabled_is_refused_correctly(tmp_path):
+    """Six shapes examined: four caught by the schema, two by the render check."""
+    failures, examined, schema_refused, arm_refused = examine_the_tls_shapes(CHART, tmp_path)
+
+    assert examined == EXPECTED_TLS_SHAPES, f"examined {examined}, expected {EXPECTED_TLS_SHAPES}"
+    assert failures == [], "\n".join(failures)
+    assert schema_refused == EXPECTED_TLS_SHAPES_SCHEMA, schema_refused
+    assert arm_refused == EXPECTED_TLS_SHAPES_REFUSED, arm_refused
+
+
+def test_stripping_the_tls_map_guard_reddens_its_own_shape(tmp_path):
+    """THE RED CASE FOR THE ONE ARM THIS SUITE CAN FALSIFY INDEPENDENTLY: strip
+    `tls-not-map`'s own block and `tls: "x"` stops being refused there — it falls
+    through to `.Values.tls.enabled` on a string, which go/template cannot field-
+    index and crashes with its own uninformative error (ADR-0850's trap, the same
+    one `scaledobject.yaml`'s copy of this guard exists against)."""
+    copy = tmp_path / "chart"
+    shutil.copytree(CHART, copy)
+    render_checks = copy / "templates" / "render-checks.yaml"
+    text = render_checks.read_text()
+    guarded = (
+        '{{- if not (kindIs "map" .Values.tls) }}\n'
+        '{{- fail (printf (join "" (list\n'
+        '      "iam-db: `tls` must be a map and is %s (%s). `tls.enabled` and its sibling keys "\n'
+        '      "live under it, and a string, number or list here has none of them. Write a map, "\n'
+        '      "for example `tls: { enabled: true }`."))\n'
+        "      (kindOf .Values.tls) (toJson .Values.tls)) }}\n"
+        "{{- end }}\n"
+    )
+    assert guarded in text, "the tls-not-map arm's block moved; update this red case"
+    render_checks.write_text(text.replace(guarded, ""))
+
+    overlay = shape_overlay('tls: "x"\n', tmp_path / "overlay")
+    result = render(copy, "--values", str(overlay))
+    assert result.returncode != 0, result.stdout
+    assert TLS_SHAPE_ARMS["tls-not-map"][0] not in result.stderr, (
+        "the arm fired even though its block was removed; this red case is not "
+        "testing what it claims to"
+    )
+
+
+def test_the_unconditional_ternary_agrees_with_tls_enabled_in_both_directions(tmp_path):
+    """K-1: `LISTEN_TLS_ENABLED` renders `"0"` when `tls.enabled` is false and
+    `"1"` when it is true — both directions, asserted on the LITERAL rendered
+    value rather than on presence alone.
+
+    MUTATION: `ternary "1" "0" .Values.tls.enabled` rewritten to
+    `ternary "1" "1" .Values.tls.enabled` (always `"1"`) passes every OTHER
+    test in this file — the shape tables above assert refusals, and the
+    golden render below states `tls.enabled: true` throughout, so neither
+    sees the false case at all. This is the one test that would redden."""
+    for enabled, want in [(False, '"0"'), (True, '"1"')]:
+        overlay = shape_overlay(f"tls:\n  enabled: {str(enabled).lower()}\n", tmp_path / str(enabled))
+        result = render(CHART, "--values", str(overlay))
+        assert result.returncode == 0, result.stderr
+        lines = result.stdout.splitlines()
+        rendered = next(
+            (lines[i + 1].strip() for i, l in enumerate(lines) if l.strip() == "- name: LISTEN_TLS_ENABLED"),
+            None,
+        )
+        assert rendered is not None, "LISTEN_TLS_ENABLED is not rendered at all"
+        assert rendered == f"value: {want}", (
+            f"tls.enabled: {enabled} rendered LISTEN_TLS_ENABLED as {rendered}, expected value: {want}"
+        )
+
+
+# ── THE SHAPE OF `tls.clientAuth`, B-U5E (folded into C-DB1; ledger 925, ADR-0846) ──
+#
+# VALIDATED ONLY WHEN PRESENT — unlike `tls.enabled`, this key has no default and is
+# not required (K-8 step 1 stays open until B-U5). `values.yaml` ships none of the
+# three client-auth keys, so EVERY shape below states `clientAuth` itself; an
+# absent key is covered by the golden render test below instead, which is where
+# "renders exactly as origin/main" is actually checked.
+CLIENT_AUTH_SHAPE_ARMS = {
+    "not-a-string": (
+        "`tls.clientAuth` must be a quoted string",
+        '{{- if not (kindIs "string" .Values.tls.clientAuth) }}',
+    ),
+    "bad-mode": (
+        "must be `off`, `optional` or `required`",
+        '{{- if not (has .Values.tls.clientAuth (list "off" "optional" "required")) }}',
+    ),
+    "not-enforced-yet": (
+        "is not enforced yet",
+        '{{- if ne .Values.tls.clientAuth "off" }}',
+    ),
+}
+
+# (label, overlay body, outcome). `"render"` means exit 0.
+CLIENT_AUTH_SHAPES = (
+    ("off-quoted", 'tls:\n  enabled: true\n  clientAuth: "off"\n', "render"),
+    # THE YAML 1.1 TRAP: an UNQUOTED off/on/yes/no/true/false is a BOOLEAN, not the
+    # string this key takes — measured, this is how an author who skips the quotes
+    # lands on `not-a-string` rather than on the mode they meant.
+    ("off-unquoted", "tls:\n  enabled: true\n  clientAuth: off\n", ("refuse", "not-a-string")),
+    ("bad-mode", 'tls:\n  enabled: true\n  clientAuth: "nope"\n', ("refuse", "bad-mode")),
+    ("optional", 'tls:\n  enabled: true\n  clientAuth: "optional"\n', ("refuse", "not-enforced-yet")),
+    ("required", 'tls:\n  enabled: true\n  clientAuth: "required"\n', ("refuse", "not-enforced-yet")),
+)
+
+EXPECTED_CLIENT_AUTH_SHAPES = 5
+EXPECTED_CLIENT_AUTH_SHAPES_REFUSED = 4
+
+
+def test_every_writable_shape_of_tls_clientauth_is_refused_or_rendered(tmp_path):
+    failures: list[str] = []
+    refused = 0
+
+    for label, body, expectation in CLIENT_AUTH_SHAPES:
+        overlay = shape_overlay(body, tmp_path / label)
+        result = render(CHART, "--values", str(overlay))
+
+        if expectation == "render":
+            if result.returncode != 0:
+                failures.append(f"{label}: expected a render, refused instead: {result.stderr.strip()}")
+            elif "LISTEN_TLS_CLIENT_AUTH" not in result.stdout:
+                failures.append(f"{label}: rendered but LISTEN_TLS_CLIENT_AUTH is missing")
+            continue
+
+        _, arm = expectation
+        phrase = CLIENT_AUTH_SHAPE_ARMS[arm][0]
+        if result.returncode == 0:
+            failures.append(f"{label}: rendered and was NOT refused")
+            continue
+        refused += 1
+        if phrase not in result.stderr:
+            failures.append(f"{label}: refused without the {arm} arm's message ({phrase!r}): {result.stderr.strip()}")
+        for marker in RAISE_MARKERS:
+            if marker in result.stderr:
+                failures.append(f"{label}: helm RAISED rather than refusing — {marker!r} is in the output")
+
+    assert len(CLIENT_AUTH_SHAPES) == EXPECTED_CLIENT_AUTH_SHAPES
+    assert failures == [], "\n".join(failures)
+    assert refused == EXPECTED_CLIENT_AUTH_SHAPES_REFUSED, refused
+
+
+# ── THE NESTING ITSELF: client-auth rendering requires `tls.enabled` ────────
+#
+# Every one of `LISTEN_TLS_CLIENT_AUTH`, `LISTEN_TLS_CLIENT_CA_FILE` and the
+# `client-ca` mount/volume is gated on `tls.enabled` in ADDITION to its own
+# key, per the coordinator's B-U5E-convention ruling: a client-auth leaf
+# beside a cleartext listener names a check that cannot run. Each case here
+# is a MUTATION a narrower gate (missing one of the `and` terms) would pass.
+CLIENT_MARKERS = ("LISTEN_TLS_CLIENT_AUTH", "LISTEN_TLS_CLIENT_CA_FILE", "name: client-ca")
+
+
+def test_an_empty_client_ca_secret_renders_nothing_client_related(tmp_path):
+    """`clientCaSecret: ""` is TRUTHINESS-false, the same test `DB_SSL_CA_FILE`
+    uses for `database.sslCaSecret` — an empty string must not render
+    `secretName: ""`."""
+    overlay = shape_overlay('tls:\n  enabled: true\n  clientAuth: "off"\n  clientCaSecret: ""\n', tmp_path)
+    result = render(CHART, "--values", str(overlay))
+    assert result.returncode == 0, result.stderr
+    for marker in ("LISTEN_TLS_CLIENT_CA_FILE", "name: client-ca"):
+        assert marker not in result.stdout, f"{marker} rendered with clientCaSecret empty"
+    # `clientAuth` alone, with no CA secret, still renders — only the CA
+    # trio is additionally gated on `clientCaSecret`.
+    assert "LISTEN_TLS_CLIENT_AUTH" in result.stdout
+
+
+def test_client_auth_off_with_tls_disabled_renders_nothing_client_related(tmp_path):
+    """`tls.enabled: false` with `clientAuth: "off"` and a CA secret both
+    named still renders NONE of the client-auth markers — a client-auth leaf
+    beside a cleartext listener is a check that cannot run."""
+    overlay = shape_overlay(
+        'tls:\n  enabled: false\n  clientAuth: "off"\n  clientCaSecret: iam-db-tls\n'
+        "  clientCaSecretKey: ca.crt\n",
+        tmp_path,
+    )
+    result = render(CHART, "--values", str(overlay))
+    assert result.returncode == 0, result.stderr
+    for marker in CLIENT_MARKERS:
+        assert marker not in result.stdout, f"{marker} rendered with tls.enabled: false"
+
+
+def test_client_ca_secret_without_client_auth_renders_nothing_client_related(tmp_path):
+    """`clientCaSecret` named with NO `clientAuth` key at all still renders
+    none of the three — the CA trio is gated on `hasKey clientAuth` too, not
+    on `clientCaSecret` alone."""
+    overlay = shape_overlay(
+        "tls:\n  enabled: true\n  clientCaSecret: iam-db-tls\n  clientCaSecretKey: ca.crt\n",
+        tmp_path,
+    )
+    result = render(CHART, "--values", str(overlay))
+    assert result.returncode == 0, result.stderr
+    for marker in CLIENT_MARKERS:
+        assert marker not in result.stdout, f"{marker} rendered with no clientAuth key"
+
+
 def test_the_shape_refusal_does_not_quote_a_raise():
     """ADR-0794: a refusal may not carry the raise text it replaces.
 
@@ -1473,6 +1781,10 @@ def test_the_shape_refusal_does_not_quote_a_raise():
     for arm, (phrase, _opening) in sorted(SHAPE_ARMS.items()):
         assert phrase in render_checks_text, f"the {arm} arm's message is not in the template: {phrase!r}"
     for arm, (phrase, _opening) in sorted(AUTOSCALING_SHAPE_ARMS.items()):
+        assert phrase in render_checks_text, f"the {arm} arm's message is not in the template: {phrase!r}"
+    for arm, (phrase, _opening) in sorted(TLS_SHAPE_ARMS.items()):
+        assert phrase in render_checks_text, f"the {arm} arm's message is not in the template: {phrase!r}"
+    for arm, (phrase, _opening) in sorted(CLIENT_AUTH_SHAPE_ARMS.items()):
         assert phrase in render_checks_text, f"the {arm} arm's message is not in the template: {phrase!r}"
     for marker in RAISE_MARKERS:
         assert marker not in render_checks_text, (

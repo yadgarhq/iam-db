@@ -7,12 +7,22 @@
 //! is `LISTEN`, which is already the variable naming the address this service
 //! binds.
 //!
-//! # It is OPT-IN, and OFF unless a deployment asks for it
+//! # It is OPT-IN, and the flag must say so (ADR-0845)
 //!
-//! With nothing configured this binds exactly the plaintext listener it always
-//! has. That is deliberate rather than timid: the certificates do not exist yet,
-//! the callers' matching flag ships turned off too, and the cut-over is a
-//! separate change that can be reverted on its own.
+//! Set `LISTEN_TLS_ENABLED=0` and this binds exactly the plaintext listener it
+//! always has. That is deliberate rather than timid: the certificates do not
+//! exist yet, the callers' matching flag ships turned off too, and the
+//! cut-over is a separate change that can be reverted on its own.
+//!
+//! **ABSENCE IS NO LONGER "OFF".** It used to be: an unset `LISTEN_TLS_ENABLED`
+//! and an explicit `"0"` both bound the plaintext listener, so a chart that
+//! failed to render the flag at all — a template bug, a values file that
+//! dropped the key — produced the exact same cleartext listener as a
+//! deployment that chose it on purpose, with nothing to tell the two apart.
+//! H1 of the ADR-0705 census makes that a refusal: `LISTEN_TLS_ENABLED` must
+//! be exactly `"1"` or `"0"`, stated. The chart renders it unconditionally as
+//! `tls.enabled` and ships no default for that key, so the same rule holds at
+//! the values file too.
 //!
 //! # Configuration is file paths and a flag, never an issuer-specific resource
 //!
@@ -150,33 +160,58 @@ impl ServerTls {
                 .filter(|v| !v.is_empty())
         };
 
-        // Exactly "1". A permissive parse here — "0", "false" and "no" all
-        // enabling it — is how a setting meant to be off ends up on, and the
-        // reverse mistake is worse: this flag is the revert lever for the
-        // cut-over, and a lever that does not move is not one. It is the same
-        // rule the client side applies to its own flag.
-        if get("TLS_ENABLED").as_deref() != Some("1") {
-            if get("TLS_CERT_FILE").is_some() || get("TLS_KEY_FILE").is_some() {
-                // NOT an error. Leaving the paths in place while the flag is off
-                // is exactly how the cut-over gets reverted, so refusing it would
-                // make the lever unusable. It is still worth a line: a deployment
-                // that believes it is encrypted and is not should be able to see
-                // that from the boot log.
-                tracing::warn!(
-                    prefix,
-                    "a certificate is configured but {prefix}_TLS_ENABLED is not \"1\", so \
-                     this service listens in CLEARTEXT"
-                );
+        // H1 (ADR-0705 census) / ADR-0845: EXACTLY "1" or "0", and nothing
+        // else — ABSENT OR EMPTY INCLUDED. A permissive parse — "0", "false"
+        // and "no" all enabling it, or absence quietly meaning "0" — is how a
+        // setting meant to be off ends up on, or how a chart that failed to
+        // render the flag at all binds a cleartext listener indistinguishable
+        // from one chosen on purpose. It is the same rule the client side
+        // applies to its own flag, now widened to refuse the absent case too.
+        //
+        // RAW, NOT `get`: absent and set-but-empty must produce DIFFERENT
+        // sentences (`EnabledNotSet` vs `EnabledEmpty`, the same discrimination
+        // `boot::env_required` makes for every DB_* knob), and `get`'s own
+        // trim-and-empty-filter collapses that distinction into one `None`.
+        let raw_enabled = lookup(&format!("{prefix}_TLS_ENABLED")).map(|v| v.trim().to_string());
+        match raw_enabled.as_deref() {
+            Some("1") => Ok(Some(Self {
+                cert_file: PathBuf::from(
+                    get("TLS_CERT_FILE").ok_or(ServerTlsError::NoCertFile(prefix))?,
+                ),
+                key_file: PathBuf::from(
+                    get("TLS_KEY_FILE").ok_or(ServerTlsError::NoKeyFile(prefix))?,
+                ),
+            })),
+            Some("0") => {
+                if get("TLS_CERT_FILE").is_some() || get("TLS_KEY_FILE").is_some() {
+                    // NOT an error. Leaving the paths in place while the flag is
+                    // off is exactly how the cut-over gets reverted, so refusing
+                    // it would make the lever unusable. It is still worth a
+                    // line: a deployment that believes it is encrypted and is
+                    // not should be able to see that from the boot log.
+                    tracing::warn!(
+                        prefix,
+                        "a certificate is configured but {prefix}_TLS_ENABLED is not \"1\", \
+                         so this service listens in CLEARTEXT"
+                    );
+                }
+                Ok(None)
             }
-            return Ok(None);
+            // SET BUT EMPTY — Helm renders a nulled chart value as "", which
+            // is a DIFFERENT state from absence and gets its own message.
+            Some("") => Err(ServerTlsError::EnabledEmpty(prefix)),
+            // Present, non-empty, and neither "1" nor "0" — "true", "false",
+            // "yes", anything.
+            Some(other) => Err(ServerTlsError::EnabledInvalid {
+                prefix,
+                value: other.to_string(),
+            }),
+            // ABSENT. Used to mean cleartext, the same as an explicit "0";
+            // H1 makes it a refusal instead, because an operator who meant
+            // to turn TLS off has "0" to write, and a value that never
+            // arrived is not that.
+            None => Err(ServerTlsError::EnabledNotSet(prefix)),
         }
-
-        Ok(Some(Self {
-            cert_file: PathBuf::from(
-                get("TLS_CERT_FILE").ok_or(ServerTlsError::NoCertFile(prefix))?,
-            ),
-            key_file: PathBuf::from(get("TLS_KEY_FILE").ok_or(ServerTlsError::NoKeyFile(prefix))?),
-        }))
     }
 
     /// The PEM certificate this service presents.

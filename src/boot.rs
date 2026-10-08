@@ -64,21 +64,62 @@ const SSL_CA_KEY: &str = "DB_SSL_CA_FILE";
 ///
 /// It keeps the INJECTED LOOKUP the whole module is built around, so a test can
 /// state an environment without mutating the process.
-fn env_required(env: &impl Fn(&str) -> Option<String>, key: &str) -> Result<String, String> {
+///
+/// **`chart_key` NAMES WHERE AN OPERATOR EDITS, not merely that a chart
+/// renders the variable.** The message used to say "The chart renders it."
+/// with no key attached, so an operator reading a crash loop learned THAT a
+/// chart was responsible and had to go find WHICH line. ADR-0569 asks a
+/// refusal to say where the knob is set; this is that.
+fn env_required(
+    env: &impl Fn(&str) -> Option<String>,
+    key: &str,
+    chart_key: &str,
+) -> Result<String, String> {
     match env(key) {
         Some(value) if !value.is_empty() => Ok(value),
         Some(_) => Err(format!(
             "{key} is set but EMPTY. It has no compiled-in default (ADR-0569), so there is \
-             nothing to fall back to. The chart renders it; a values override that nulls it \
-             produces exactly this."
+             nothing to fall back to. The chart renders it as {chart_key}; a values override \
+             that nulls it produces exactly this."
         )),
         None => Err(format!(
             "{key} is NOT SET. It has no compiled-in default (ADR-0569): this process reads \
              it from the environment alone and refuses to start rather than invent a value. \
-             The chart renders it."
+             The chart renders it as {chart_key}."
         )),
     }
 }
+
+/// A required knob that must also PARSE, read and converted in one place so
+/// every numeric knob below reports the same two failures the same way:
+/// absent or empty is [`BootError::Missing`] (from [`env_required`]), and
+/// present-but-not-a-number is [`BootError::Unparsable`], which names the
+/// variable, the chart key, the value it was given and `source` — never a
+/// bare `#[from] ParseIntError`, which named none of them.
+fn parse_required<T>(
+    env: &impl Fn(&str) -> Option<String>,
+    key: &'static str,
+    chart_key: &'static str,
+) -> Result<T, BootError>
+where
+    T: std::str::FromStr<Err = std::num::ParseIntError>,
+{
+    let value = env_required(env, key, chart_key).map_err(BootError::Missing)?;
+    value.parse::<T>().map_err(|source| BootError::Unparsable {
+        key,
+        chart_key,
+        value,
+        source,
+    })
+}
+
+/// `REPLICAS` has no single chart key: `templates/deployment.yaml` renders it
+/// as `autoscaling.maxReplicas` when `autoscaling.enabled` and as
+/// `replicaCount` otherwise, from the SAME expression gateway's
+/// `YADGAR_MAX_REPLICAS` uses. A refusal naming only one of the two would be
+/// wrong for whichever mode the deployment is not in.
+const REPLICAS_CHART_KEY: &str =
+    "autoscaling.maxReplicas (when autoscaling.enabled) or replicaCount (otherwise)";
 
 /// Read the pool configuration, refusing rather than guessing.
 ///
@@ -98,22 +139,20 @@ pub fn pool_config(env: impl Fn(&str) -> Option<String>) -> Result<PoolConfig, B
     // `main` already prints, and a helper returning `String` keeps the sentence
     // an operator reads intact through the `#[error("{0}")]` variant.
     Ok(PoolConfig {
-        host: env_required(&env, "DB_HOST").map_err(BootError::Missing)?,
-        port: env_required(&env, "DB_PORT")
-            .map_err(BootError::Missing)?
-            .parse()?,
-        database: env_required(&env, "DB_NAME").map_err(BootError::Missing)?,
-        username: env_required(&env, "DB_USER").map_err(BootError::Missing)?,
-        max_connections: env_required(&env, "DB_MAX_CONNECTIONS")
-            .map_err(BootError::Missing)?
-            .parse()?,
-        replicas: env_required(&env, "REPLICAS")
-            .map_err(BootError::Missing)?
-            .parse()?,
-        engine_max_connections: env_required(&env, "DB_ENGINE_MAX_CONNECTIONS")
-            .map_err(BootError::Missing)?
-            .parse()?,
-        ssl_mode: parse_ssl_mode(&env_required(&env, SSL_MODE_KEY).map_err(BootError::Missing)?)?,
+        host: env_required(&env, "DB_HOST", "database.host").map_err(BootError::Missing)?,
+        port: parse_required(&env, "DB_PORT", "database.port")?,
+        database: env_required(&env, "DB_NAME", "database.name").map_err(BootError::Missing)?,
+        username: env_required(&env, "DB_USER", "database.user").map_err(BootError::Missing)?,
+        max_connections: parse_required(&env, "DB_MAX_CONNECTIONS", "database.maxConnections")?,
+        replicas: parse_required(&env, "REPLICAS", REPLICAS_CHART_KEY)?,
+        engine_max_connections: parse_required(
+            &env,
+            "DB_ENGINE_MAX_CONNECTIONS",
+            "database.engineMaxConnections",
+        )?,
+        ssl_mode: parse_ssl_mode(
+            &env_required(&env, SSL_MODE_KEY, "database.sslMode").map_err(BootError::Missing)?,
+        )?,
         // TRIMMED AND EMPTY-FILTERED, unlike every value above, because this one
         // is an `Option` and Helm renders an unset value as `""`. Without the
         // filter that empty string becomes `Some(PathBuf::new())` — a path sqlx
@@ -170,8 +209,8 @@ pub enum BootError {
     /// the parser takes would be its own wrong description.
     #[error(
         "DB_REQUIRE_TLS is set and this binary no longer reads it. Set DB_SSL_MODE \
-         instead — one of: disabled, preferred, required, verify_ca, verify_identity \
-         (default: required). Refusing at boot rather than ignoring the key, because \
+         instead — one of: disabled, preferred, required, verify_ca, verify_identity. \
+         Refusing at boot rather than ignoring the key, because \
          an operator who set it is asking for a transport guarantee, and silently \
          substituting a default is the one outcome worse than stopping. \
          DB_REQUIRE_TLS was a boolean: it could not tell 'encrypt, and connect in \
@@ -217,8 +256,22 @@ pub enum BootError {
     #[error(transparent)]
     Pool(#[from] PoolError),
 
-    #[error(transparent)]
-    Int(#[from] std::num::ParseIntError),
+    /// A knob that IS set is not a whole number, read through
+    /// [`parse_required`]. The deleted `#[error(transparent)]
+    /// Int(#[from] ParseIntError)` this replaced named neither the variable
+    /// nor the chart key nor the value given — just sqlx's own "invalid
+    /// digit found in string", which an operator cannot act on without
+    /// already knowing which of five numeric knobs produced it.
+    #[error(
+        "{key} is {value:?}, which is not a whole number ({source}). Set the chart value \
+         {chart_key} to a whole number."
+    )]
+    Unparsable {
+        key: &'static str,
+        chart_key: &'static str,
+        value: String,
+        source: std::num::ParseIntError,
+    },
 }
 
 mod lock;
