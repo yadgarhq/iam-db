@@ -141,12 +141,14 @@ metrics-util = { version = "0.20", default-features = false, features = [
 # schema bound below the caller's own request deadline (card C-DB2,
 # M-audit-C): this binary never dials out, so the only reason this crate
 # names `yadgar-dial` at all is to read `default_request_timeout()` back. A
-# dev-dependency only — the shipped binary gains no new crate. Pinned at the
-# same tag `gateway`, `iam`, `task` and `project` already carry, so this is
-# not a fourth version of the same crate in the estate. No `[features]` table
-# exists on this crate to pick one of, unlike `yadgar-telemetry`'s `grpc`
-# above.
-yadgar-dial = { git = "https://github.com/yadgarhq/dial.git", tag = "v0.2.6" }
+# dev-dependency only — the shipped binary gains no new crate. Pinned at
+# v0.2.14, the tag this card's sibling `-db` twins converge on (batch
+# review), rather than the older v0.2.6 `gateway`, `iam`, `task` and
+# `project` still carry — the three C-DB2 PRs agreeing with EACH OTHER is
+# what this pin is for, not matching those four module repos. No
+# `[features]` table exists on this crate to pick one of, unlike
+# `yadgar-telemetry`'s `grpc` above.
+yadgar-dial = { git = "https://github.com/yadgarhq/dial.git", tag = "v0.2.14" }
 # `tests/chart_request_deadline.rs` reads `chart/values.schema.json`'s own
 # `maximum` for `database.acquireTimeoutSeconds` rather than restating the
 # bound as a literal — the schema is ADR-0837's one source for it. Already in

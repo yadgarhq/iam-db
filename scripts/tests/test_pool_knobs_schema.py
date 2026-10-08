@@ -117,6 +117,27 @@ def test_zero_is_refused_at_render(knob: str, variable: str, shipped: str, maxim
 
 
 @pytest.mark.parametrize("knob, variable, shipped, maximum", KNOBS)
+def test_a_quoted_numeral_is_refused_at_render_naming_the_key(
+    knob: str, variable: str, shipped: str, maximum: int | None
+) -> None:
+    """`type: integer` is load-bearing, not merely documentation.
+
+    Helm's `--set-string` forces a STRING, even one that reads as a number,
+    so this asserts the schema's `type` catches what a bare `minimum` alone
+    would not: a values override that quotes the number (`"25"`, YAML or a
+    `--set-string` CLI flag both produce this) is refused at render rather
+    than reaching the binary as a string `parse_required<u64>` happens to
+    accept — the parse would succeed either way, so only the schema's own
+    `type` stands between a quoted override and that silent pass-through.
+    """
+    result = render("--set-string", f"{knob}={shipped}")
+    assert result.returncode != 0, (
+        f"a string-typed {knob}={shipped!r} rendered; `type: integer` did not catch it"
+    )
+    assert knob.split(".")[-1] in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize("knob, variable, shipped, maximum", KNOBS)
 def test_a_stated_value_at_the_minimum_renders(
     knob: str, variable: str, shipped: str, maximum: int | None
 ) -> None:

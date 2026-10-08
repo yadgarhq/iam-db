@@ -476,6 +476,10 @@ fn an_absent_knob_names_the_chart_key_too() {
         ("DB_NAME", "database.name"),
         ("DB_USER", "database.user"),
         (SSL_MODE_KEY, "database.sslMode"),
+        (OPERATOR_RESERVE_KEY, OPERATOR_RESERVE_CHART_KEY),
+        (ACQUIRE_TIMEOUT_KEY, ACQUIRE_TIMEOUT_CHART_KEY),
+        (IDLE_TIMEOUT_KEY, IDLE_TIMEOUT_CHART_KEY),
+        (MAX_LIFETIME_KEY, MAX_LIFETIME_CHART_KEY),
     ] {
         let err = pool_config(env_without(key)).expect_err("absent must refuse");
         assert!(matches!(err, BootError::Missing(_)), "{err}");
