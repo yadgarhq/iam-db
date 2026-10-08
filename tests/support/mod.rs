@@ -182,6 +182,14 @@ pub fn boot_env(root: &Path) -> Vec<(&'static str, String)> {
         ("DB_MAX_CONNECTIONS", "4".to_string()),
         ("REPLICAS", "1".to_string()),
         ("DB_ENGINE_MAX_CONNECTIONS", "20".to_string()),
+        // The four C-DB2 knobs (`yadgar-store` v0.4.0, ADR-0837, ADR-0849):
+        // this harness states the chart's own shipped values, the same
+        // reason it states every other knob above explicitly rather than
+        // relying on a default that no longer exists.
+        ("DB_ENGINE_OPERATOR_RESERVE", "5".to_string()),
+        ("DB_ACQUIRE_TIMEOUT_SECONDS", "25".to_string()),
+        ("DB_IDLE_TIMEOUT_SECONDS", "600".to_string()),
+        ("DB_MAX_LIFETIME_SECONDS", "1800".to_string()),
         ("DB_SSL_MODE", "disabled".to_string()),
         ("DB_MIGRATION_LOCK_TIMEOUT_SECONDS", "60".to_string()),
         (

@@ -59,6 +59,10 @@ fn the_obsolete_tls_key_is_refused_with_its_sentence_not_its_variant_name() {
 /// pool environment plus an unusable wait reaches that refusal and nothing
 /// later. Its variant carries fields: Debug would print `MigrationLockWait {
 /// value: "0", .. }` and name neither the variable nor the chart key.
+///
+/// The four C-DB2 knobs are part of the pool's own knobs now, so this
+/// fixture states them too (card C-DB2) — otherwise `pool_config` would
+/// refuse on one of them before the migration lock's wait is even read.
 #[test]
 fn an_unusable_migration_lock_wait_is_refused_naming_the_variable_and_the_chart_key() {
     let stderr = refusal(&[
@@ -69,6 +73,10 @@ fn an_unusable_migration_lock_wait_is_refused_naming_the_variable_and_the_chart_
         ("DB_MAX_CONNECTIONS", "4"),
         ("REPLICAS", "3"),
         ("DB_ENGINE_MAX_CONNECTIONS", "200"),
+        ("DB_ENGINE_OPERATOR_RESERVE", "5"),
+        ("DB_ACQUIRE_TIMEOUT_SECONDS", "25"),
+        ("DB_IDLE_TIMEOUT_SECONDS", "600"),
+        ("DB_MAX_LIFETIME_SECONDS", "1800"),
         ("DB_SSL_MODE", "verify-identity"),
         ("DB_MIGRATION_LOCK_TIMEOUT_SECONDS", "0"),
     ]);
@@ -88,7 +96,9 @@ fn an_unusable_migration_lock_wait_is_refused_naming_the_variable_and_the_chart_
 
 /// EVERY KNOB `pool_config` AND `migration_lock` NEED, stated as a VALID
 /// pool and a VALID wait — so a case layering one bad value on top reaches
-/// exactly that refusal and nothing earlier in the boot order.
+/// exactly that refusal and nothing earlier in the boot order. The four
+/// card-C-DB2 knobs are part of the pool's own knobs now (`yadgar-store`
+/// v0.4.0, ADR-0837, ADR-0849).
 const FULL_POOL_ENV: &[(&str, &str)] = &[
     ("DB_HOST", "engine.example.invalid"),
     ("DB_PORT", "13306"),
@@ -97,6 +107,10 @@ const FULL_POOL_ENV: &[(&str, &str)] = &[
     ("DB_MAX_CONNECTIONS", "4"),
     ("REPLICAS", "3"),
     ("DB_ENGINE_MAX_CONNECTIONS", "200"),
+    ("DB_ENGINE_OPERATOR_RESERVE", "5"),
+    ("DB_ACQUIRE_TIMEOUT_SECONDS", "25"),
+    ("DB_IDLE_TIMEOUT_SECONDS", "600"),
+    ("DB_MAX_LIFETIME_SECONDS", "1800"),
     ("DB_SSL_MODE", "verify-identity"),
     ("DB_MIGRATION_LOCK_TIMEOUT_SECONDS", "60"),
 ];
@@ -114,6 +128,62 @@ fn a_non_numeric_db_port_is_refused_naming_the_variable_the_chart_key_and_the_va
     assert!(
         !stderr.contains("Unparsable"),
         "the operator got the Debug variant: {stderr}"
+    );
+}
+
+/// `DB_ENGINE_OPERATOR_RESERVE` is one of the four knobs card C-DB2 adds
+/// (ADR-0837, ADR-0849): `yadgar-store` v0.4.0 deleted the `5` it used to
+/// compile in, so an absent value here must refuse the boot naming both the
+/// variable and the chart key — not silently reach for the old constant,
+/// which no longer exists to reach for.
+#[test]
+fn an_unset_db_engine_operator_reserve_names_the_variable_and_the_chart_key() {
+    let stderr = refusal(&[
+        ("DB_HOST", "engine.example.invalid"),
+        ("DB_PORT", "13306"),
+        ("DB_NAME", "iam_fixture"),
+        ("DB_USER", "iam_fixture_user"),
+        ("DB_MAX_CONNECTIONS", "4"),
+        ("REPLICAS", "3"),
+        ("DB_ENGINE_MAX_CONNECTIONS", "200"),
+    ]);
+    assert!(
+        stderr.contains("DB_ENGINE_OPERATOR_RESERVE"),
+        "the refusal must name the variable: {stderr}"
+    );
+    assert!(
+        stderr.contains("database.engineOperatorReserve"),
+        "the refusal must name the chart key: {stderr}"
+    );
+}
+
+/// `DB_ACQUIRE_TIMEOUT_SECONDS` is read right after `DB_ENGINE_OPERATOR_RESERVE`,
+/// so a value that IS there but unparsable reaches its own refusal with only
+/// the knobs ahead of it set (card C-DB2).
+#[test]
+fn a_malformed_db_acquire_timeout_seconds_names_the_variable_and_the_chart_key() {
+    let stderr = refusal(&[
+        ("DB_HOST", "engine.example.invalid"),
+        ("DB_PORT", "13306"),
+        ("DB_NAME", "iam_fixture"),
+        ("DB_USER", "iam_fixture_user"),
+        ("DB_MAX_CONNECTIONS", "4"),
+        ("REPLICAS", "3"),
+        ("DB_ENGINE_MAX_CONNECTIONS", "200"),
+        ("DB_ENGINE_OPERATOR_RESERVE", "5"),
+        ("DB_ACQUIRE_TIMEOUT_SECONDS", "abc"),
+    ]);
+    assert!(
+        stderr.contains("DB_ACQUIRE_TIMEOUT_SECONDS is \"abc\""),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("database.acquireTimeoutSeconds"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("Unparsable"),
+        "the operator got the Debug variant, not the sentence: {stderr}"
     );
 }
 

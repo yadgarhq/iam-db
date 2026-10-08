@@ -312,12 +312,26 @@ spec:
             {{- end }}
             # D4's arithmetic, both halves of it. The binary refuses to boot
             # when maxConnections x REPLICAS exceeds the engine's ceiling less
-            # the five it reserves for an operator, so an engine with a smaller
-            # ceiling than stock MariaDB's 151 needs all three to be settable.
+            # engineOperatorReserve below, so an engine with a smaller ceiling
+            # than stock MariaDB's 151 needs all three to be settable.
             - name: DB_MAX_CONNECTIONS
               value: {{ .Values.database.maxConnections | quote }}
             - name: DB_ENGINE_MAX_CONNECTIONS
               value: {{ .Values.database.engineMaxConnections | quote }}
+            # HEADROOM INSIDE DB_ENGINE_MAX_CONNECTIONS (ADR-0849). `yadgar-store`
+            # v0.4.0 deleted the `5` it used to compile in; no fallback here either.
+            - name: DB_ENGINE_OPERATOR_RESERVE
+              value: {{ .Values.database.engineOperatorReserve | quote }}
+            # THE THREE POOL DURATIONS `yadgar-store` v0.4.0 stopped filling with
+            # sqlx's own compiled-in defaults (ADR-0837). `acquireTimeoutSeconds`
+            # is bounded above by chart/values.schema.json's `maximum: 29`, below
+            # this process's own dial REQUEST_TIMEOUT (30s).
+            - name: DB_ACQUIRE_TIMEOUT_SECONDS
+              value: {{ .Values.database.acquireTimeoutSeconds | quote }}
+            - name: DB_IDLE_TIMEOUT_SECONDS
+              value: {{ .Values.database.idleTimeoutSeconds | quote }}
+            - name: DB_MAX_LIFETIME_SECONDS
+              value: {{ .Values.database.maxLifetimeSeconds | quote }}
             # The migration lock's wait (ledger 814). No default behind it in the
             # binary; values.yaml carries the bound and its arithmetic.
             - name: DB_MIGRATION_LOCK_TIMEOUT_SECONDS
