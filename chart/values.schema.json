@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "yadgar/iam-db",
-  "$comment": "CLOSED PER CHART (ADR-0847, ADR-0850, ledger 990): this schema closes every key iam-db's own values.yaml declares and refuses an unknown one at render. It closes only what this chart owns -- a parent or platform that embeds iam-db leaves this whole section open instead of re-declaring it. OPEN MAPS, left as `{}` on purpose: `global` (injected by a parent/platform at render time; this chart reads none of it itself, but a closed root would refuse the key the moment it is embedded); `resources` and `database.instance.resources` (plain Kubernetes ResourceRequirements, handed straight to `toYaml`, whose own shape is not this chart's to validate); `rollingUpdate` (same, handed to `toYaml` under `strategy.rollingUpdate`). EXTRAS, declared as leaves though `values.yaml` never states them: `image.digest` (absent from `values.yaml` by design -- `ci-release` rewrites it at package time, D65); `networkPolicy.scrapeFrom.namespace` (`values.yaml` ships `scrapeFrom: {}`; `templates/networkpolicy.yaml` reads the key under it). TYPES, TOGGLES AND `required` ON A NEW KEY ARE NOT THIS FILE'S JOB (ADR-0847): `chart/templates/render-checks.yaml` validates `database.create` and `autoscaling.enabled` with `kindIs \"bool\"` and raises its own named refusal; nothing here duplicates that. The two exceptions predate this closure and are kept unchanged: `database` carries `type: object` and `required: [migrationLockTimeoutSeconds]` (ledger 814, ADR-0837) -- `database.migrationLockTimeoutSeconds` is the one knob this file bounds as `integer, 1..590`, because the binary reads it with no fallback. There is no root `required`: `database` deleted outright is still refused by the chart's own render check (`database` is absent from the values), with a more specific sentence than a schema line would give. `tls.enabled` IS a typed, required exception to the 'types/toggles are not this file's job' rule (C-DB1, ADR-0845, K-8, K-3): it is a LEAF, so ADR-0847's carve-out for a value `render-checks.yaml` guards (a block the schema deliberately leaves untyped) does not apply to it the way it does to `database.create` or `autoscaling.enabled` -- `templates/render-checks.yaml` still carries the named sentence a bare schema refusal would not give, but the schema's own `required`/`type: boolean` is what reddens `helm lint --strict`, which a template-only `fail` cannot (K-3). `tls.clientAuth`, `tls.clientCaSecret` and `tls.clientCaSecretKey` are declared as EXTRAS (B-U5E, folded; `values.yaml` states none of them, and this chart does not enforce `clientAuth` beyond `off` until B-U5 lifts that).",
+  "$comment": "CLOSED PER CHART (ADR-0847, ADR-0850, ledger 990): this schema closes every key iam-db's own values.yaml declares and refuses an unknown one at render. It closes only what this chart owns -- a parent or platform that embeds iam-db leaves this whole section open instead of re-declaring it. OPEN MAPS, left as `{}` on purpose: `global` (injected by a parent/platform at render time; this chart reads none of it itself, but a closed root would refuse the key the moment it is embedded); `resources` and `database.instance.resources` (plain Kubernetes ResourceRequirements, handed straight to `toYaml`, whose own shape is not this chart's to validate); `rollingUpdate` (same, handed to `toYaml` under `strategy.rollingUpdate`). EXTRAS, declared as leaves though `values.yaml` never states them: `image.digest` (absent from `values.yaml` by design -- `ci-release` rewrites it at package time, D65); `networkPolicy.scrapeFrom.namespace` (`values.yaml` ships `scrapeFrom: {}`; `templates/networkpolicy.yaml` reads the key under it). TYPES, TOGGLES AND `required` ON A NEW KEY ARE NOT THIS FILE'S JOB (ADR-0847): `chart/templates/render-checks.yaml` validates `database.create` and `autoscaling.enabled` with `kindIs \"bool\"` and raises its own named refusal; nothing here duplicates that. `database` carries `type: object` and `required: [migrationLockTimeoutSeconds, engineOperatorReserve, acquireTimeoutSeconds, idleTimeoutSeconds, maxLifetimeSeconds]` (ledger 814, ADR-0837, ADR-0849, card C-DB2): each of these five knobs is a leaf this file bounds as a typed `integer` with a `minimum` (and, for `migrationLockTimeoutSeconds`/`acquireTimeoutSeconds`, a `maximum`), because the binary reads every one of them with no fallback. There is no root `required`: `database` deleted outright is still refused by the chart's own render check (`database` is absent from the values), with a more specific sentence than a schema line would give. `tls.enabled` IS a typed, required exception to the 'types/toggles are not this file's job' rule (C-DB1, ADR-0845, K-8, K-3): it is a LEAF, so ADR-0847's carve-out for a value `render-checks.yaml` guards (a block the schema deliberately leaves untyped) does not apply to it the way it does to `database.create` or `autoscaling.enabled` -- `templates/render-checks.yaml` still carries the named sentence a bare schema refusal would not give, but the schema's own `required`/`type: boolean` is what reddens `helm lint --strict`, which a template-only `fail` cannot (K-3). `tls.clientAuth`, `tls.clientCaSecret` and `tls.clientCaSecretKey` are declared as EXTRAS (B-U5E, folded; `values.yaml` states none of them, and this chart does not enforce `clientAuth` beyond `off` until B-U5 lifts that).",
   "properties": {
     "image": {
       "properties": {
@@ -41,6 +41,27 @@
         "sslCaSecretKey": {},
         "maxConnections": {},
         "engineMaxConnections": {},
+        "engineOperatorReserve": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Headroom inside engineMaxConnections reserved for an operator, a backup job or a monitoring agent (ADR-0849). Rendered as DB_ENGINE_OPERATOR_RESERVE and read with no fallback: `yadgar-store` v0.4.0 deleted the `5` it used to compile in. Minimum 1: zero leaves a non-admin operator no way into a full engine (`store` refuses it too)."
+        },
+        "acquireTimeoutSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 29,
+          "description": "Seconds `acquire` waits for a free connection before failing. Rendered as DB_ACQUIRE_TIMEOUT_SECONDS and read with no fallback (ADR-0837); replaces sqlx's own 30s default. Maximum 29: below the CALLER's own dial REQUEST_TIMEOUT (30s) -- this process never dials out, so the budget it has to stay under is the caller's (iam's), not its own -- so a stalled acquire can never be the deadline a caller's whole request runs against (card C-DB2; see tests/chart_request_deadline.rs). Minimum 1: zero fails every acquire that has to wait."
+        },
+        "idleTimeoutSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Seconds an idle connection is kept before the pool closes it. Rendered as DB_IDLE_TIMEOUT_SECONDS and read with no fallback (ADR-0837); replaces sqlx's own 600s default. Minimum 1: zero closes connections as fast as the pool opens them."
+        },
+        "maxLifetimeSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Seconds at which a connection is retired however busy it is. Rendered as DB_MAX_LIFETIME_SECONDS and read with no fallback (ADR-0837); replaces sqlx's own 1800s default. Minimum 1: zero retires every connection the instant it opens."
+        },
         "migrationLockTimeoutSeconds": {
           "type": "integer",
           "minimum": 1,
@@ -80,7 +101,13 @@
       },
       "additionalProperties": false,
       "type": "object",
-      "required": ["migrationLockTimeoutSeconds"]
+      "required": [
+        "migrationLockTimeoutSeconds",
+        "engineOperatorReserve",
+        "acquireTimeoutSeconds",
+        "idleTimeoutSeconds",
+        "maxLifetimeSeconds"
+      ]
     },
     "autoscaling": {
       "properties": {

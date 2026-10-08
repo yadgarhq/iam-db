@@ -2695,6 +2695,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "yadgar-dial"
+version = "0.1.0"
+source = "git+https://github.com/yadgarhq/dial.git?tag=v0.2.14#7ba58d836e020ab6c0b63eb4680d78727a191a88"
+dependencies = [
+ "metrics",
+ "rustls",
+ "rustls-pki-types",
+ "thiserror",
+ "tokio",
+ "tonic",
+ "tracing",
+]
+
+[[package]]
 name = "yadgar-iam-db"
 version = "0.1.0"
 dependencies = [
@@ -2704,6 +2718,7 @@ dependencies = [
  "prost-types",
  "rcgen",
  "rustls-pki-types",
+ "serde_json",
  "sqlx",
  "thiserror",
  "tokio",
@@ -2714,6 +2729,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "yadgar-dial",
  "yadgar-lifecycle",
  "yadgar-store",
  "yadgar-telemetry",
@@ -2738,7 +2754,7 @@ dependencies = [
 [[package]]
 name = "yadgar-store"
 version = "0.1.0"
-source = "git+https://github.com/yadgarhq/store.git?tag=v0.3.0#e0a06bf5955d6ef15068132e3055596022cae4d0"
+source = "git+https://github.com/yadgarhq/store.git?tag=v0.4.0#596a2233e6dfdc6e63fd3a757655595e34789c59"
 dependencies = [
  "sqlx",
  "thiserror",

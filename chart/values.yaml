@@ -179,13 +179,49 @@ database:
   # THE OTHER HALF OF D4's ARITHMETIC, and the reason this one is not optional.
   #
   # `store`'s `check_engine_headroom` refuses boot when
-  # maxConnections x replicas exceeds engineMaxConnections minus five, the five
-  # being what the engine keeps back so an operator can still log in. 151 is
-  # stock MariaDB's number; RDS derives max_connections from instance size, and
-  # a small instance is well under it. On an engine with a smaller ceiling the
-  # pod could not start and the operator had no value to change.
+  # maxConnections x replicas exceeds engineMaxConnections minus
+  # engineOperatorReserve below. 151 is stock MariaDB's number; RDS derives
+  # max_connections from instance size, and a small instance is well under
+  # it. On an engine with a smaller ceiling the pod could not start and the
+  # operator had no value to change.
   maxConnections: 8
   engineMaxConnections: 151
+
+  # HEADROOM INSIDE engineMaxConnections, so an operator, a backup job or a
+  # monitoring agent can still connect when every replica's pool is full
+  # (ADR-0849). Rendered as DB_ENGINE_OPERATOR_RESERVE and read with NO
+  # fallback (ADR-0569, ADR-0837): `yadgar-store` v0.4.0 deleted the `5` it
+  # used to compile in, so this line is now the only place the reserve is
+  # stated.
+  #
+  # NOT WHAT THE ENGINE ITSELF ALREADY KEEPS BACK. `yadgar-store`'s own
+  # `PoolConfig::operator_reserve` doc measures against MariaDB 11.8.9 (with
+  # `max_connections=10, extra_port=0`, the setup it tested at — a smaller
+  # number than this chart ships here, used only to make the engine's own
+  # ceiling reachable to test against): one session holding
+  # `CONNECTION ADMIN` still gets in as the (max_connections + 1)th
+  # connection; a second admin session is refused. This value is headroom
+  # INSIDE engineMaxConnections, on top of that one engine-held slot — 0
+  # would leave a non-admin operator no way in at all.
+  engineOperatorReserve: 5
+
+  # THE THREE POOL DURATIONS, in seconds, `yadgar-store` used to inherit
+  # from sqlx's own compiled-in defaults (30s/600s/1800s) rather than state
+  # (ADR-0837). Read with NO fallback: deleting or nulling any one of them
+  # refuses the pod's boot naming both the variable and the chart key.
+  #
+  # acquireTimeoutSeconds BOUNDED 1..29 (chart/values.schema.json): below the
+  # CALLER's own dial `REQUEST_TIMEOUT` (30s) — this process never dials out,
+  # so the budget it has to stay under is `iam`'s, not its own — so a stalled
+  # acquire can never be the deadline a caller's whole request runs against.
+  # `tests/chart_request_deadline.rs` pins the two together.
+  acquireTimeoutSeconds: 25
+  # idleTimeoutSeconds: how long an idle connection is kept before the pool
+  # closes it. Replaces sqlx's 600s default.
+  idleTimeoutSeconds: 600
+  # maxLifetimeSeconds: the age at which a connection is retired however
+  # busy it is. Replaces sqlx's 1800s default.
+  maxLifetimeSeconds: 1800
 
   # HOW LONG A REPLICA WAITS FOR ANOTHER ONE'S MIGRATION, in seconds, before it
   # fails its boot. Rendered as DB_MIGRATION_LOCK_TIMEOUT_SECONDS and read with

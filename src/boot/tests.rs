@@ -1,4 +1,5 @@
 use super::*;
+use std::time::Duration;
 use yadgar_store::pool::MySqlSslMode;
 
 /// An environment stating only what a test cares about.
@@ -22,8 +23,11 @@ fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String
 /// `required`; every value below differs. A test whose fixture repeated a
 /// deleted default would pass identically against an implementation that
 /// still had the default behind the read, which is the whole failure this
-/// conversion is guarding against.
-const RENDERED: [(&str, &str); 8] = [
+/// conversion is guarding against. The four card-C-DB2 entries follow the
+/// same rule against `chart/values.yaml`'s shipped `5`, `25`, `600` and
+/// `1800` — `yadgar-store` v0.4.0 deleted the compiled-in `5`, `30s`, `600s`
+/// and `1800s` these replace.
+const RENDERED: [(&str, &str); 12] = [
     ("DB_HOST", "engine.example.invalid"),
     ("DB_PORT", "13306"),
     ("DB_NAME", "iam_fixture"),
@@ -31,6 +35,10 @@ const RENDERED: [(&str, &str); 8] = [
     ("DB_MAX_CONNECTIONS", "4"),
     ("REPLICAS", "3"),
     ("DB_ENGINE_MAX_CONNECTIONS", "200"),
+    (OPERATOR_RESERVE_KEY, "9"),
+    (ACQUIRE_TIMEOUT_KEY, "11"),
+    (IDLE_TIMEOUT_KEY, "733"),
+    (MAX_LIFETIME_KEY, "2100"),
     (SSL_MODE_KEY, "verify-identity"),
 ];
 
@@ -91,6 +99,10 @@ fn config_with(mode: MySqlSslMode) -> PoolConfig {
         max_connections: 4,
         replicas: 2,
         engine_max_connections: 151,
+        operator_reserve: 5,
+        acquire_timeout: Duration::from_secs(25),
+        idle_timeout: Duration::from_secs(600),
+        max_lifetime: Duration::from_secs(1800),
         ssl_mode: mode,
         ssl_ca: None,
     }
@@ -322,6 +334,10 @@ fn every_rendered_value_reaches_the_configuration_verbatim() {
     assert_eq!(config.max_connections, 4);
     assert_eq!(config.replicas, 3);
     assert_eq!(config.engine_max_connections, 200);
+    assert_eq!(config.operator_reserve, 9);
+    assert_eq!(config.acquire_timeout, Duration::from_secs(11));
+    assert_eq!(config.idle_timeout, Duration::from_secs(733));
+    assert_eq!(config.max_lifetime, Duration::from_secs(2100));
     assert!(
         matches!(config.ssl_mode, MySqlSslMode::VerifyIdentity),
         "the stated ssl-mode did not reach the configuration"
@@ -408,7 +424,7 @@ fn an_unrendered_ssl_mode_refuses_rather_than_encrypting_on_a_mode_nobody_chose(
 /// which names the variable, the chart key AND the value given. The
 /// `#[error(transparent)] Int(#[from] ParseIntError)` this replaced named
 /// none of them — just sqlx's own "invalid digit found in string", which an
-/// operator cannot act on without first knowing which of the four numeric
+/// operator cannot act on without first knowing which of the eight numeric
 /// knobs produced it.
 ///
 /// MUTATION: restoring `Int(#[from] ParseIntError)` and the bare `?` at each
@@ -422,6 +438,10 @@ fn a_non_numeric_knob_refuses_naming_the_key_the_chart_key_and_the_value() {
         ("DB_MAX_CONNECTIONS", "database.maxConnections"),
         ("REPLICAS", REPLICAS_CHART_KEY),
         ("DB_ENGINE_MAX_CONNECTIONS", "database.engineMaxConnections"),
+        (OPERATOR_RESERVE_KEY, OPERATOR_RESERVE_CHART_KEY),
+        (ACQUIRE_TIMEOUT_KEY, ACQUIRE_TIMEOUT_CHART_KEY),
+        (IDLE_TIMEOUT_KEY, IDLE_TIMEOUT_CHART_KEY),
+        (MAX_LIFETIME_KEY, MAX_LIFETIME_CHART_KEY),
     ] {
         let err = pool_config(env_with(&[(key, "not-a-number")]))
             .expect_err("a non-numeric value must refuse the boot");
@@ -456,6 +476,10 @@ fn an_absent_knob_names_the_chart_key_too() {
         ("DB_NAME", "database.name"),
         ("DB_USER", "database.user"),
         (SSL_MODE_KEY, "database.sslMode"),
+        (OPERATOR_RESERVE_KEY, OPERATOR_RESERVE_CHART_KEY),
+        (ACQUIRE_TIMEOUT_KEY, ACQUIRE_TIMEOUT_CHART_KEY),
+        (IDLE_TIMEOUT_KEY, IDLE_TIMEOUT_CHART_KEY),
+        (MAX_LIFETIME_KEY, MAX_LIFETIME_CHART_KEY),
     ] {
         let err = pool_config(env_without(key)).expect_err("absent must refuse");
         assert!(matches!(err, BootError::Missing(_)), "{err}");
