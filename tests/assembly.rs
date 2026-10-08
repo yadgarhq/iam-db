@@ -176,6 +176,9 @@ fn mount() -> Mount {
         ("tls.pem", format!("{}{}", leaf.pem(), ca.pem())),
         ("tls-key.pem", key.serialize_pem()),
         ("db-ca.pem", ca.pem()),
+        // The authority a verifying listener checks its callers against (card
+        // B-U5). Any PEM authority serves: this file is only hashed here.
+        ("client-ca.pem", ca.pem()),
         // NOT A CERTIFICATE, and in the set for exactly the reason ADR-0523
         // gives: the process read it at boot, the chart mounts it as a DIRECTORY
         // so it can rotate, and it is baked into a pool that outlives every
@@ -186,9 +189,16 @@ fn mount() -> Mount {
 }
 
 /// The listener's transport built the way a DEPLOYMENT builds it — out of the
-/// three variables — rather than by assembling the struct. A test that bypassed
-/// `from_lookup` would leave the reading of those names unproven.
+/// variables, through this repository's `serve::from_lookup` — rather than by
+/// assembling the struct. A test that bypassed `from_lookup` would leave the
+/// reading of those names unproven.
 fn listener(mount: &Mount) -> ServerTls {
+    listener_with(mount, "off")
+}
+
+/// The same, in client-auth `mode`, with the fixture's client CA named — so
+/// whether it is WATCHED is decided by the mode alone.
+fn listener_with(mount: &Mount, mode: &str) -> ServerTls {
     let vars = [
         ("LISTEN_TLS_ENABLED", "1".to_string()),
         (
@@ -199,14 +209,20 @@ fn listener(mount: &Mount) -> ServerTls {
             "LISTEN_TLS_KEY_FILE",
             mount.at("tls-key.pem").display().to_string(),
         ),
+        ("LISTEN_TLS_CLIENT_AUTH", mode.to_string()),
+        (
+            "LISTEN_TLS_CLIENT_CA_FILE",
+            mount.at("client-ca.pem").display().to_string(),
+        ),
     ];
-    ServerTls::from_lookup(serve::LISTEN, |key| {
+    match serve::from_lookup(|key| {
         vars.iter()
             .find(|(k, _)| *k == key)
             .map(|(_, v)| v.to_string())
-    })
-    .expect("the listener's transport")
-    .expect("TLS is enabled in this fixture")
+    }) {
+        Ok(Some(tls)) => tls,
+        _ => panic!("TLS is enabled in this fixture and its configuration is complete"),
+    }
 }
 
 fn watched(inputs: &rotate::Inputs) -> Vec<String> {
@@ -294,6 +310,26 @@ fn the_private_key_is_watched_beside_its_certificate() {
 
     assert!(watched(&inputs).contains(&"tls-key.pem".to_string()));
     assert!(watched(&inputs).contains(&"tls.pem".to_string()));
+}
+
+/// ADR-0523 for the client CA (card B-U5): a verifying listener READ it at
+/// boot, so it is watched; under `off` the listener never reads it, so it is
+/// not — a CA named beside `off` restarting the pod on rotation would be a
+/// restart for a file nothing uses.
+#[test]
+fn the_client_ca_is_watched_exactly_when_a_verifying_mode_reads_it() {
+    let mount = mount();
+    let config = configuration(&schedule_document());
+
+    for (mode, want) in [("required", true), ("optional", true), ("off", false)] {
+        let listener = listener_with(&mount, mode);
+        let inputs = rotate::watch_set(Some(&listener), &mount.at("password"), None, &config);
+        assert_eq!(
+            watched(&inputs).contains(&"client-ca.pem".to_string()),
+            want,
+            "clientAuth {mode}: the client CA must be watched exactly when it is read"
+        );
+    }
 }
 
 #[test]

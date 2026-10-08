@@ -15,5 +15,11 @@
 # (`yadgarhq/chart`'s own `example/values.yaml` and ArgoCD's
 # `applications/yadgar.yaml`) already states `true` for this module — this
 # file matches what gets deployed, not a value chosen for this suite alone.
+#
+# `clientAuth: "off"` FOR THE SAME REASON (card B-U5, X-ADR-1, K-8 step 3):
+# the key is required with no default now, and `"off"` is the value every
+# hop runs until its own flip — the value `yadgarhq/chart`'s B-P1 fixture
+# states for this module. QUOTED: a bare off is the boolean false.
 tls:
   enabled: true
+  clientAuth: "off"

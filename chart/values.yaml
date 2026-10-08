@@ -71,25 +71,32 @@ tls:
   # The key inside that Secret holding the private key, mounted as
   # `tls-key.pem`. Named for the same reason.
   keySecretKey: tls.key
-  # UNSET, DELIBERATELY (B-U5E, folded; ledger 925, ADR-0846). `clientAuth`,
-  # `clientCaSecret` and `clientCaSecretKey` let an operator ask iam-db to
-  # verify ITS caller's certificate — the other direction from `certSecret`
-  # above, which is what iam-db presents. `templates/render-checks.yaml`
-  # accepts only `clientAuth: off` for now and refuses `optional` or
-  # `required` with a sentence saying so: this repository does not yet read
-  # `yadgar-lifecycle::serve_tls`'s client-verification side, so promising
-  # either would be a check nothing performs. A later release (B-U5) lifts
-  # that and contracts these three keys the way `enabled` above is
-  # contracted today.
+  # NO DEFAULT FOR `clientAuth` EITHER (card B-U5; ledger 925, ADR-0846,
+  # X-ADR-1). `clientAuth`, `clientCaSecret` and `clientCaSecretKey` ask
+  # iam-db to verify ITS caller's certificate — the other direction from
+  # `certSecret` above, which is what iam-db presents. `values.schema.json`
+  # makes `clientAuth` `required`, and the binary refuses to boot without
+  # the `LISTEN_TLS_CLIENT_AUTH` it renders, whether or not TLS is on. Set
+  # it explicitly, QUOTED (YAML 1.1 reads a bare off as false):
   #
-  #   clientAuth: "off"             # the only value accepted today — QUOTED:
-  #                                  # YAML 1.1 reads a bare off as false
-  #   clientCaSecret: iam-db-tls    # defaults to tls.certSecret once B-U5
-  #                                  # contracts this key; a Secret NAME, not
-  #                                  # a switch, so ADR-0569 allows a default
-  #   clientCaSecretKey: ca.crt     # the key inside clientCaSecret holding
-  #                                  # the authority iam-db checks a caller's
-  #                                  # certificate against
+  #   clientAuth: "off"         # verify no caller; the value every hop
+  #                              # runs until its own flip, and the
+  #                              # emergency value. Deleting the key is a
+  #                              # render refusal, not a way to turn
+  #                              # verification off.
+  #   clientAuth: "optional"    # verify a presented certificate, admit a
+  #                              # caller presenting none — a staging step,
+  #                              # not a control
+  #   clientAuth: "required"    # every caller presents a certificate the
+  #                              # authority below signed
+  #
+  # `optional` and `required` need `enabled: true` and the authority, or
+  # `templates/render-checks.yaml` refuses the render:
+  #
+  #   clientCaSecret: iam-db-client-ca  # the Secret holding that authority;
+  #                                      # unset, so nothing is mounted
+  #                                      # until a hop asks for verification
+  #   clientCaSecretKey: ca.crt         # the key inside clientCaSecret
 
 # D80: the platform is a deployment choice, so every number the binary needs is
 # a value here rather than a default only a fork can reach. These four were

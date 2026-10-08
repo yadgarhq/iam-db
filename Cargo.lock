@@ -237,6 +237,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
+name = "const-oid"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -364,6 +370,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
 dependencies = [
  "block-buffer 0.12.1",
+ "const-oid",
  "crypto-common 0.2.2",
  "ctutils",
 ]
@@ -2717,7 +2724,6 @@ dependencies = [
  "prost",
  "prost-types",
  "rcgen",
- "rustls-pki-types",
  "serde_json",
  "sqlx",
  "thiserror",
@@ -2738,15 +2744,17 @@ dependencies = [
 [[package]]
 name = "yadgar-lifecycle"
 version = "0.1.0"
-source = "git+https://github.com/yadgarhq/lifecycle.git?tag=v0.2.17#45789e8d3f7374b2c3d4e5d0b7e7f17603de1a34"
+source = "git+https://github.com/yadgarhq/lifecycle.git?tag=v0.2.20#7c1ee65a6b9a49ec04aa60db05e10c9a4af6492a"
 dependencies = [
  "metrics",
+ "rustls",
  "rustls-pki-types",
  "serde",
  "serde_norway",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "thiserror",
  "tokio",
+ "tonic",
  "tracing",
  "x509-parser",
 ]

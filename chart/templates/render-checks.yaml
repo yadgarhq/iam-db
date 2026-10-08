@@ -162,27 +162,32 @@ The refusal text does not quote the raise text it replaces (ADR-0794);
 {{- end }}
 
 {{/*
-THE SHAPE OF `tls.clientAuth`, VALIDATED ONLY WHEN PRESENT (B-U5E, folded into
-C-DB1; ledger 925, ADR-0846; K-8 step 1).
+THE SHAPE OF `tls.clientAuth`, REQUIRED WITH NO DEFAULT (card B-U5; ledger
+925, ADR-0846, X-ADR-1 extending ADR-0845; K-8 step 3).
 
-UNLIKE `tls.enabled` ABOVE, THIS KEY HAS NO DEFAULT AND IS NOT REQUIRED YET —
-this repository does not read `yadgar-lifecycle::serve_tls`'s client-
-verification side, so there is nothing for an absent `clientAuth` to
-configure, and `values.yaml` ships none. An ABSENT key renders exactly as
-before this block existed: nothing here or in `templates/deployment.yaml`
-runs for it. `values.schema.json` declares the key as an EXTRA leaf for the
-same reason `database.create`'s own carve-out does — its TYPE is this
-block's job, not the schema's (ADR-0847).
+The binary refuses to boot without `LISTEN_TLS_CLIENT_AUTH` — WHETHER OR NOT
+TLS IS ON — so this chart refuses an absent key too, and
+`templates/deployment.yaml` renders the variable unconditionally.
+`values.schema.json` makes the key `required` and leaves it UNTYPED (ADR-0847,
+ruling R1), so the schema refuses absence before this block runs and the
+absent arm below holds for a render with the schema skipped. Every other
+shape is THIS block's: a non-string (a bare YAML `off` is the boolean false),
+a value outside the three, a verifying mode beside a cleartext listener, and
+a verifying mode with no authority named — each a sentence naming the key,
+which a schema `type` or `enum` would pre-empt with a generic line. The
+binary refuses the last two at boot; refusing them here moves that to the
+render.
 
-THREE OUTCOMES, ONLY WHEN THE KEY IS PRESENT: a non-string value refuses
-naming its kind; a string outside `off | optional | required` refuses naming
-the value; and `optional` or `required` — though spelled correctly — refuse
-with their OWN sentence, because this binary cannot enforce either yet. Only
-`off` reaches `templates/deployment.yaml`, which is what lets
-`tls.clientAuth: off` render `LISTEN_TLS_CLIENT_AUTH` while the chart still
-ships nothing the binary cannot act on.
+`optional` and `required` were refused outright while B-U5E's expand was the
+only half shipped. This release reads them, so that refusal is gone.
 */}}
-{{- if hasKey .Values.tls "clientAuth" }}
+{{- if not (hasKey .Values.tls "clientAuth") }}
+{{- fail (join "" (list
+      "iam-db: `tls.clientAuth` is absent from the values. It renders "
+      "LISTEN_TLS_CLIENT_AUTH, which iam-db refuses to boot without whether or not TLS "
+      "is on. Write the keys you mean: `tls.clientAuth` has no default (ADR-0845, "
+      "X-ADR-1) and must be `\"off\"`, `\"optional\"` or `\"required\"`.")) }}
+{{- end }}
 {{- if not (kindIs "string" .Values.tls.clientAuth) }}
 {{- fail (printf (join "" (list
       "iam-db: `tls.clientAuth` must be a quoted string (\"off\", \"optional\" or "
@@ -195,15 +200,20 @@ ships nothing the binary cannot act on.
       "iam-db: `tls.clientAuth` must be `off`, `optional` or `required` and is %q."
       .Values.tls.clientAuth) }}
 {{- end }}
-{{- if ne .Values.tls.clientAuth "off" }}
+{{- if and (ne .Values.tls.clientAuth "off") (not .Values.tls.enabled) }}
 {{- fail (printf (join "" (list
-      "iam-db: `tls.clientAuth` is %q, which is not enforced yet — B-U5 lands it. This "
-      "repository does not read yadgar-lifecycle's client-verification side (ledger "
-      "925, ADR-0846): a later release adopts it and starts checking a caller's "
-      "certificate, and promising that now with `optional` or `required` would be a "
-      "check nothing performs. Write `tls.clientAuth: \"off\"`, or leave the key unset."))
+      "iam-db: `tls.clientAuth` is %q but `tls.enabled` is false: a cleartext listener "
+      "cannot verify a client certificate, and iam-db refuses to boot this way. Set "
+      "`tls.enabled: true`, or `tls.clientAuth: \"off\"`."))
       .Values.tls.clientAuth) }}
 {{- end }}
+{{- if and (ne .Values.tls.clientAuth "off") (not .Values.tls.clientCaSecret) }}
+{{- fail (printf (join "" (list
+      "iam-db: `tls.clientAuth` is %q but `tls.clientCaSecret` names no authority to "
+      "verify a caller's certificate against, and iam-db refuses to boot this way. Name "
+      "the Secret holding that authority in `tls.clientCaSecret`, and its key in "
+      "`tls.clientCaSecretKey`."))
+      .Values.tls.clientAuth) }}
 {{- end }}
 
 {{/*

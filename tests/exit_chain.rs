@@ -100,9 +100,9 @@ fn a_rewritten_shared_document_drains_and_exits_zero() {
         changed.contains("shared.yaml"),
         "the CHANGED line must name the file that changed: {changed}"
     );
-    // TLS is off, and there is no client-auth leaf yet (B-U5E leaves
-    // `tls.clientAuth` unenforced), so all four fingerprints are reported,
-    // and reported as `none`.
+    // TLS is off and `LISTEN_TLS_CLIENT_AUTH` is `off`, so the listener
+    // reads neither a serving leaf nor a client CA: all four fingerprints
+    // are reported, and reported as `none`.
     for field in [
         "\"serving_before\":\"none\"",
         "\"serving_after\":\"none\"",

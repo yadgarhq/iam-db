@@ -32,7 +32,13 @@ repos:
     # declaration, which this repository is not, and the third gates a test
     # that shells a THROWAWAY git repository under `tmp_path`, which nothing
     # here does (ADR-0577: a hook nobody references gates nothing).
-    rev: v1.31.0
+    #
+    # v1.31.0 TO v1.34.0 (card B-U5, ledger 925). `git diff --stat v1.31.0
+    # v1.34.0 -- hooks/ .pre-commit-hooks.yaml` touches `boot_reads_watched.py`
+    # alone: it adds the `ADR-0523-LIBRARY-WATCHED` declaration this tree now
+    # needs, because adopting `yadgar-lifecycle`'s `ServerTls` moved the last
+    # boot read in `src/` into the library. No new hook id, so none to adopt.
+    rev: v1.34.0
     hooks:
       - id: gitleaks
       - id: prettier
