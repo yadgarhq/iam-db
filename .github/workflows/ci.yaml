@@ -65,15 +65,16 @@ jobs:
       RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 
   # THE TAG PATH, AND IT CARRIES THE CREDENTIAL FOR A DIFFERENT JOB THAN THE
-  # ONE ABOVE. `ci-release.yaml`'s `deployment` job writes the released image
-  # digest into `versions/<module>.yaml` in `yadgarhq/argocd`, and that file is
-  # what the ApplicationSet reads to pin this module's image. Passing nothing
-  # here is what decided that a published release never reached a pod.
+  # ONE ABOVE. `ci-release.yaml`'s `parent` job re-pins this module's released
+  # chart in the parent chart `yadgarhq/chart`, acting as the release App.
+  # Passing nothing here is what decided that a published chart was never
+  # pinned in the parent.
   #
   # THE FAILURE WAS GREEN, which is why it survived. Both secrets are declared
   # `required: false` in the callee, so a caller that passes none hands over two
-  # empty strings: the job detects that, writes a step summary saying
-  # `yadgarhq/argocd` was not told about the version, and reports SUCCESS.
+  # empty strings. The retired `deployment` job detected that, wrote a step
+  # summary and reported SUCCESS; `parent`'s `cred` step now fails the release
+  # and names the repair.
   #
   # NAMED RATHER THAN `secrets: inherit`, for the reason set out above the
   # `main:` job. The same zizmor audit reads this call too.
