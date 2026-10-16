@@ -67,8 +67,9 @@ jobs:
   # THE TAG PATH, AND IT CARRIES THE CREDENTIAL FOR A DIFFERENT JOB THAN THE
   # ONE ABOVE. `ci-release.yaml`'s `parent` job re-pins this module's released
   # chart in the parent chart `yadgarhq/chart`, acting as the release App.
-  # Passing nothing here is what decided that a published chart was never
-  # pinned in the parent.
+  # Passing nothing here leaves a published chart unpinned in the parent;
+  # before `parent` existed, it is what kept a published release from ever
+  # reaching a pod.
   #
   # THE FAILURE WAS GREEN, which is why it survived. Both secrets are declared
   # `required: false` in the callee, so a caller that passes none hands over two
