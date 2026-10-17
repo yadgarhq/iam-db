@@ -219,13 +219,15 @@ message SetPasswordResponse {}
 message CreateEnrolmentRequest {
   // WHICH FIELDS COUNT AS THE PAYLOAD, stated per RPC as
   // yadgar.common.v1.Idempotency requires rather than left to a reader:
-  // `user_id`, `secret_hash`, `expires_at` AND `require_zero_credential_admin`
-  // — every field of this request but two. `idempotency` itself carries the
+  // `user_id`, `secret_hash`, `expires_at`, `require_zero_credential_admin`
+  // AND `revoke_existing_credentials` — every field of this request but two. `idempotency` itself carries the
   // key the comparison is keyed on, and `unverified_actor` is EXCLUDED because
   // it is inert by construction: see yadgar.common.v1.UnverifiedActor, which
   // states that exclusion once for every RPC that carries the field. A
   // repeated key carrying a different one of the four named above is REFUSED
-  // with INVALID_ARGUMENT by that org-wide rule.
+  // with INVALID_ARGUMENT by that org-wide rule. `revoke_existing_credentials`
+  // is in the enumeration for the reason `require_zero_credential_admin` is:
+  // it changes what the redemption DOES, so two values are two requests.
   //
   // `secret_hash` IS THE FIELD THAT MAKES THE REFUSAL BITE, and it is why this
   // enumeration is load-bearing rather than tidy. A caller reading the payload
@@ -292,6 +294,31 @@ message CreateEnrolmentRequest {
   // it — this service's own log line and a closed-set `conjunct` telemetry
   // label — and never in the response.
   bool require_zero_credential_admin = 6;
+
+  // REVOKE EVERY CREDENTIAL THE TARGET HOLDS WHEN THIS ENROLMENT IS REDEEMED
+  // (ADR-0943). The value is STORED ON THE ENROLMENT ROW, so it is decided at
+  // issue time by whoever authorised the issue, and RedeemEnrolmentRequest
+  // carries nothing that can add, clear or override it.
+  //
+  // WHAT REDEMPTION THEN DOES. Inside the SAME transaction as the spend, the
+  // password write and the idempotency ledger row, every `iam_credential` row
+  // of the user with `revoked_at IS NULL` is tombstoned (D26: `revoked_at` set,
+  // never deleted). All of it lands or none of it does. The credential
+  // yadgar.iam.v1.RedeemEnrolment mints afterwards is created after that
+  // commit and is not touched. A REPLAY of the redemption key re-runs nothing
+  // — not the password, not the revoke — and reports the original outcome.
+  //
+  // MUTUALLY EXCLUSIVE WITH `require_zero_credential_admin`. Both set is
+  // refused with INVALID_ARGUMENT before any write: a target that holds zero
+  // credentials has nothing to revoke, so the pair can only be a malformed
+  // request, and the bootstrap path — the only caller that sets the demand —
+  // must never carry this instruction. The refusal names the conflict; it
+  // reveals nothing about the target because it is decided before the target
+  // is read.
+  //
+  // Absent (the default) is the ordinary path, byte-identical to before: a
+  // reset replaces the password and existing credentials keep resolving.
+  bool revoke_existing_credentials = 7;
 }
 message CreateEnrolmentResponse {
   string enrolment_id = 1;
@@ -408,6 +435,20 @@ message RedeemEnrolmentResponse {
   // Set only when outcome is REDEEM_OUTCOME_REDEEMED. Empty otherwise, and
   // empty is not an error — the same rule `user_id` above carries.
   bytes external_id_ciphertext = 4;
+
+  // TRUE WHEN THE REDEEMED ENROLMENT CARRIED
+  // CreateEnrolmentRequest.revoke_existing_credentials (ADR-0943), so every
+  // credential `user_id` held before this redemption is now revoked. `iam`
+  // reads it to publish the cache eviction a RevokeCredential would publish;
+  // without it a revoked token keeps resolving from the gateway's cache for
+  // a whole cache lifetime.
+  //
+  // READ FROM THE ENROLMENT ROW, NOT COUNTED, so a REPLAY reports the same
+  // value as the first delivery — the eviction is idempotent and re-publishing
+  // it is harmless, while a replay that reported false would leave a caller
+  // that lost the first response with nothing to evict on. False on every
+  // outcome but REDEEM_OUTCOME_REDEEMED.
+  bool revoked_existing_credentials = 5;
 }
 
 message CreateCredentialRequest {

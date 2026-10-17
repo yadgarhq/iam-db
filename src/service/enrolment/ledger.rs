@@ -69,12 +69,24 @@ pub(super) async fn replay(
             .fetch_one(&mut *conn)
             .await
             .map_err(db)?;
+    // WHAT THE FIRST DELIVERY DID TO THE PERSON'S CREDENTIALS (ADR-0943), read
+    // from the enrolment rather than stored here, so the replay reports it and
+    // `iam` can still publish the eviction. Reported, never RE-RUN: the revoke
+    // happened in the first delivery's transaction, and running it again would
+    // withdraw the credential `iam` minted after that commit.
+    let revoked_existing_credentials: bool =
+        sqlx::query_scalar("SELECT revoke_existing_credentials FROM iam_enrolment WHERE id = ?")
+            .bind(&enrolment_id)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(db)?;
 
     Ok(Some(RedeemEnrolmentResponse {
         outcome: RedeemOutcome::Redeemed as i32,
         user_id,
         enrolment_id,
         external_id_ciphertext,
+        revoked_existing_credentials,
     }))
 }
 

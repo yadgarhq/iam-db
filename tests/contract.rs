@@ -5702,3 +5702,324 @@ async fn five_concurrent_recordings_answer_one_recorded_and_four_mismatch() {
          the outcome channel rather than as a retryable status",
     );
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0943: a re-enrolment that revokes every credential its target holds.
+//
+// The instruction is stored on the enrolment row at issue time and executed in
+// the redemption transaction. These are the ways it must hold: old tokens stop
+// resolving with it, keep resolving without it, nobody else's are touched, a
+// partway failure revokes nothing, a replay revokes nothing new, and the
+// bootstrap demand can never carry it.
+// ---------------------------------------------------------------------------
+
+/// `CreateEnrolment` on the ordinary arm, carrying the revoke instruction.
+async fn enrol_revoking(svc: &IamDb, user_id: &str, secret: u8) -> String {
+    svc.create_enrolment(Request::new(CreateEnrolmentRequest {
+        user_id: user_id.into(),
+        secret_hash: vec![secret; 32],
+        expires_at: Some(at(3600)),
+        revoke_existing_credentials: true,
+        ..Default::default()
+    }))
+    .await
+    .expect("create a revoking enrolment")
+    .into_inner()
+    .enrolment_id
+}
+
+/// One more credential for `user_id`, under the token hash `[token; 32]`.
+async fn credential(svc: &IamDb, user_id: &str, token: u8) -> String {
+    svc.create_credential(Request::new(CreateCredentialRequest {
+        user_id: user_id.into(),
+        token_hash: vec![token; 32],
+        label: "another device".into(),
+        ..Default::default()
+    }))
+    .await
+    .expect("create credential")
+    .into_inner()
+    .credential_id
+}
+
+/// Who `[token; 32]` resolves to. EMPTY means no live credential matched, which
+/// is an answer and never an error — the shape
+/// `a_revoked_credential_stops_resolving` pins.
+async fn resolves_to(svc: &IamDb, token: u8) -> String {
+    svc.resolve_credential(Request::new(ResolveCredentialRequest {
+        token_hash: vec![token; 32],
+    }))
+    .await
+    .expect("resolve must not error")
+    .into_inner()
+    .user_id
+}
+
+#[tokio::test]
+async fn a_revoking_reenrolment_stops_every_old_credential_resolving() {
+    // THE DEFECT LEDGER 1569 MEASURED: a reset replaced the password and every
+    // bearer token the person (or a thief) already held kept working.
+    let svc = fresh("iam_db_test_revoke_on_redeem").await;
+    let (user_id, _) = seed(&svc, &[150u8; 32], &[151u8; 32]).await;
+    credential(&svc, &user_id, 152).await;
+    // SOMEBODY ELSE'S CREDENTIAL. A revoke missing its `user_id` predicate
+    // would withdraw every credential in the store and still pass the two
+    // assertions on the target above it.
+    let (bystander, _) = seed(&svc, &[153u8; 32], &[154u8; 32]).await;
+
+    enrol_revoking(&svc, &user_id, 155).await;
+    let got = redeem(&svc, 155, GOOD_HASH, "").await;
+
+    assert_eq!(got.outcome, RedeemOutcome::Redeemed as i32);
+    assert!(
+        got.revoked_existing_credentials,
+        "the response must say the credentials were revoked, or iam publishes no eviction"
+    );
+    assert!(
+        resolves_to(&svc, 151).await.is_empty(),
+        "the old credential must stop resolving after a revoking reset"
+    );
+    assert!(
+        resolves_to(&svc, 152).await.is_empty(),
+        "EVERY old credential, not only the first"
+    );
+    assert_eq!(
+        resolves_to(&svc, 154).await,
+        bystander,
+        "another user's credential must be untouched"
+    );
+
+    // AND A CREDENTIAL MINTED AFTER THE REDEMPTION — what iam does next — works.
+    credential(&svc, &user_id, 156).await;
+    assert_eq!(resolves_to(&svc, 156).await, user_id);
+}
+
+#[tokio::test]
+async fn an_ordinary_reenrolment_leaves_old_credentials_working() {
+    // THE DEFAULT IS UNCHANGED. Re-enrolment is also the forgotten-password
+    // recovery for a person on a device they still trust; a store that revoked
+    // on every redemption would sign them out everywhere without being asked.
+    let svc = fresh("iam_db_test_revoke_absent").await;
+    let (user_id, _) = seed(&svc, &[160u8; 32], &[161u8; 32]).await;
+
+    enrol(&svc, &user_id, 162, 3600).await;
+    let got = redeem(&svc, 162, GOOD_HASH, "").await;
+
+    assert_eq!(got.outcome, RedeemOutcome::Redeemed as i32);
+    assert!(!got.revoked_existing_credentials);
+    assert_eq!(
+        resolves_to(&svc, 161).await,
+        user_id,
+        "without the instruction the old credential must still resolve"
+    );
+}
+
+#[tokio::test]
+async fn the_bootstrap_demand_can_never_carry_the_revoke_instruction() {
+    // ADR-0943 point 2. The demand is the bootstrap path's marker, and a target
+    // that passes it holds nothing to revoke — so the pair is malformed, and it
+    // is refused before anything about the target is read or written.
+    let svc = fresh("iam_db_test_revoke_with_demand").await;
+    let user_id = admin(&svc, 170).await;
+
+    let err = svc
+        .create_enrolment(Request::new(CreateEnrolmentRequest {
+            user_id: user_id.clone(),
+            secret_hash: vec![170u8; 32],
+            expires_at: Some(at(3600)),
+            require_zero_credential_admin: true,
+            revoke_existing_credentials: true,
+            ..Default::default()
+        }))
+        .await
+        .expect_err("the demand and the revoke instruction together must be refused");
+
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert_eq!(
+        count(&svc, ENROLMENTS_OF, &user_id).await,
+        0,
+        "a refused request must leave no enrolment row"
+    );
+    // AND THE DEMAND ALONE STILL WORKS, so the refusal above is the pair's and
+    // not a store that now refuses the bootstrap path outright.
+    demand(&svc, &user_id, 171)
+        .await
+        .expect("the demand alone is ADR-0655's grant and must still succeed");
+}
+
+#[tokio::test]
+async fn a_revoking_redemption_that_fails_partway_revokes_nothing() {
+    // THE "SAME TRANSACTION" PROOF. The revoke runs before the password write,
+    // so making the password write fail at the engine is what shows the revoke
+    // rolled back with it. A revoke run on the pool rather than on the
+    // transaction passes every other test here.
+    let svc = fresh("iam_db_test_revoke_atomic").await;
+    let (user_id, _) = seed(&svc, &[180u8; 32], &[181u8; 32]).await;
+    enrol_revoking(&svc, &user_id, 182).await;
+
+    narrow_password_column(&svc, "VARCHAR(8)").await;
+    let err = svc
+        .redeem_enrolment(Request::new(RedeemEnrolmentRequest {
+            secret_hash: vec![182u8; 32],
+            argon2id_hash: GOOD_HASH.into(),
+            ..Default::default()
+        }))
+        .await
+        .expect_err("a password write the engine refuses must fail the call");
+    assert_eq!(err.code(), tonic::Code::Unavailable);
+
+    assert_eq!(
+        resolves_to(&svc, 181).await,
+        user_id,
+        "a failed redemption must not leave the old credentials revoked"
+    );
+
+    // And the enrolment is still whole: redeemed now, it revokes.
+    narrow_password_column(&svc, "VARCHAR(255)").await;
+    let got = redeem(&svc, 182, GOOD_HASH, "").await;
+    assert_eq!(got.outcome, RedeemOutcome::Redeemed as i32);
+    assert!(resolves_to(&svc, 181).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_replayed_revoking_redemption_revokes_nothing_new() {
+    // A REPLAY RE-RUNS NOTHING. iam mints the new credential after the
+    // redemption commits; a replay that re-ran the revoke would withdraw that
+    // fresh credential and lock the person out of the session they just made.
+    let svc = fresh("iam_db_test_revoke_replay").await;
+    let (user_id, _) = seed(&svc, &[190u8; 32], &[191u8; 32]).await;
+    enrol_revoking(&svc, &user_id, 192).await;
+
+    let first = redeem(&svc, 192, GOOD_HASH, "revoke-replay-key").await;
+    assert_eq!(first.outcome, RedeemOutcome::Redeemed as i32);
+    credential(&svc, &user_id, 193).await;
+
+    let again = redeem(&svc, 192, GOOD_HASH, "revoke-replay-key").await;
+    assert_eq!(again.outcome, RedeemOutcome::Redeemed as i32);
+    assert!(
+        again.revoked_existing_credentials,
+        "a replay reports what the first delivery did, so iam can still evict"
+    );
+    assert_eq!(
+        resolves_to(&svc, 193).await,
+        user_id,
+        "a replay must not revoke the credential minted after the first delivery"
+    );
+    assert!(resolves_to(&svc, 191).await.is_empty());
+}
+
+/// `CreateCredential`'s own insert, run on `conn` and left to its transaction.
+const CREATE_CREDENTIAL_SHAPE: &str =
+    "INSERT INTO iam_credential (id, user_id, token_hash, label, expires_at)
+     SELECT ?, id, ?, 'racer', NULL FROM iam_user
+      WHERE id = ? AND deleted_at IS NULL
+      LOCK IN SHARE MODE";
+
+#[tokio::test]
+async fn a_credential_already_being_created_is_revoked_by_the_reset() {
+    // THE FIRST HALF OF THE RACE: a `CreateCredential` that has inserted and
+    // not committed when the reset's revoke runs. The revoke must wait for it
+    // and then withdraw it, never skip the uncommitted row (READ COMMITTED's
+    // semi-consistent read is what would skip it).
+    let svc = std::sync::Arc::new(fresh("iam_db_test_revoke_race_before").await);
+    let (user_id, _) = seed(&svc, &[200u8; 32], &[201u8; 32]).await;
+    enrol_revoking(&svc, &user_id, 202).await;
+
+    let mut racer = svc.pool().begin().await.expect("racer begins");
+    sqlx::query(CREATE_CREDENTIAL_SHAPE)
+        .bind("yadgar:credential:racer-before")
+        .bind(vec![203u8; 32])
+        .bind(&user_id)
+        .execute(&mut *racer)
+        .await
+        .expect("the racing insert");
+
+    let redeeming = {
+        let svc = std::sync::Arc::clone(&svc);
+        tokio::spawn(async move { redeem(&svc, 202, GOOD_HASH, "").await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    racer.commit().await.expect("the racer commits");
+
+    let got = redeeming.await.expect("the redemption task");
+    assert_eq!(got.outcome, RedeemOutcome::Redeemed as i32);
+    assert!(
+        resolves_to(&svc, 203).await.is_empty(),
+        "a credential that was being created when the reset ran must not survive it"
+    );
+}
+
+#[tokio::test]
+async fn no_credential_can_be_created_while_a_revoking_reset_is_in_flight() {
+    // THE SECOND HALF, AND THE ONE THE REVOKE ALONE DID NOT CLOSE. Without a
+    // lock that conflicts with `CreateCredential`'s shared lock on the user
+    // row, a credential can be inserted AND COMMITTED after the revoke
+    // statement ran but before the reset committed. It then exists before the
+    // reset is visible and is still live after it — so "every credential that
+    // existed when the reset took effect is revoked" is false.
+    //
+    // The window is held open deterministically: the user already has a
+    // password, and a third transaction holds that password row, so the
+    // redemption stalls on its password upsert — after its revoke, before its
+    // commit. The racer then tries to create a credential. It must WAIT for
+    // the reset rather than commit inside it.
+    let svc = std::sync::Arc::new(fresh("iam_db_test_revoke_race_during").await);
+    let (user_id, _) = seed(&svc, &[210u8; 32], &[211u8; 32]).await;
+    svc.set_password(Request::new(SetPasswordRequest {
+        user_id: user_id.clone(),
+        argon2id_hash: GOOD_HASH.into(),
+        ..Default::default()
+    }))
+    .await
+    .expect("set password");
+    enrol_revoking(&svc, &user_id, 212).await;
+
+    // The stall: an exclusive lock on the password row. An UPDATE of a
+    // non-key column takes no lock on the user row, so it cannot itself
+    // collide with whatever the redemption locks there.
+    let mut stall = svc.pool().begin().await.expect("stall begins");
+    sqlx::query("UPDATE iam_password SET argon2id_hash = argon2id_hash WHERE user_id = ?")
+        .bind(&user_id)
+        .execute(&mut *stall)
+        .await
+        .expect("hold the password row");
+
+    let redeeming = {
+        let svc = std::sync::Arc::clone(&svc);
+        tokio::spawn(async move { redeem(&svc, 212, GOOD_HASH, "").await })
+    };
+    // Let the redemption reach its password upsert and stall there.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(
+        !redeeming.is_finished(),
+        "the redemption must be stalled on the held password row, or this test asserts nothing"
+    );
+
+    let racing = {
+        let pool = svc.pool().clone();
+        let user_id = user_id.clone();
+        tokio::spawn(async move {
+            let mut racer = pool.begin().await.expect("racer begins");
+            sqlx::query(CREATE_CREDENTIAL_SHAPE)
+                .bind("yadgar:credential:racer-during")
+                .bind(vec![213u8; 32])
+                .bind(&user_id)
+                .execute(&mut *racer)
+                .await
+                .expect("the racing insert");
+            racer.commit().await.expect("the racer commits");
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let created_inside_the_reset = racing.is_finished();
+
+    stall.rollback().await.expect("release the password row");
+    let got = redeeming.await.expect("the redemption task");
+    racing.await.expect("the racer task");
+    assert_eq!(got.outcome, RedeemOutcome::Redeemed as i32);
+    assert!(
+        !created_inside_the_reset,
+        "a credential was created and committed while the revoking reset was in flight; it \
+         existed before the reset took effect and survived it"
+    );
+}
