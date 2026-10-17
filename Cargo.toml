@@ -55,7 +55,7 @@ prost-types = "0.14"
 # The shared instrumentation seam (D67), pinned by release tag like every in-org
 # crate. This repository sat one commit behind every other consumer until now —
 # a bare revision in five files has nothing that notices one falling behind.
-yadgar-telemetry = { git = "https://github.com/yadgarhq/telemetry.git", tag = "v0.1.17", features = ["grpc"] }
+yadgar-telemetry = { git = "https://github.com/yadgarhq/telemetry.git", tag = "v0.2.0", features = ["grpc"] }
 # The metrics facade, DIRECTLY rather than through yadgar-telemetry. D67's three
 # signals go through that seam and still do; `create_enrolment`'s idempotency
 # sensor is a fourth, belonging to this one handler — the same reasoning
@@ -153,7 +153,7 @@ metrics-util = { version = "0.20", default-features = false, features = [
 # tag this card's sibling `-db` twins converge on too — one version of this
 # crate across the estate rather than a fifth. No `[features]` table exists
 # on this crate to pick one of, unlike `yadgar-telemetry`'s `grpc` above.
-yadgar-dial = { git = "https://github.com/yadgarhq/dial.git", tag = "v0.2.17" }
+yadgar-dial = { git = "https://github.com/yadgarhq/dial.git", tag = "v0.2.20" }
 # `tests/chart_request_deadline.rs` reads `chart/values.schema.json`'s own
 # `maximum` for `database.acquireTimeoutSeconds` rather than restating the
 # bound as a literal — the schema is ADR-0837's one source for it. Already in
