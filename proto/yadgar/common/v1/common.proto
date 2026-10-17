@@ -347,6 +347,7 @@ message Scope {
   string instance_id = 4;
 
   // Minted by the gateway, once, and propagated unchanged through every hop.
+  // Exception: on `SyncProjects` the seeder mints it, per sync (ADR-0942, open).
   //
   // WITHOUT THIS, D67's telemetry cannot be summed. One logical call fans out
   // gateway -> logic -> -db, each hop emitting its own record, and with no shared

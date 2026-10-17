@@ -12,11 +12,17 @@
 //! this file is what `CreateEnrolment` DOES, and that one is the authorization
 //! decision it takes on the way, with the whole of the reasoning beside the
 //! statement that carries it.
+//!
+//! ADR-0943's revoke instruction — a re-enrolment that withdraws every
+//! credential its target holds when it is redeemed — is in the `revoke` child:
+//! the statement that records it, the statement that executes it, and the one
+//! refusal it adds.
 
 use super::*;
 
 mod demand;
 mod ledger;
+mod revoke;
 
 use ledger::{replay, unredeemable};
 
@@ -83,6 +89,11 @@ impl IamDb {
             .expires_at
             .ok_or_else(|| Status::invalid_argument("an enrolment must carry an expiry"))?;
 
+        if let Err(refusal) = revoke::compatible(&r) {
+            call.fail("INVALID_ARGUMENT");
+            return Err(refusal);
+        }
+
         // The FOREIGN KEY proves the user row EXISTS; it does not prove the
         // person is live. Without the predicate below, an enrolment minted for a
         // soft-deleted account is accepted, reported OK, and is then permanently
@@ -96,7 +107,11 @@ impl IamDb {
         // decides liveness the same way at both ends of one enrolment's life.
         let id = format!("yadgar:enrolment:{}", uuid::Uuid::now_v7());
 
-        let done = sqlx::query(statement(r.require_zero_credential_admin))
+        let sql = statement(
+            r.require_zero_credential_admin,
+            r.revoke_existing_credentials,
+        );
+        let done = sqlx::query(sql)
             .bind(&id)
             .bind(&r.secret_hash)
             .bind(expires_at.seconds)
@@ -267,10 +282,17 @@ const ORDINARY: &str = "INSERT INTO iam_enrolment (id, user_id, secret_hash, exp
 /// misuse ADR-0513 forbids. There is deliberately NO arm that parses the demand
 /// and then runs the ordinary statement — a deployed store that reads the field
 /// and ignores it is the false green the whole design exists to refuse.
-const fn statement(demand: bool) -> &'static str {
-    match demand {
-        true => demand::INSERT,
-        false => ORDINARY,
+///
+/// **THE REVOKE INSTRUCTION ONLY EVER RIDES THE ORDINARY ARM.** The caller has
+/// already refused the demand and the instruction together, so `(true, true)`
+/// cannot reach here; it maps to the demand arm rather than to a statement that
+/// would write the instruction, so even a caller that skipped that refusal could
+/// not get a bootstrap enrolment that revokes.
+const fn statement(demand: bool, revoking: bool) -> &'static str {
+    match (demand, revoking) {
+        (true, _) => demand::INSERT,
+        (false, true) => revoke::INSERT,
+        (false, false) => ORDINARY,
     }
 }
 
@@ -392,7 +414,8 @@ async fn redeemed(
     call: Call,
 ) -> Result<Response<RedeemEnrolmentResponse>, Status> {
     let row = sqlx::query(
-        "SELECT e.id AS enrolment_id, e.user_id, u.external_id_ciphertext
+        "SELECT e.id AS enrolment_id, e.user_id, u.external_id_ciphertext,
+                e.revoke_existing_credentials
            FROM iam_enrolment e JOIN iam_user u ON u.id = e.user_id
           WHERE e.secret_hash = ?",
     )
@@ -404,6 +427,13 @@ async fn redeemed(
     let enrolment_id: String = row.try_get("enrolment_id").map_err(db)?;
     let user_id: String = row.try_get("user_id").map_err(db)?;
     let external_id_ciphertext: Vec<u8> = row.try_get("external_id_ciphertext").map_err(db)?;
+    let revoking: bool = row.try_get("revoke_existing_credentials").map_err(db)?;
+
+    // ADR-0943's REVOKE, in this transaction and ahead of the password — see
+    // [`revoke::all`] for why both placements are load-bearing.
+    if revoking {
+        revoke::all(&mut tx, &user_id).await?;
+    }
 
     // THE SECOND HALF, in the same transaction as the spend above. If this
     // fails — the hash does not fit the column, the engine goes away — the
@@ -434,8 +464,8 @@ async fn redeemed(
     }
 
     // THE COMMIT IS THE OPERATION. Everything above is one atom until this
-    // line: the spend, the password and the ledger row land together or none
-    // of them does.
+    // line: the spend, the revoke, the password and the ledger row land
+    // together or none of them does.
     tx.commit().await.map_err(db)?;
 
     call.finish(Outcome {
@@ -448,5 +478,6 @@ async fn redeemed(
         user_id,
         enrolment_id,
         external_id_ciphertext,
+        revoked_existing_credentials: revoking,
     }))
 }

@@ -41,7 +41,26 @@ pub fn migrations() -> Result<MigrationSet, MigrationError> {
         policy::seed_owner_reads_own_record(),
         policy::inherited_setting_write(),
         key_identity(),
+        enrolment_revokes_existing_credentials(),
     ])
+}
+
+fn enrolment_revokes_existing_credentials() -> Migration {
+    Migration {
+        version: 15,
+        name: "enrolment_revokes_existing_credentials".into(),
+        // ADR-0943: a re-enrolment may revoke every credential its target
+        // holds when it is redeemed. The instruction is a COLUMN ON THE
+        // ENROLMENT, written at issue time, so the decision belongs to whoever
+        // authorised the issue and the redeemer has nothing to set or clear.
+        //
+        // DEFAULT 0, so every enrolment that already exists redeems exactly as
+        // it did before this migration: the password is replaced and existing
+        // credentials keep working. The same shape `is_admin` took.
+        sql: "ALTER TABLE iam_enrolment
+                  ADD COLUMN revoke_existing_credentials TINYINT(1) NOT NULL DEFAULT 0"
+            .into(),
+    }
 }
 
 fn key_identity() -> Migration {
