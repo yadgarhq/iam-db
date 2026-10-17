@@ -5907,3 +5907,119 @@ async fn a_replayed_revoking_redemption_revokes_nothing_new() {
     );
     assert!(resolves_to(&svc, 191).await.is_empty());
 }
+
+/// `CreateCredential`'s own insert, run on `conn` and left to its transaction.
+const CREATE_CREDENTIAL_SHAPE: &str =
+    "INSERT INTO iam_credential (id, user_id, token_hash, label, expires_at)
+     SELECT ?, id, ?, 'racer', NULL FROM iam_user
+      WHERE id = ? AND deleted_at IS NULL
+      LOCK IN SHARE MODE";
+
+#[tokio::test]
+async fn a_credential_already_being_created_is_revoked_by_the_reset() {
+    // THE FIRST HALF OF THE RACE: a `CreateCredential` that has inserted and
+    // not committed when the reset's revoke runs. The revoke must wait for it
+    // and then withdraw it, never skip the uncommitted row (READ COMMITTED's
+    // semi-consistent read is what would skip it).
+    let svc = std::sync::Arc::new(fresh("iam_db_test_revoke_race_before").await);
+    let (user_id, _) = seed(&svc, &[200u8; 32], &[201u8; 32]).await;
+    enrol_revoking(&svc, &user_id, 202).await;
+
+    let mut racer = svc.pool().begin().await.expect("racer begins");
+    sqlx::query(CREATE_CREDENTIAL_SHAPE)
+        .bind("yadgar:credential:racer-before")
+        .bind(vec![203u8; 32])
+        .bind(&user_id)
+        .execute(&mut *racer)
+        .await
+        .expect("the racing insert");
+
+    let redeeming = {
+        let svc = std::sync::Arc::clone(&svc);
+        tokio::spawn(async move { redeem(&svc, 202, GOOD_HASH, "").await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    racer.commit().await.expect("the racer commits");
+
+    let got = redeeming.await.expect("the redemption task");
+    assert_eq!(got.outcome, RedeemOutcome::Redeemed as i32);
+    assert!(
+        resolves_to(&svc, 203).await.is_empty(),
+        "a credential that was being created when the reset ran must not survive it"
+    );
+}
+
+#[tokio::test]
+async fn no_credential_can_be_created_while_a_revoking_reset_is_in_flight() {
+    // THE SECOND HALF, AND THE ONE THE REVOKE ALONE DID NOT CLOSE. Without a
+    // lock that conflicts with `CreateCredential`'s shared lock on the user
+    // row, a credential can be inserted AND COMMITTED after the revoke
+    // statement ran but before the reset committed. It then exists before the
+    // reset is visible and is still live after it — so "every credential that
+    // existed when the reset took effect is revoked" is false.
+    //
+    // The window is held open deterministically: the user already has a
+    // password, and a third transaction holds that password row, so the
+    // redemption stalls on its password upsert — after its revoke, before its
+    // commit. The racer then tries to create a credential. It must WAIT for
+    // the reset rather than commit inside it.
+    let svc = std::sync::Arc::new(fresh("iam_db_test_revoke_race_during").await);
+    let (user_id, _) = seed(&svc, &[210u8; 32], &[211u8; 32]).await;
+    svc.set_password(Request::new(SetPasswordRequest {
+        user_id: user_id.clone(),
+        argon2id_hash: GOOD_HASH.into(),
+        ..Default::default()
+    }))
+    .await
+    .expect("set password");
+    enrol_revoking(&svc, &user_id, 212).await;
+
+    // The stall: an exclusive lock on the password row. An UPDATE of a
+    // non-key column takes no lock on the user row, so it cannot itself
+    // collide with whatever the redemption locks there.
+    let mut stall = svc.pool().begin().await.expect("stall begins");
+    sqlx::query("UPDATE iam_password SET argon2id_hash = argon2id_hash WHERE user_id = ?")
+        .bind(&user_id)
+        .execute(&mut *stall)
+        .await
+        .expect("hold the password row");
+
+    let redeeming = {
+        let svc = std::sync::Arc::clone(&svc);
+        tokio::spawn(async move { redeem(&svc, 212, GOOD_HASH, "").await })
+    };
+    // Let the redemption reach its password upsert and stall there.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(
+        !redeeming.is_finished(),
+        "the redemption must be stalled on the held password row, or this test asserts nothing"
+    );
+
+    let racing = {
+        let pool = svc.pool().clone();
+        let user_id = user_id.clone();
+        tokio::spawn(async move {
+            let mut racer = pool.begin().await.expect("racer begins");
+            sqlx::query(CREATE_CREDENTIAL_SHAPE)
+                .bind("yadgar:credential:racer-during")
+                .bind(vec![213u8; 32])
+                .bind(&user_id)
+                .execute(&mut *racer)
+                .await
+                .expect("the racing insert");
+            racer.commit().await.expect("the racer commits");
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let created_inside_the_reset = racing.is_finished();
+
+    stall.rollback().await.expect("release the password row");
+    let got = redeeming.await.expect("the redemption task");
+    racing.await.expect("the racer task");
+    assert_eq!(got.outcome, RedeemOutcome::Redeemed as i32);
+    assert!(
+        !created_inside_the_reset,
+        "a credential was created and committed while the revoking reset was in flight; it \
+         existed before the reset took effect and survived it"
+    );
+}

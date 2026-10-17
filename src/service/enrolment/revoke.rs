@@ -59,10 +59,41 @@ pub(super) fn compatible(r: &CreateEnrolmentRequest) -> Result<(), Status> {
 /// credential `iam` mints next is created after the commit and is not touched,
 /// and a replay of the redemption key never reaches this function.
 ///
+/// **THE USER ROW IS LOCKED EXCLUSIVELY FIRST, AND THAT LOCK IS WHAT MAKES THE
+/// REVOKE COMPLETE.** `CreateCredential` inserts under a SHARED lock on the same
+/// row (`LOCK IN SHARE MODE` in its insert-select). Without a conflicting lock
+/// here, a credential could be inserted and committed after the UPDATE below
+/// ran and before this transaction commits — it would exist before the reset
+/// took effect and still be live after it. With the lock:
+///
+/// - a `CreateCredential` already holding its shared lock makes this wait until
+///   it commits, and the UPDATE then withdraws that credential
+///   (`a_credential_already_being_created_is_revoked_by_the_reset`);
+/// - one that arrives later waits for this transaction to commit, so it is
+///   created AFTER the reset, never inside it
+///   (`no_credential_can_be_created_while_a_revoking_reset_is_in_flight`).
+///
+/// So every credential that exists when the reset becomes visible is revoked.
+/// What the lock cannot do is tell a credential minted after the reset by a
+/// `Login` that checked the OLD password before it; that residual is ADR-0943's
+/// and needs `Login` to re-check the hash inside its own write.
+///
+/// The lock order is the one every writer here already takes — user row, then
+/// the rows that hang off it — so it adds no cycle: `CreateCredential` and the
+/// demand insert lock the user row before their child table, and this takes it
+/// before `iam_credential` and `iam_password`. The enrolment row locked by the
+/// spend comes first, and no writer that holds a user lock ever waits on an
+/// enrolment row.
+///
 /// The revoke does not reopen ADR-0655's bootstrap grant: ADR-0656's predicate
 /// counts credential rows of any liveness, so a person whose credentials were
 /// all revoked here is still outside it.
 pub(super) async fn all(tx: &mut sqlx::MySqlTransaction<'_>, user_id: &str) -> Result<(), Status> {
+    sqlx::query("SELECT id FROM iam_user WHERE id = ? FOR UPDATE")
+        .bind(user_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(db)?;
     sqlx::query(
         "UPDATE iam_credential SET revoked_at = CURRENT_TIMESTAMP
           WHERE user_id = ? AND revoked_at IS NULL",
