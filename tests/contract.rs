@@ -5919,8 +5919,15 @@ const CREATE_CREDENTIAL_SHAPE: &str =
 async fn a_credential_already_being_created_is_revoked_by_the_reset() {
     // THE FIRST HALF OF THE RACE: a `CreateCredential` that has inserted and
     // not committed when the reset's revoke runs. The revoke must wait for it
-    // and then withdraw it, never skip the uncommitted row (READ COMMITTED's
-    // semi-consistent read is what would skip it).
+    // and then withdraw it.
+    //
+    // A REGRESSION GUARD, NOT A RED-FIRST TEST: it passed before the user-row
+    // lock in `revoke::all` existed (ledger 1579). The revoking UPDATE scans
+    // `ix_iam_credential_user` (EXPLAIN: `range` on that key), and InnoDB does
+    // not take the semi-consistent-read shortcut on a secondary-index scan, so
+    // the UPDATE already waited on the uncommitted insert's lock. Today the
+    // user-row lock makes it wait earlier. The test keeps either mechanism from
+    // being lost; the second half below is the one that was red.
     let svc = std::sync::Arc::new(fresh("iam_db_test_revoke_race_before").await);
     let (user_id, _) = seed(&svc, &[200u8; 32], &[201u8; 32]).await;
     enrol_revoking(&svc, &user_id, 202).await;
