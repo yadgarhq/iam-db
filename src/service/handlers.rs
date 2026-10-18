@@ -13,10 +13,11 @@
 //! UNAVAILABLE. A combinator round the whole operation would have to derive that
 //! distinction from a return type that does not carry it.
 //!
-//! The operations, by module: `credential` resolves, mints, revokes and lists;
-//! `password` reads and writes the stored hash; `identity` creates a person and
-//! moves one in and out of a team; `policy` sets what applies to a person;
-//! `enrolment` mints and spends; `setting` writes the inheritable ones.
+//! The operations, by module: `credential` resolves, mints, revokes one or all
+//! of a person's, and lists; `password` reads and writes the stored hash;
+//! `identity` creates a person and moves one in and out of a team; `policy`
+//! sets what applies to a person; `enrolment` mints and spends; `setting`
+//! writes the inheritable ones.
 
 use super::*;
 
@@ -96,6 +97,28 @@ impl IamDbService for IamDb {
             tel(rid.clone(), ""),
         );
         self.revoke(r, &rid, call).await
+    }
+
+    /// Revoke every live credential one person holds, and say how many
+    /// (ADR-0945).
+    ///
+    /// Scoped to the person acted on, as every sibling write keyed on a
+    /// `user_id` is. The caller MUST publish the invalidation event afterwards
+    /// (D72), whatever the count, or a cached resolve keeps a revoked token
+    /// working for the cache's lifetime.
+    async fn revoke_all_credentials(
+        &self,
+        req: Request<RevokeAllCredentialsRequest>,
+    ) -> Result<Response<RevokeAllCredentialsResponse>, Status> {
+        let rid = request_id_of(&req);
+        let r = req.into_inner();
+        let call = Call::start(
+            SERVICE,
+            "RevokeAllCredentials",
+            Kind::Write,
+            tel(rid.clone(), &r.user_id),
+        );
+        self.revoke_all(r, &rid, call).await
     }
 
     async fn create_user(

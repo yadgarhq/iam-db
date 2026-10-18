@@ -1,15 +1,18 @@
-//! The four RPCs whose subject is a credential.
+//! The five RPCs whose subject is a credential.
 //!
 //! `resolve` is the hot path and the reason this store exists: a token hash to
 //! an identity, in one transaction, with liveness decided IN the queries. The
-//! other three are the lifecycle around it — minting one, tombstoning one, and
+//! other four are the lifecycle around it — minting one, tombstoning one,
+//! tombstoning every one a person holds (the child module `all`, ADR-0945), and
 //! listing what a person holds.
 //!
 //! They are one module because they are one table, and because the liveness
-//! clauses that make `resolve` correct are the same clauses the other three must
+//! clauses that make `resolve` correct are the same clauses the other four must
 //! not contradict.
 
 use super::*;
+
+mod all;
 
 impl IamDb {
     pub(super) async fn resolve(

@@ -9,6 +9,10 @@
 //! `RedeemEnrolmentRequest` can add, clear or override it. [`all`] executes it
 //! inside the redemption transaction. [`compatible`] is the one refusal it adds:
 //! the bootstrap demand never carries it.
+//!
+//! [`all`] HAS A SECOND CALLER: `RevokeAllCredentials` (ADR-0945), which runs
+//! the same statement in a transaction of its own. One function, so the
+//! standalone verb cannot drift from the race-safe form proven here.
 
 use crate::service::*;
 
@@ -88,13 +92,27 @@ pub(super) fn compatible(r: &CreateEnrolmentRequest) -> Result<(), Status> {
 /// The revoke does not reopen ADR-0655's bootstrap grant: ADR-0656's predicate
 /// counts credential rows of any liveness, so a person whose credentials were
 /// all revoked here is still outside it.
-pub(super) async fn all(tx: &mut sqlx::MySqlTransaction<'_>, user_id: &str) -> Result<(), Status> {
-    sqlx::query("SELECT id FROM iam_user WHERE id = ? FOR UPDATE")
+///
+/// **THE ANSWER IS THE ROWS THE UPDATE CHANGED, OR `None` WHEN NO `iam_user`
+/// ROW EXISTS AT ALL.** The lock reads the user row with NO `deleted_at`
+/// filter, deliberately: a soft-deleted person's credentials are still rows in
+/// the table, and `RevokeAllCredentials` tombstones and counts them (ADR-0945).
+/// `None` is that verb's NOT_FOUND, decided before the UPDATE runs, so a person
+/// with no row has nothing written. The redemption ignores both halves: its
+/// user row exists by construction, because the spend joined it.
+pub(in crate::service) async fn all(
+    tx: &mut sqlx::MySqlTransaction<'_>,
+    user_id: &str,
+) -> Result<Option<u64>, Status> {
+    let user = sqlx::query("SELECT id FROM iam_user WHERE id = ? FOR UPDATE")
         .bind(user_id)
         .fetch_optional(&mut **tx)
         .await
         .map_err(db)?;
-    sqlx::query(
+    if user.is_none() {
+        return Ok(None);
+    }
+    let done = sqlx::query(
         "UPDATE iam_credential SET revoked_at = CURRENT_TIMESTAMP
           WHERE user_id = ? AND revoked_at IS NULL",
     )
@@ -102,5 +120,5 @@ pub(super) async fn all(tx: &mut sqlx::MySqlTransaction<'_>, user_id: &str) -> R
     .execute(&mut **tx)
     .await
     .map_err(db)?;
-    Ok(())
+    Ok(Some(done.rows_affected()))
 }

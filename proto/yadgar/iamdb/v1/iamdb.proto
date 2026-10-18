@@ -483,6 +483,58 @@ message RevokeCredentialResponse {
   string user_id = 1;
 }
 
+// Revoke EVERY live credential one user holds, in one transaction (ADR-0945).
+// It is ADR-0943's alternative (d): the standalone form of the revoke a
+// revoking re-enrolment performs at redemption, for the caller who must
+// contain a leaked token NOW rather than at the person's next redemption.
+//
+// IT TOMBSTONES AND NEVER DELETES (D26), with the SAME STATEMENT the ADR-0943
+// redemption revoke uses: lock the user row FOR UPDATE, then set `revoked_at`
+// on every credential of the user where `revoked_at IS NULL`. The lock is what
+// makes it race-safe against CreateCredential, exactly as it is there.
+//
+// `revoked` COUNTS THE ROWS THIS DELIVERY CHANGED, and nothing else. A
+// REDELIVERY RE-RUNS THE STATEMENT AND IS NOT RECOGNISED AS A REPLAY, because
+// `iam-db` does not honour idempotency keys (ledger 668). It reports only what
+// that delivery changed, usually 0, and NEVER RETURNS THE FIRST DELIVERY'S
+// COUNT. D9's ordinary rule, that a replayed key returns the original outcome,
+// DOES NOT HOLD for `revoked`. Contrast
+// yadgar.iamdb.v1.RedeemEnrolmentResponse.revoked_existing_credentials, which is
+// read from the enrolment row and so reports the same on every delivery. Zero is
+// a success and not an error.
+//
+// A redelivery after the person logs in again revokes that new credential.
+//
+// NOT_FOUND MEANS NO `iam_user` ROW AT ALL. A soft-deleted user is not
+// NOT_FOUND: their live rows are tombstoned and counted.
+//
+// IT DOES NOT CHANGE THE PASSWORD AND DOES NOT STOP LOGIN. The person can log
+// in again afterwards and mint a new credential; this verb contains the tokens
+// that exist now and nothing more. A leaked password is a different threat.
+//
+// `iam` PUBLISHES CREDENTIAL_REVOKED AFTER THE COMMIT WHATEVER `revoked` IS
+// (ADR-0945). A failed publish does not fail the call, and the gateway
+// credential TTL bounds the gap.
+//
+// WHO MAY CALL IT is the gateway's policy rather than contract shape
+// (ADR-0945), exactly as it is for RevokeCredential: the gateway is the one place
+// identity is attested (ADR-0488), and this service cannot verify the actor it
+// is told.
+message RevokeAllCredentialsRequest {
+  yadgar.common.v1.Idempotency idempotency = 1;
+  string user_id = 2;
+
+  // WHO THE GATEWAY BELIEVED WAS CALLING, FOR THE AUDIT RECORD ONLY. This
+  // service cannot verify it and MUST NOT authorise on it. The rule is stated
+  // once, on yadgar.common.v1.UnverifiedActor, rather than restated here.
+  yadgar.common.v1.UnverifiedActor unverified_actor = 3;
+}
+message RevokeAllCredentialsResponse {
+  // The number of credential rows THIS DELIVERY changed. See the request's
+  // comment: a redelivery does not return the first delivery's count.
+  uint32 revoked = 1;
+}
+
 // The read behind yadgar.iam.v1.ListCredentials, and the only RPC on this
 // boundary that returns a `Credential` — that message was declared with the
 // other storage shapes and read by nothing until this arm existed. Its caller
@@ -1239,6 +1291,7 @@ service IamDbService {
   rpc RedeemEnrolment(RedeemEnrolmentRequest) returns (RedeemEnrolmentResponse);
   rpc CreateCredential(CreateCredentialRequest) returns (CreateCredentialResponse);
   rpc RevokeCredential(RevokeCredentialRequest) returns (RevokeCredentialResponse);
+  rpc RevokeAllCredentials(RevokeAllCredentialsRequest) returns (RevokeAllCredentialsResponse);
   rpc ListCredentials(ListCredentialsRequest) returns (ListCredentialsResponse);
   rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
   rpc SetUserAdmin(SetUserAdminRequest) returns (SetUserAdminResponse);
