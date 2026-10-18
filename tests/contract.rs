@@ -6212,6 +6212,12 @@ async fn a_token_revoked_by_revoke_all_resolves_to_nothing() {
     );
 }
 
+// A PANIC ON `expect("revoke all")` WITH ERROR 1020 in either race test below
+// ("Record has changed since last read", surfaced as UNAVAILABLE) MEANS THE
+// `FOR UPDATE` LOCK IN `revoke::all` WAS REMOVED. A plain read then opens a
+// snapshot, and MariaDB 11.8 refuses the UPDATE that follows once a racer has
+// changed the rows. Restore the lock; do not retry the error.
+
 #[tokio::test]
 async fn a_credential_already_being_created_is_revoked_by_revoke_all() {
     // ADR-0943's first race test, against the standalone verb. A

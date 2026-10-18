@@ -12,16 +12,21 @@
 //!
 //! # What happens to `Idempotency`, per RPC
 //!
-//! **STATED HERE BECAUSE THE SILENCE IS ITSELF THE DEFECT.** TWELVE request
+//! **STATED HERE BECAUSE THE SILENCE IS ITSELF THE DEFECT.** THIRTEEN request
 //! messages on this contract carry `yadgar.common.v1.Idempotency` and this module
-//! reads `r.idempotency` on TWO of them. A reader who greps for that field finds
-//! ten handlers that accept a key and never mention it, and cannot tell an
-//! omission from a mechanism. The ten are not one answer ten times:
+//! reads `r.idempotency` on FOUR of them: the three that honour it below, and
+//! `CreateEnrolment`, which reads it only to feed
+//! [`ENROLMENT_IDEMPOTENCY_DISCARDED`]. A reader who greps for that field finds
+//! nine handlers that accept a key and never mention it, and cannot tell an
+//! omission from a mechanism. The thirteen are not one answer thirteen times:
 //!
-//! - **TWO honour the key with a ledger.** `RedeemEnrolment`, on
-//!   `iam_enrolment_redemption`, and `SetInheritedSetting`, on
-//!   `iam_inherited_setting_write`. Those two tables hold the only columns in
-//!   this schema a caller's key reaches.
+//! - **THREE honour the key.** `RedeemEnrolment`, on the ledger
+//!   `iam_enrolment_redemption`; `SetInheritedSetting`, on the ledger
+//!   `iam_inherited_setting_write`; and `SetKeyIdentity`, on the
+//!   `idempotency_key` column of the singleton marker row `iam_key_identity`
+//!   (ADR-0764, ADR-0765), where the stored marker is itself the prior request.
+//!   Those three tables hold the only columns in this schema a caller's key
+//!   reaches.
 //! - **SIX deliver D9's replay property BY SHAPE, without reading the key.**
 //!   `SetPassword` and `SetRateLimitOverride` upsert, `SetUserAdmin` assigns,
 //!   `RevokeCredential` tombstones under `revoked_at IS NULL`, `AddTeamMember`
@@ -35,7 +40,8 @@
 //! - **THREE DISCARD THE KEY AND PUT NOTHING IN ITS PLACE.** `CreateUser`,
 //!   `CreateEnrolment` and `CreateCredential` mint a row per call, so a retry is
 //!   not a replay and the shape argument above does not reach them. Each carries
-//!   the measured consequence at its own handler.
+//!   the measured consequence at its own handler. `CreateEnrolment` reads the
+//!   key, but only to count that it arrived; nothing is stored or compared.
 //! - **ONE RE-RUNS ITS STATEMENT AND IS NOT IN THE SHAPE GROUP.**
 //!   `RevokeAllCredentials` (ADR-0945) tombstones under `revoked_at IS NULL`
 //!   like `RevokeCredential`, so a repeat reaches the same rows — but its
@@ -51,11 +57,11 @@
 //! loud alternative to the silence, and it would break the callers that send one:
 //! `iam` forwards a key onto FIVE of these hops today — `CreateUser`,
 //! `CreateEnrolment`, `AddTeamMember`, `RemoveTeamMember` and `RevokeCredential`.
-//! `RevokeAllCredentials` is new and `iam` does not call it yet; its relay is
-//! the next change in ADR-0945's chain.
 //! The last three are in the shape group, so refusing them would reject writes
 //! that are already replay-safe; refusing the first two would take user and
 //! enrolment creation down in order to report a defect neither caller can fix.
+//! `RevokeAllCredentials` is new and `iam` does not call it yet; its relay is
+//! the next change in ADR-0945's chain.
 //!
 //! **THE LEDGER IS THE FIX, AND IT CANNOT LAND IN THIS REPOSITORY ALONE.** `iam`
 //! bounds a caller's key at the width of the two ledger columns above, and states
