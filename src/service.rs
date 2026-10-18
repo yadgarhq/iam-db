@@ -12,11 +12,11 @@
 //!
 //! # What happens to `Idempotency`, per RPC
 //!
-//! **STATED HERE BECAUSE THE SILENCE IS ITSELF THE DEFECT.** ELEVEN request
+//! **STATED HERE BECAUSE THE SILENCE IS ITSELF THE DEFECT.** TWELVE request
 //! messages on this contract carry `yadgar.common.v1.Idempotency` and this module
 //! reads `r.idempotency` on TWO of them. A reader who greps for that field finds
-//! nine handlers that accept a key and never mention it, and cannot tell an
-//! omission from a mechanism. The nine are not one answer nine times:
+//! ten handlers that accept a key and never mention it, and cannot tell an
+//! omission from a mechanism. The ten are not one answer ten times:
 //!
 //! - **TWO honour the key with a ledger.** `RedeemEnrolment`, on
 //!   `iam_enrolment_redemption`, and `SetInheritedSetting`, on
@@ -36,12 +36,23 @@
 //!   `CreateEnrolment` and `CreateCredential` mint a row per call, so a retry is
 //!   not a replay and the shape argument above does not reach them. Each carries
 //!   the measured consequence at its own handler.
+//! - **ONE RE-RUNS ITS STATEMENT AND IS NOT IN THE SHAPE GROUP.**
+//!   `RevokeAllCredentials` (ADR-0945) tombstones under `revoked_at IS NULL`
+//!   like `RevokeCredential`, so a repeat reaches the same rows — but its
+//!   answer is the COUNT of rows that delivery changed, and a repeat answers 0
+//!   rather than the first delivery's count. The state converges; the answer
+//!   does not, so D9's core rule does not hold for it. And a repeat that lands
+//!   after the person logs in again revokes the new credential too. The
+//!   contract states both on the request, rather than this module claiming a
+//!   replay property it does not have.
 //!
 //! **NOTHING IS REFUSED, AND THAT IS A DECISION RATHER THAN THE OVERSIGHT
 //! CONTINUING.** `INVALID_ARGUMENT` on a key this module cannot honour is the
 //! loud alternative to the silence, and it would break the callers that send one:
 //! `iam` forwards a key onto FIVE of these hops today — `CreateUser`,
 //! `CreateEnrolment`, `AddTeamMember`, `RemoveTeamMember` and `RevokeCredential`.
+//! `RevokeAllCredentials` is new and `iam` does not call it yet; its relay is
+//! the next change in ADR-0945's chain.
 //! The last three are in the shape group, so refusing them would reject writes
 //! that are already replay-safe; refusing the first two would take user and
 //! enrolment creation down in order to report a defect neither caller can fix.
@@ -270,6 +281,7 @@ fn tel(request_id: String, user_id: &str) -> yadgar_telemetry::observe::Scope {
 /// | `SetUserAdmin`         | `{user_id}`, the person promoted or demoted    |
 /// | `CreateCredential`     | `{user_id}/{credential_id}`, the id just minted |
 /// | `RevokeCredential`     | `{credential_id}`                              |
+/// | `RevokeAllCredentials` | `{user_id}`, the person whose credentials end  |
 /// | `SetRateLimitOverride` | `{user_id}/{module}/{kind}/{set\|clear}`       |
 /// | `AddTeamMember`        | `{team_id}/{user_id}`                          |
 /// | `RemoveTeamMember`     | `{team_id}/{user_id}`                          |
@@ -288,14 +300,15 @@ fn tel(request_id: String, user_id: &str) -> yadgar_telemetry::observe::Scope {
 /// from a default one, so `filter` is what keeps the two together;
 /// `unwrap_or_default` would write "" as an actor.
 ///
-/// **ALL NINE RPCs THAT CARRY THE FIELD CALL THIS**, each before any refusal or
+/// **ALL TEN RPCs THAT CARRY THE FIELD CALL THIS**, each before any refusal or
 /// SQL in its operation. `CreateUser`, `CreateEnrolment`,
 /// `SetUserAdmin` and `SetInheritedSetting` came first; `CreateCredential`,
 /// `RevokeCredential`, `SetRateLimitOverride`, `AddTeamMember` and
 /// `RemoveTeamMember` were wired later (ledger 870), with the same test per verb
-/// in `tests/contract.rs`. A tenth verb that starts carrying an actor joins this
-/// list and that test pattern, or the grep that lands here finds an omission
-/// indistinguishable from a decision again.
+/// in `tests/contract.rs`. `RevokeAllCredentials` (ADR-0945) is the tenth. An
+/// eleventh verb that starts carrying an actor joins this list and that test
+/// pattern, or the grep that lands here finds an omission indistinguishable
+/// from a decision again.
 ///
 /// **THE LINE RECORDS AN ATTEMPT, NEVER AN OUTCOME.** It is written before the
 /// operation refuses or touches the store, so a request refused as NOT_FOUND or

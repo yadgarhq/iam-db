@@ -4942,7 +4942,7 @@ async fn every_actor_record_carries_the_request_id_of_its_call() {
     // THE JOIN TO THE CALLRECORD. The actor line records an ATTEMPT and the
     // CallRecord records the OUTCOME; `request_id` is the only key both carry,
     // so a line without it cannot be matched to whether the write happened.
-    // All nine verbs, each with its own id, so a verb that dropped it — or
+    // All ten verbs, each with its own id, so a verb that dropped it — or
     // logged another call's — fails by name.
     let svc = fresh("iam_db_test_actor_request_id").await;
     let (person, credential) = seed(&svc, &[91u8; 32], &[92u8; 32]).await;
@@ -5054,6 +5054,17 @@ async fn every_actor_record_carries_the_request_id_of_its_call() {
                 ..Default::default()
             },
             "rid-RemoveTeamMember",
+        ))
+    );
+    check!(
+        "RevokeAllCredentials",
+        svc.revoke_all_credentials(with_request_id(
+            RevokeAllCredentialsRequest {
+                user_id: person.clone(),
+                unverified_actor: who.clone(),
+                ..Default::default()
+            },
+            "rid-RevokeAllCredentials",
         ))
     );
     check!(
@@ -6029,4 +6040,364 @@ async fn no_credential_can_be_created_while_a_revoking_reset_is_in_flight() {
         "a credential was created and committed while the revoking reset was in flight; it \
          existed before the reset took effect and survived it"
     );
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0945: RevokeAllCredentials, the standalone form of ADR-0943's revoke.
+//
+// The same statement and the same user-row lock, in a transaction of its own,
+// returning how many rows THIS delivery changed. The ways it must hold: every
+// live credential of the target stops resolving and nobody else's does, an
+// earlier tombstone keeps its timestamp, a repeat changes nothing and says 0,
+// a person with no row at all is NOT_FOUND and nothing is written, a
+// soft-deleted person's rows are still tombstoned and counted, the lock keeps
+// a racing CreateCredential out of the window, and the actor is recorded.
+// ---------------------------------------------------------------------------
+
+/// `RevokeAllCredentials` for `user_id`, with no actor.
+async fn revoke_all(svc: &IamDb, user_id: &str) -> Result<u32, tonic::Status> {
+    svc.revoke_all_credentials(Request::new(RevokeAllCredentialsRequest {
+        user_id: user_id.into(),
+        ..Default::default()
+    }))
+    .await
+    .map(|r| r.into_inner().revoked)
+}
+
+/// Every tombstoned credential row in the store, of anybody.
+const REVOKED_ROWS: &str =
+    "SELECT COUNT(*) FROM iam_credential WHERE revoked_at IS NOT NULL AND id <> ?";
+
+#[tokio::test]
+async fn revoke_all_withdraws_every_live_credential_and_nobody_elses() {
+    let svc = fresh("iam_db_test_revoke_all").await;
+    let (user_id, _) = seed(&svc, &[220u8; 32], &[221u8; 32]).await;
+    credential(&svc, &user_id, 222).await;
+    // SOMEBODY ELSE'S CREDENTIAL. A statement missing its `user_id` predicate
+    // would withdraw every credential in the store, and the count would say so.
+    let (bystander, _) = seed(&svc, &[223u8; 32], &[224u8; 32]).await;
+
+    let revoked = revoke_all(&svc, &user_id).await.expect("revoke all");
+
+    assert_eq!(revoked, 2, "both of the target's credentials are counted");
+    assert!(
+        resolves_to(&svc, 221).await.is_empty(),
+        "the first credential must stop resolving"
+    );
+    assert!(
+        resolves_to(&svc, 222).await.is_empty(),
+        "EVERY credential, not only the first"
+    );
+    assert_eq!(
+        resolves_to(&svc, 224).await,
+        bystander,
+        "another user's credential must be untouched"
+    );
+}
+
+#[tokio::test]
+async fn revoke_all_keeps_the_timestamp_of_an_earlier_revocation() {
+    // `revoked_at IS NULL` IN THE STATEMENT. The record must say when access
+    // actually ended, not when somebody last asked — and a row already revoked
+    // is not one this delivery changed, so it is not counted.
+    let svc = fresh("iam_db_test_revoke_all_keeps").await;
+    let (user_id, first) = seed(&svc, &[225u8; 32], &[226u8; 32]).await;
+    credential(&svc, &user_id, 227).await;
+    sqlx::query("UPDATE iam_credential SET revoked_at = '2001-02-03 04:05:06' WHERE id = ?")
+        .bind(&first)
+        .execute(svc.pool())
+        .await
+        .expect("an earlier revocation");
+
+    let revoked = revoke_all(&svc, &user_id).await.expect("revoke all");
+
+    assert_eq!(revoked, 1, "only the row that was still live is counted");
+    let kept: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM iam_credential
+          WHERE id = ? AND revoked_at = '2001-02-03 04:05:06'",
+    )
+    .bind(&first)
+    .fetch_one(svc.pool())
+    .await
+    .expect("read the earlier tombstone");
+    assert_eq!(kept, 1, "the earlier revoked_at must be kept");
+}
+
+#[tokio::test]
+async fn a_second_revoke_all_changes_nothing_and_says_zero() {
+    // THE COUNT IS THIS DELIVERY'S, NEVER THE FIRST DELIVERY'S (the contract's
+    // own comment): iam-db does not recognise a redelivery as a replay.
+    let svc = fresh("iam_db_test_revoke_all_twice").await;
+    let (user_id, _) = seed(&svc, &[228u8; 32], &[229u8; 32]).await;
+
+    assert_eq!(revoke_all(&svc, &user_id).await.expect("first"), 1);
+    assert_eq!(
+        revoke_all(&svc, &user_id).await.expect("second"),
+        0,
+        "a repeat finds nothing live and must say 0, as a success"
+    );
+}
+
+#[tokio::test]
+async fn revoke_all_for_a_person_with_no_row_is_not_found_and_writes_nothing() {
+    let svc = fresh("iam_db_test_revoke_all_unknown").await;
+    let (bystander, _) = seed(&svc, &[230u8; 32], &[231u8; 32]).await;
+
+    let err = revoke_all(&svc, "yadgar:user:nobody")
+        .await
+        .expect_err("a person with no row must be refused");
+
+    assert_eq!(err.code(), tonic::Code::NotFound);
+    assert_eq!(
+        count(&svc, REVOKED_ROWS, "").await,
+        0,
+        "a refused call must tombstone nothing"
+    );
+    assert_eq!(
+        resolves_to(&svc, 231).await,
+        bystander,
+        "nobody's credential may be touched by a refused call"
+    );
+}
+
+#[tokio::test]
+async fn revoke_all_tombstones_and_counts_a_soft_deleted_persons_credentials() {
+    // NOT `live_user`. A soft-deleted person's credentials already stop
+    // resolving, but their rows are still live in the table; the contract says
+    // they are tombstoned and counted, so a later un-delete — or a read that
+    // forgets the join — cannot bring them back.
+    let svc = fresh("iam_db_test_revoke_all_deleted").await;
+    let (user_id, _) = seed(&svc, &[232u8; 32], &[233u8; 32]).await;
+    credential(&svc, &user_id, 234).await;
+    soft_delete(&svc, &user_id).await;
+
+    let revoked = revoke_all(&svc, &user_id)
+        .await
+        .expect("a soft-deleted person is not NOT_FOUND");
+
+    assert_eq!(
+        revoked, 2,
+        "both rows of the soft-deleted person are counted"
+    );
+    assert_eq!(
+        count(
+            &svc,
+            "SELECT COUNT(*) FROM iam_credential WHERE user_id = ? AND revoked_at IS NULL",
+            &user_id,
+        )
+        .await,
+        0,
+        "no live row may remain for the soft-deleted person"
+    );
+}
+
+#[tokio::test]
+async fn a_token_revoked_by_revoke_all_resolves_to_nothing() {
+    // THE POINT OF THE VERB: the leaked token stops working now. Empty is the
+    // answer, never an error — the shape `a_revoked_credential_stops_resolving`
+    // pins.
+    let svc = fresh("iam_db_test_revoke_all_resolve").await;
+    let (user_id, _) = seed(&svc, &[235u8; 32], &[236u8; 32]).await;
+    assert_eq!(
+        resolves_to(&svc, 236).await,
+        user_id,
+        "the token must resolve before the revoke, or this asserts nothing"
+    );
+
+    revoke_all(&svc, &user_id).await.expect("revoke all");
+
+    assert!(
+        resolves_to(&svc, 236).await.is_empty(),
+        "a revoked token must resolve to nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_credential_already_being_created_is_revoked_by_revoke_all() {
+    // ADR-0943's first race test, against the standalone verb. A
+    // `CreateCredential` that has inserted and not committed when the revoke
+    // runs: the revoke must wait for it, then withdraw it AND count it.
+    //
+    // A REGRESSION GUARD, for the reason the ADR-0943 twin gives: the UPDATE's
+    // scan of `ix_iam_credential_user` already waits on the uncommitted insert,
+    // so this does not depend on the user-row lock alone.
+    let svc = std::sync::Arc::new(fresh("iam_db_test_revoke_all_race_before").await);
+    let (user_id, _) = seed(&svc, &[240u8; 32], &[241u8; 32]).await;
+
+    let mut racer = svc.pool().begin().await.expect("racer begins");
+    sqlx::query(CREATE_CREDENTIAL_SHAPE)
+        .bind("yadgar:credential:racer-before-all")
+        .bind(vec![243u8; 32])
+        .bind(&user_id)
+        .execute(&mut *racer)
+        .await
+        .expect("the racing insert");
+
+    let revoking = {
+        let svc = std::sync::Arc::clone(&svc);
+        let user_id = user_id.clone();
+        tokio::spawn(async move { revoke_all(&svc, &user_id).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    racer.commit().await.expect("the racer commits");
+
+    let revoked = revoking
+        .await
+        .expect("the revoke task")
+        .expect("revoke all");
+    assert_eq!(revoked, 2, "the racing credential is withdrawn and counted");
+    assert!(
+        resolves_to(&svc, 243).await.is_empty(),
+        "a credential that was being created when the revoke ran must not survive it"
+    );
+}
+
+#[tokio::test]
+async fn no_credential_can_be_created_while_revoke_all_is_in_flight() {
+    // ADR-0943's second race test, against the standalone verb, and the one the
+    // user-row lock exists for. Without a lock that conflicts with
+    // `CreateCredential`'s shared lock on the user row, a credential can be
+    // inserted AND COMMITTED after the revoke started and before it commits.
+    //
+    // The window is held open deterministically: a third transaction holds an
+    // exclusive lock on the target's existing credential row, so the revoke's
+    // UPDATE stalls on it — after the user-row lock, before the commit. An
+    // UPDATE of a non-key column takes no lock on the user row, so the stall
+    // cannot itself collide with the revoke's lock there.
+    let svc = std::sync::Arc::new(fresh("iam_db_test_revoke_all_race_during").await);
+    let (user_id, existing) = seed(&svc, &[250u8; 32], &[251u8; 32]).await;
+
+    let mut stall = svc.pool().begin().await.expect("stall begins");
+    sqlx::query("UPDATE iam_credential SET label = label WHERE id = ?")
+        .bind(&existing)
+        .execute(&mut *stall)
+        .await
+        .expect("hold the existing credential row");
+
+    let revoking = {
+        let svc = std::sync::Arc::clone(&svc);
+        let user_id = user_id.clone();
+        tokio::spawn(async move { revoke_all(&svc, &user_id).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(
+        !revoking.is_finished(),
+        "the revoke must be stalled on the held credential row, or this test asserts nothing"
+    );
+
+    let racing = {
+        let pool = svc.pool().clone();
+        let user_id = user_id.clone();
+        tokio::spawn(async move {
+            let mut racer = pool.begin().await.expect("racer begins");
+            sqlx::query(CREATE_CREDENTIAL_SHAPE)
+                .bind("yadgar:credential:racer-during-all")
+                .bind(vec![253u8; 32])
+                .bind(&user_id)
+                .execute(&mut *racer)
+                .await
+                .expect("the racing insert");
+            racer.commit().await.expect("the racer commits");
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let created_inside_the_revoke = racing.is_finished();
+
+    stall.rollback().await.expect("release the credential row");
+    let revoked = revoking
+        .await
+        .expect("the revoke task")
+        .expect("revoke all");
+    racing.await.expect("the racer task");
+    assert!(
+        !created_inside_the_revoke,
+        "a credential was created and committed while revoke all was in flight"
+    );
+    assert_eq!(revoked, 1, "only the credential that existed is counted");
+    assert_eq!(
+        resolves_to(&svc, 253).await,
+        user_id,
+        "the credential created after the revoke committed must work"
+    );
+}
+
+#[tokio::test]
+async fn revoke_all_records_the_actor_and_names_the_person() {
+    // ADR-0534's recording half, as every sibling write carries it. The target
+    // is the person whose credentials were revoked, and that person must never
+    // be recorded as the one who asked.
+    let svc = fresh("iam_db_test_actor_revoke_all").await;
+    let (holder, _) = seed(&svc, &[254u8; 32], &[255u8; 32]).await;
+
+    let log = {
+        let (_guard, buf) = capturing();
+        svc.revoke_all_credentials(with_request_id(
+            RevokeAllCredentialsRequest {
+                user_id: holder.clone(),
+                unverified_actor: actor("yadgar:user:actor-revoke-all"),
+                ..Default::default()
+            },
+            "rid-RevokeAllCredentials",
+        ))
+        .await
+        .expect("revoke all");
+        rendered(&buf)
+    };
+
+    let line = actor_line(&log);
+    assert!(
+        line.contains(r#"rpc="RevokeAllCredentials""#),
+        "the record must name the verb"
+    );
+    assert!(
+        line.contains(r#"unverified_actor="yadgar:user:actor-revoke-all""#),
+        "the actor must reach the log"
+    );
+    assert!(
+        line.contains(r#"request_id="rid-RevokeAllCredentials""#),
+        "the record must carry its call's request id"
+    );
+    assert!(
+        line.contains(&format!(r#"target="{holder}""#)),
+        "the record must name the person acted on"
+    );
+    assert!(
+        !line.contains(&format!(r#"unverified_actor="{holder}""#)),
+        "the person acted on must never be recorded as the actor"
+    );
+}
+
+#[tokio::test]
+async fn revoke_all_without_a_usable_actor_records_it_as_unattributed() {
+    // The second round revokes nothing, which is still OK, so both rounds
+    // reach the record.
+    let svc = fresh("iam_db_test_actor_revoke_all_none").await;
+    let (holder, _) = seed(&svc, &[219u8; 32], &[218u8; 32]).await;
+
+    for unverified_actor in [None, Some(UnverifiedActor::default())] {
+        let log = {
+            let (_guard, buf) = capturing();
+            svc.revoke_all_credentials(Request::new(RevokeAllCredentialsRequest {
+                user_id: holder.clone(),
+                unverified_actor,
+                ..Default::default()
+            }))
+            .await
+            .expect("an actor decides nothing, including whether this succeeds");
+            rendered(&buf)
+        };
+        let line = actor_line(&log);
+        assert!(
+            line.contains(r#"rpc="RevokeAllCredentials""#),
+            "the record must name the verb"
+        );
+        assert!(
+            line.contains(r#"unverified_actor="<unattributed>""#),
+            "an unusable actor is recorded as unattributed"
+        );
+        assert!(
+            !line.contains(r#"unverified_actor="""#),
+            "the empty string must never be written as an actor"
+        );
+    }
 }

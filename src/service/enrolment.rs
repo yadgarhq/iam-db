@@ -22,7 +22,7 @@ use super::*;
 
 mod demand;
 mod ledger;
-mod revoke;
+pub(super) mod revoke;
 
 use ledger::{replay, unredeemable};
 
