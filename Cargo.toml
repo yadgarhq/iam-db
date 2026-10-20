@@ -93,7 +93,12 @@ metrics = "0.24"
 # server and rustls with the `ring` provider only, both already in this tree,
 # so no second crypto provider enters the graph (K-2, measured with
 # `cargo tree -i aws-lc-rs`).
-yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle.git", tag = "v0.2.20", features = [
+#
+# v0.2.24 (ledger 1629, ADR-0972): `serve_tls::caller_common_name` first ships
+# in v0.2.23. It reads the common name off the verified client leaf, and the
+# caller gate on every `IamDbService` verb compares that name with
+# `iam-caller`. The step past v0.2.23 adds only a tokio patch bump.
+yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle.git", tag = "v0.2.24", features = [
   "serve-tls",
 ] }
 sqlx = { version = "0.9", default-features = false, features = [
