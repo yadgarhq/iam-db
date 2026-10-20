@@ -21,9 +21,9 @@ use tonic::Request;
 use yadgar_iam_db::pb::yadgar::common::v1::{
     Idempotency, SettingScope, SettingValue, UnverifiedActor,
 };
-use yadgar_iam_db::pb::yadgar::iamdb::v1::iam_db_service_server::IamDbService as _;
 use yadgar_iam_db::pb::yadgar::iamdb::v1::*;
-use yadgar_iam_db::{schema, service::IamDb};
+use yadgar_iam_db::schema;
+use yadgar_iam_db::service::{IamDb, IAM_CALLER};
 use yadgar_telemetry::record;
 
 fn dsn() -> String {
@@ -73,24 +73,30 @@ async fn fresh(db: &str) -> IamDb {
 /// A user with one credential. Returns `(user_id, token_hash, credential_id)`.
 async fn seed(svc: &IamDb, name: &[u8; 32], token: &[u8; 32]) -> (String, String) {
     let user = svc
-        .create_user(Request::new(CreateUserRequest {
-            external_id_blind_index: name.to_vec(),
-            external_id_ciphertext: b"ciphertext".to_vec(),
-            display_name_ciphertext: b"ciphertext".to_vec(),
-            ..Default::default()
-        }))
+        .create_user_as(
+            Some(IAM_CALLER),
+            Request::new(CreateUserRequest {
+                external_id_blind_index: name.to_vec(),
+                external_id_ciphertext: b"ciphertext".to_vec(),
+                display_name_ciphertext: b"ciphertext".to_vec(),
+                ..Default::default()
+            }),
+        )
         .await
         .expect("create user")
         .into_inner();
     let user_id = user.meta.expect("meta").id;
 
     let cred = svc
-        .create_credential(Request::new(CreateCredentialRequest {
-            user_id: user_id.clone(),
-            token_hash: token.to_vec(),
-            label: "laptop".into(),
-            ..Default::default()
-        }))
+        .create_credential_as(
+            Some(IAM_CALLER),
+            Request::new(CreateCredentialRequest {
+                user_id: user_id.clone(),
+                token_hash: token.to_vec(),
+                label: "laptop".into(),
+                ..Default::default()
+            }),
+        )
         .await
         .expect("create credential")
         .into_inner();
@@ -103,9 +109,12 @@ async fn a_live_credential_resolves_to_its_user() {
     let (user_id, cred_id) = seed(&svc, &[1u8; 32], &[9u8; 32]).await;
 
     let got = svc
-        .resolve_credential(Request::new(ResolveCredentialRequest {
-            token_hash: vec![9u8; 32],
-        }))
+        .resolve_credential_as(
+            Some(IAM_CALLER),
+            Request::new(ResolveCredentialRequest {
+                token_hash: vec![9u8; 32],
+            }),
+        )
         .await
         .expect("resolve")
         .into_inner();
@@ -122,9 +131,12 @@ async fn an_unknown_token_is_an_empty_answer_and_not_an_error() {
     let svc = fresh("iam_db_test_unknown").await;
 
     let got = svc
-        .resolve_credential(Request::new(ResolveCredentialRequest {
-            token_hash: vec![7u8; 32],
-        }))
+        .resolve_credential_as(
+            Some(IAM_CALLER),
+            Request::new(ResolveCredentialRequest {
+                token_hash: vec![7u8; 32],
+            }),
+        )
         .await
         .expect("an unknown token must not be an error")
         .into_inner();
@@ -137,17 +149,23 @@ async fn a_revoked_credential_stops_resolving() {
     let svc = fresh("iam_db_test_revoked").await;
     let (_user, cred_id) = seed(&svc, &[2u8; 32], &[8u8; 32]).await;
 
-    svc.revoke_credential(Request::new(RevokeCredentialRequest {
-        credential_id: cred_id,
-        ..Default::default()
-    }))
+    svc.revoke_credential_as(
+        Some(IAM_CALLER),
+        Request::new(RevokeCredentialRequest {
+            credential_id: cred_id,
+            ..Default::default()
+        }),
+    )
     .await
     .expect("revoke");
 
     let got = svc
-        .resolve_credential(Request::new(ResolveCredentialRequest {
-            token_hash: vec![8u8; 32],
-        }))
+        .resolve_credential_as(
+            Some(IAM_CALLER),
+            Request::new(ResolveCredentialRequest {
+                token_hash: vec![8u8; 32],
+            }),
+        )
         .await
         .expect("resolve")
         .into_inner();
@@ -167,10 +185,13 @@ async fn revoke_returns_the_owner_so_the_cache_can_be_invalidated() {
     let (user_id, cred_id) = seed(&svc, &[3u8; 32], &[7u8; 32]).await;
 
     let got = svc
-        .revoke_credential(Request::new(RevokeCredentialRequest {
-            credential_id: cred_id,
-            ..Default::default()
-        }))
+        .revoke_credential_as(
+            Some(IAM_CALLER),
+            Request::new(RevokeCredentialRequest {
+                credential_id: cred_id,
+                ..Default::default()
+            }),
+        )
         .await
         .expect("revoke")
         .into_inner();
@@ -186,10 +207,13 @@ async fn revoking_twice_is_accepted_and_keeps_the_first_timestamp() {
     let (_user, cred_id) = seed(&svc, &[4u8; 32], &[6u8; 32]).await;
 
     for _ in 0..2 {
-        svc.revoke_credential(Request::new(RevokeCredentialRequest {
-            credential_id: cred_id.clone(),
-            ..Default::default()
-        }))
+        svc.revoke_credential_as(
+            Some(IAM_CALLER),
+            Request::new(RevokeCredentialRequest {
+                credential_id: cred_id.clone(),
+                ..Default::default()
+            }),
+        )
         .await
         .expect("revoking twice must not error");
     }
@@ -210,18 +234,24 @@ async fn team_membership_comes_back_with_the_identity() {
     .await
     .expect("seed team");
 
-    svc.add_team_member(Request::new(AddTeamMemberRequest {
-        team_id: "yadgar:team:t1".into(),
-        user_id: user_id.clone(),
-        ..Default::default()
-    }))
+    svc.add_team_member_as(
+        Some(IAM_CALLER),
+        Request::new(AddTeamMemberRequest {
+            team_id: "yadgar:team:t1".into(),
+            user_id: user_id.clone(),
+            ..Default::default()
+        }),
+    )
     .await
     .expect("add member");
 
     let got = svc
-        .resolve_credential(Request::new(ResolveCredentialRequest {
-            token_hash: vec![5u8; 32],
-        }))
+        .resolve_credential_as(
+            Some(IAM_CALLER),
+            Request::new(ResolveCredentialRequest {
+                token_hash: vec![5u8; 32],
+            }),
+        )
         .await
         .expect("resolve")
         .into_inner();
@@ -244,19 +274,25 @@ async fn adding_the_same_member_twice_is_a_no_op() {
     .expect("seed team");
 
     for _ in 0..2 {
-        svc.add_team_member(Request::new(AddTeamMemberRequest {
-            team_id: "yadgar:team:t2".into(),
-            user_id: user_id.clone(),
-            ..Default::default()
-        }))
+        svc.add_team_member_as(
+            Some(IAM_CALLER),
+            Request::new(AddTeamMemberRequest {
+                team_id: "yadgar:team:t2".into(),
+                user_id: user_id.clone(),
+                ..Default::default()
+            }),
+        )
         .await
         .expect("adding twice must not error");
     }
 
     let got = svc
-        .resolve_credential(Request::new(ResolveCredentialRequest {
-            token_hash: vec![4u8; 32],
-        }))
+        .resolve_credential_as(
+            Some(IAM_CALLER),
+            Request::new(ResolveCredentialRequest {
+                token_hash: vec![4u8; 32],
+            }),
+        )
         .await
         .expect("resolve")
         .into_inner();
@@ -278,26 +314,35 @@ async fn removing_a_member_removes_the_team_from_the_identity() {
     .await
     .expect("seed team");
 
-    svc.add_team_member(Request::new(AddTeamMemberRequest {
-        team_id: "yadgar:team:t3".into(),
-        user_id: user_id.clone(),
-        ..Default::default()
-    }))
+    svc.add_team_member_as(
+        Some(IAM_CALLER),
+        Request::new(AddTeamMemberRequest {
+            team_id: "yadgar:team:t3".into(),
+            user_id: user_id.clone(),
+            ..Default::default()
+        }),
+    )
     .await
     .expect("add");
 
-    svc.remove_team_member(Request::new(RemoveTeamMemberRequest {
-        team_id: "yadgar:team:t3".into(),
-        user_id: user_id.clone(),
-        ..Default::default()
-    }))
+    svc.remove_team_member_as(
+        Some(IAM_CALLER),
+        Request::new(RemoveTeamMemberRequest {
+            team_id: "yadgar:team:t3".into(),
+            user_id: user_id.clone(),
+            ..Default::default()
+        }),
+    )
     .await
     .expect("remove");
 
     let got = svc
-        .resolve_credential(Request::new(ResolveCredentialRequest {
-            token_hash: vec![3u8; 32],
-        }))
+        .resolve_credential_as(
+            Some(IAM_CALLER),
+            Request::new(ResolveCredentialRequest {
+                token_hash: vec![3u8; 32],
+            }),
+        )
         .await
         .expect("resolve")
         .into_inner();
@@ -333,11 +378,14 @@ async fn adding_a_member_to_a_team_that_does_not_exist_is_refused() {
     let (user_id, _cred) = seed(&svc, &[57u8; 32], &[57u8; 32]).await;
 
     let err = svc
-        .add_team_member(Request::new(AddTeamMemberRequest {
-            team_id: "yadgar:team:never-existed".into(),
-            user_id: user_id.clone(),
-            ..Default::default()
-        }))
+        .add_team_member_as(
+            Some(IAM_CALLER),
+            Request::new(AddTeamMemberRequest {
+                team_id: "yadgar:team:never-existed".into(),
+                user_id: user_id.clone(),
+                ..Default::default()
+            }),
+        )
         .await
         .expect_err("a membership in a team that does not exist must not report success");
     assert_eq!(err.code(), tonic::Code::NotFound);
@@ -362,11 +410,14 @@ async fn adding_a_member_who_does_not_exist_is_refused() {
     team(&svc, "yadgar:team:t5").await;
 
     let err = svc
-        .add_team_member(Request::new(AddTeamMemberRequest {
-            team_id: "yadgar:team:t5".into(),
-            user_id: "yadgar:user:never-existed".into(),
-            ..Default::default()
-        }))
+        .add_team_member_as(
+            Some(IAM_CALLER),
+            Request::new(AddTeamMemberRequest {
+                team_id: "yadgar:team:t5".into(),
+                user_id: "yadgar:user:never-existed".into(),
+                ..Default::default()
+            }),
+        )
         .await
         .expect_err("a membership for a person who does not exist must not report success");
     assert_eq!(err.code(), tonic::Code::NotFound);
@@ -391,12 +442,15 @@ async fn two_users_cannot_share_a_username() {
     seed(&svc, &[11u8; 32], &[2u8; 32]).await;
 
     let err = svc
-        .create_user(Request::new(CreateUserRequest {
-            external_id_blind_index: vec![11u8; 32],
-            external_id_ciphertext: b"other".to_vec(),
-            display_name_ciphertext: b"other".to_vec(),
-            ..Default::default()
-        }))
+        .create_user_as(
+            Some(IAM_CALLER),
+            Request::new(CreateUserRequest {
+                external_id_blind_index: vec![11u8; 32],
+                external_id_ciphertext: b"other".to_vec(),
+                display_name_ciphertext: b"other".to_vec(),
+                ..Default::default()
+            }),
+        )
         .await
         .expect_err("a duplicate username must be refused");
 
@@ -408,19 +462,25 @@ async fn a_password_hash_round_trips_and_is_found_by_blind_index() {
     let svc = fresh("iam_db_test_password").await;
     let (user_id, _cred) = seed(&svc, &[12u8; 32], &[1u8; 32]).await;
 
-    svc.set_password(Request::new(SetPasswordRequest {
-        user_id: user_id.clone(),
-        argon2id_hash: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA".into(),
-        ..Default::default()
-    }))
+    svc.set_password_as(
+        Some(IAM_CALLER),
+        Request::new(SetPasswordRequest {
+            user_id: user_id.clone(),
+            argon2id_hash: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA".into(),
+            ..Default::default()
+        }),
+    )
     .await
     .expect("set password");
 
     let got = svc
-        .get_password_hash(Request::new(GetPasswordHashRequest {
-            username_blind_index: vec![12u8; 32],
-            ..Default::default()
-        }))
+        .get_password_hash_as(
+            Some(IAM_CALLER),
+            Request::new(GetPasswordHashRequest {
+                username_blind_index: vec![12u8; 32],
+                ..Default::default()
+            }),
+        )
         .await
         .expect("get hash")
         .into_inner();
@@ -437,10 +497,13 @@ async fn an_unknown_username_yields_an_empty_hash_rather_than_an_error() {
     let svc = fresh("iam_db_test_no_user").await;
 
     let got = svc
-        .get_password_hash(Request::new(GetPasswordHashRequest {
-            username_blind_index: vec![99u8; 32],
-            ..Default::default()
-        }))
+        .get_password_hash_as(
+            Some(IAM_CALLER),
+            Request::new(GetPasswordHashRequest {
+                username_blind_index: vec![99u8; 32],
+                ..Default::default()
+            }),
+        )
         .await
         .expect("an unknown user must not be an error")
         .into_inner();
@@ -458,12 +521,15 @@ async fn an_expired_credential_stops_resolving() {
     // catches that.
     let svc = fresh("iam_db_test_expired").await;
     let user = svc
-        .create_user(Request::new(CreateUserRequest {
-            external_id_blind_index: vec![13u8; 32],
-            external_id_ciphertext: b"c".to_vec(),
-            display_name_ciphertext: b"c".to_vec(),
-            ..Default::default()
-        }))
+        .create_user_as(
+            Some(IAM_CALLER),
+            Request::new(CreateUserRequest {
+                external_id_blind_index: vec![13u8; 32],
+                external_id_ciphertext: b"c".to_vec(),
+                display_name_ciphertext: b"c".to_vec(),
+                ..Default::default()
+            }),
+        )
         .await
         .expect("create user")
         .into_inner();
@@ -474,23 +540,29 @@ async fn an_expired_credential_stops_resolving() {
         .as_secs() as i64
         - 3600;
 
-    svc.create_credential(Request::new(CreateCredentialRequest {
-        user_id: user.meta.expect("meta").id,
-        token_hash: vec![14u8; 32],
-        label: "already stale".into(),
-        expires_at: Some(prost_types::Timestamp {
-            seconds: past,
-            nanos: 0,
+    svc.create_credential_as(
+        Some(IAM_CALLER),
+        Request::new(CreateCredentialRequest {
+            user_id: user.meta.expect("meta").id,
+            token_hash: vec![14u8; 32],
+            label: "already stale".into(),
+            expires_at: Some(prost_types::Timestamp {
+                seconds: past,
+                nanos: 0,
+            }),
+            ..Default::default()
         }),
-        ..Default::default()
-    }))
+    )
     .await
     .expect("create credential");
 
     let got = svc
-        .resolve_credential(Request::new(ResolveCredentialRequest {
-            token_hash: vec![14u8; 32],
-        }))
+        .resolve_credential_as(
+            Some(IAM_CALLER),
+            Request::new(ResolveCredentialRequest {
+                token_hash: vec![14u8; 32],
+            }),
+        )
         .await
         .expect("resolve")
         .into_inner();
@@ -508,12 +580,15 @@ async fn a_credential_with_a_future_expiry_still_resolves() {
     // test would still pass.
     let svc = fresh("iam_db_test_future").await;
     let user = svc
-        .create_user(Request::new(CreateUserRequest {
-            external_id_blind_index: vec![15u8; 32],
-            external_id_ciphertext: b"c".to_vec(),
-            display_name_ciphertext: b"c".to_vec(),
-            ..Default::default()
-        }))
+        .create_user_as(
+            Some(IAM_CALLER),
+            Request::new(CreateUserRequest {
+                external_id_blind_index: vec![15u8; 32],
+                external_id_ciphertext: b"c".to_vec(),
+                display_name_ciphertext: b"c".to_vec(),
+                ..Default::default()
+            }),
+        )
         .await
         .expect("create user")
         .into_inner();
@@ -525,23 +600,29 @@ async fn a_credential_with_a_future_expiry_still_resolves() {
         .as_secs() as i64
         + 3600;
 
-    svc.create_credential(Request::new(CreateCredentialRequest {
-        user_id: user_id.clone(),
-        token_hash: vec![16u8; 32],
-        label: "valid for an hour".into(),
-        expires_at: Some(prost_types::Timestamp {
-            seconds: future,
-            nanos: 0,
+    svc.create_credential_as(
+        Some(IAM_CALLER),
+        Request::new(CreateCredentialRequest {
+            user_id: user_id.clone(),
+            token_hash: vec![16u8; 32],
+            label: "valid for an hour".into(),
+            expires_at: Some(prost_types::Timestamp {
+                seconds: future,
+                nanos: 0,
+            }),
+            ..Default::default()
         }),
-        ..Default::default()
-    }))
+    )
     .await
     .expect("create credential");
 
     let got = svc
-        .resolve_credential(Request::new(ResolveCredentialRequest {
-            token_hash: vec![16u8; 32],
-        }))
+        .resolve_credential_as(
+            Some(IAM_CALLER),
+            Request::new(ResolveCredentialRequest {
+                token_hash: vec![16u8; 32],
+            }),
+        )
         .await
         .expect("resolve")
         .into_inner();
@@ -578,9 +659,12 @@ async fn a_soft_deleted_users_credential_stops_resolving() {
 
     // Live first, so a query that never resolved anything cannot pass this.
     let before = svc
-        .resolve_credential(Request::new(ResolveCredentialRequest {
-            token_hash: vec![20u8; 32],
-        }))
+        .resolve_credential_as(
+            Some(IAM_CALLER),
+            Request::new(ResolveCredentialRequest {
+                token_hash: vec![20u8; 32],
+            }),
+        )
         .await
         .expect("resolve")
         .into_inner();
@@ -589,9 +673,12 @@ async fn a_soft_deleted_users_credential_stops_resolving() {
     soft_delete(&svc, &user_id).await;
 
     let after = svc
-        .resolve_credential(Request::new(ResolveCredentialRequest {
-            token_hash: vec![20u8; 32],
-        }))
+        .resolve_credential_as(
+            Some(IAM_CALLER),
+            Request::new(ResolveCredentialRequest {
+                token_hash: vec![20u8; 32],
+            }),
+        )
         .await
         .expect("resolve")
         .into_inner();
@@ -613,19 +700,25 @@ async fn a_soft_deleted_user_returns_no_password_hash() {
     let svc = fresh("iam_db_test_deleted_password").await;
     let (user_id, _cred) = seed(&svc, &[21u8; 32], &[21u8; 32]).await;
 
-    svc.set_password(Request::new(SetPasswordRequest {
-        user_id: user_id.clone(),
-        argon2id_hash: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA".into(),
-        ..Default::default()
-    }))
+    svc.set_password_as(
+        Some(IAM_CALLER),
+        Request::new(SetPasswordRequest {
+            user_id: user_id.clone(),
+            argon2id_hash: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA".into(),
+            ..Default::default()
+        }),
+    )
     .await
     .expect("set password");
 
     let before = svc
-        .get_password_hash(Request::new(GetPasswordHashRequest {
-            username_blind_index: vec![21u8; 32],
-            ..Default::default()
-        }))
+        .get_password_hash_as(
+            Some(IAM_CALLER),
+            Request::new(GetPasswordHashRequest {
+                username_blind_index: vec![21u8; 32],
+                ..Default::default()
+            }),
+        )
         .await
         .expect("get hash")
         .into_inner();
@@ -634,10 +727,13 @@ async fn a_soft_deleted_user_returns_no_password_hash() {
     soft_delete(&svc, &user_id).await;
 
     let after = svc
-        .get_password_hash(Request::new(GetPasswordHashRequest {
-            username_blind_index: vec![21u8; 32],
-            ..Default::default()
-        }))
+        .get_password_hash_as(
+            Some(IAM_CALLER),
+            Request::new(GetPasswordHashRequest {
+                username_blind_index: vec![21u8; 32],
+                ..Default::default()
+            }),
+        )
         .await
         .expect("get hash")
         .into_inner();
@@ -662,20 +758,26 @@ async fn changing_a_password_stops_the_old_hash_working() {
     const NEW: &str = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$bmV3aGFzaA";
 
     for hash in [OLD, NEW] {
-        svc.set_password(Request::new(SetPasswordRequest {
-            user_id: user_id.clone(),
-            argon2id_hash: hash.into(),
-            ..Default::default()
-        }))
+        svc.set_password_as(
+            Some(IAM_CALLER),
+            Request::new(SetPasswordRequest {
+                user_id: user_id.clone(),
+                argon2id_hash: hash.into(),
+                ..Default::default()
+            }),
+        )
         .await
         .expect("setting a password twice must be accepted");
     }
 
     let got = svc
-        .get_password_hash(Request::new(GetPasswordHashRequest {
-            username_blind_index: vec![22u8; 32],
-            ..Default::default()
-        }))
+        .get_password_hash_as(
+            Some(IAM_CALLER),
+            Request::new(GetPasswordHashRequest {
+                username_blind_index: vec![22u8; 32],
+                ..Default::default()
+            }),
+        )
         .await
         .expect("get hash")
         .into_inner();
@@ -712,19 +814,25 @@ async fn a_resolve_returns_only_that_users_teams() {
     }
 
     for (team, user) in [("yadgar:team:mine", &mine), ("yadgar:team:theirs", &theirs)] {
-        svc.add_team_member(Request::new(AddTeamMemberRequest {
-            team_id: team.into(),
-            user_id: user.clone(),
-            ..Default::default()
-        }))
+        svc.add_team_member_as(
+            Some(IAM_CALLER),
+            Request::new(AddTeamMemberRequest {
+                team_id: team.into(),
+                user_id: user.clone(),
+                ..Default::default()
+            }),
+        )
         .await
         .expect("add member");
     }
 
     let got = svc
-        .resolve_credential(Request::new(ResolveCredentialRequest {
-            token_hash: vec![23u8; 32],
-        }))
+        .resolve_credential_as(
+            Some(IAM_CALLER),
+            Request::new(ResolveCredentialRequest {
+                token_hash: vec![23u8; 32],
+            }),
+        )
         .await
         .expect("resolve")
         .into_inner();
@@ -749,10 +857,13 @@ async fn revoking_an_unknown_credential_is_not_found() {
     let svc = fresh("iam_db_test_revoke_unknown").await;
 
     let err = svc
-        .revoke_credential(Request::new(RevokeCredentialRequest {
-            credential_id: "yadgar:credential:never-existed".into(),
-            ..Default::default()
-        }))
+        .revoke_credential_as(
+            Some(IAM_CALLER),
+            Request::new(RevokeCredentialRequest {
+                credential_id: "yadgar:credential:never-existed".into(),
+                ..Default::default()
+            }),
+        )
         .await
         .expect_err("revoking something that does not exist must not report success");
 
@@ -818,12 +929,15 @@ fn at(offset: i64) -> prost_types::Timestamp {
 
 /// A user carrying a recognisable encrypted username, and no credential.
 async fn enrolee(svc: &IamDb, blind: u8, ciphertext: &[u8]) -> String {
-    svc.create_user(Request::new(CreateUserRequest {
-        external_id_blind_index: vec![blind; 32],
-        external_id_ciphertext: ciphertext.to_vec(),
-        display_name_ciphertext: b"display".to_vec(),
-        ..Default::default()
-    }))
+    svc.create_user_as(
+        Some(IAM_CALLER),
+        Request::new(CreateUserRequest {
+            external_id_blind_index: vec![blind; 32],
+            external_id_ciphertext: ciphertext.to_vec(),
+            display_name_ciphertext: b"display".to_vec(),
+            ..Default::default()
+        }),
+    )
     .await
     .expect("create user")
     .into_inner()
@@ -833,12 +947,15 @@ async fn enrolee(svc: &IamDb, blind: u8, ciphertext: &[u8]) -> String {
 }
 
 async fn enrol(svc: &IamDb, user_id: &str, secret: u8, expires_in: i64) -> String {
-    svc.create_enrolment(Request::new(CreateEnrolmentRequest {
-        user_id: user_id.into(),
-        secret_hash: vec![secret; 32],
-        expires_at: Some(at(expires_in)),
-        ..Default::default()
-    }))
+    svc.create_enrolment_as(
+        Some(IAM_CALLER),
+        Request::new(CreateEnrolmentRequest {
+            user_id: user_id.into(),
+            secret_hash: vec![secret; 32],
+            expires_at: Some(at(expires_in)),
+            ..Default::default()
+        }),
+    )
     .await
     .expect("create enrolment")
     .into_inner()
@@ -846,14 +963,19 @@ async fn enrol(svc: &IamDb, user_id: &str, secret: u8, expires_in: i64) -> Strin
 }
 
 async fn redeem(svc: &IamDb, secret: u8, hash: &str, key: &str) -> RedeemEnrolmentResponse {
-    svc.redeem_enrolment(Request::new(RedeemEnrolmentRequest {
-        secret_hash: vec![secret; 32],
-        argon2id_hash: hash.into(),
-        idempotency: match key.is_empty() {
-            true => None,
-            false => Some(yadgar_iam_db::pb::yadgar::common::v1::Idempotency { key: key.into() }),
-        },
-    }))
+    svc.redeem_enrolment_as(
+        Some(IAM_CALLER),
+        Request::new(RedeemEnrolmentRequest {
+            secret_hash: vec![secret; 32],
+            argon2id_hash: hash.into(),
+            idempotency: match key.is_empty() {
+                true => None,
+                false => {
+                    Some(yadgar_iam_db::pb::yadgar::common::v1::Idempotency { key: key.into() })
+                }
+            },
+        }),
+    )
     .await
     .expect("redeem must not error")
     .into_inner()
@@ -890,10 +1012,13 @@ async fn a_live_enrolment_is_redeemed_and_hands_back_the_username() {
     );
 
     let hash = svc
-        .get_password_hash(Request::new(GetPasswordHashRequest {
-            username_blind_index: vec![30u8; 32],
-            ..Default::default()
-        }))
+        .get_password_hash_as(
+            Some(IAM_CALLER),
+            Request::new(GetPasswordHashRequest {
+                username_blind_index: vec![30u8; 32],
+                ..Default::default()
+            }),
+        )
         .await
         .expect("get hash")
         .into_inner();
@@ -926,11 +1051,14 @@ async fn a_redemption_that_fails_partway_spends_nothing_and_sets_no_password() {
     narrow_password_column(&svc, "VARCHAR(8)").await;
 
     let err = svc
-        .redeem_enrolment(Request::new(RedeemEnrolmentRequest {
-            secret_hash: vec![31u8; 32],
-            argon2id_hash: GOOD_HASH.into(),
-            ..Default::default()
-        }))
+        .redeem_enrolment_as(
+            Some(IAM_CALLER),
+            Request::new(RedeemEnrolmentRequest {
+                secret_hash: vec![31u8; 32],
+                argon2id_hash: GOOD_HASH.into(),
+                ..Default::default()
+            }),
+        )
         .await
         .expect_err("a password write the engine refuses must fail the call");
     assert_eq!(err.code(), tonic::Code::Unavailable);
@@ -1080,15 +1208,18 @@ fn a_non_empty_idempotency_key_on_create_enrolment_trips_the_sensor() {
             let svc = fresh("iam_db_test_enrol_idempotency_sensor").await;
             let user_id = enrolee(&svc, 60, b"c").await;
 
-            svc.create_enrolment(Request::new(CreateEnrolmentRequest {
-                user_id: user_id.clone(),
-                secret_hash: vec![60u8; 32],
-                expires_at: Some(at(3600)),
-                idempotency: Some(Idempotency {
-                    key: "k-enrol-sensor".into(),
+            svc.create_enrolment_as(
+                Some(IAM_CALLER),
+                Request::new(CreateEnrolmentRequest {
+                    user_id: user_id.clone(),
+                    secret_hash: vec![60u8; 32],
+                    expires_at: Some(at(3600)),
+                    idempotency: Some(Idempotency {
+                        key: "k-enrol-sensor".into(),
+                    }),
+                    ..Default::default()
                 }),
-                ..Default::default()
-            }))
+            )
             .await
             .expect(
                 "create enrolment must still succeed — the sensor observes, it does not refuse",
@@ -1140,13 +1271,16 @@ fn an_empty_idempotency_key_on_create_enrolment_does_not_trip_the_sensor() {
 
             // PRESENT AND EMPTY.
             let user_id = enrolee(&svc, 62, b"c").await;
-            svc.create_enrolment(Request::new(CreateEnrolmentRequest {
-                user_id,
-                secret_hash: vec![62u8; 32],
-                expires_at: Some(at(3600)),
-                idempotency: Some(Idempotency { key: String::new() }),
-                ..Default::default()
-            }))
+            svc.create_enrolment_as(
+                Some(IAM_CALLER),
+                Request::new(CreateEnrolmentRequest {
+                    user_id,
+                    secret_hash: vec![62u8; 32],
+                    expires_at: Some(at(3600)),
+                    idempotency: Some(Idempotency { key: String::new() }),
+                    ..Default::default()
+                }),
+            )
             .await
             .expect("create enrolment must still succeed on an empty key");
         });
@@ -1208,13 +1342,16 @@ fn the_enrolment_idempotency_discarded_counter_is_named_the_thing_an_operator_qu
 /// D73's own shape: the first administrator has to exist before anyone can log
 /// in to promote one.
 async fn admin(svc: &IamDb, blind: u8) -> String {
-    svc.create_user(Request::new(CreateUserRequest {
-        external_id_blind_index: vec![blind; 32],
-        external_id_ciphertext: b"encrypted-admin".to_vec(),
-        display_name_ciphertext: b"display".to_vec(),
-        is_admin: true,
-        ..Default::default()
-    }))
+    svc.create_user_as(
+        Some(IAM_CALLER),
+        Request::new(CreateUserRequest {
+            external_id_blind_index: vec![blind; 32],
+            external_id_ciphertext: b"encrypted-admin".to_vec(),
+            display_name_ciphertext: b"display".to_vec(),
+            is_admin: true,
+            ..Default::default()
+        }),
+    )
     .await
     .expect("create an administrator")
     .into_inner()
@@ -1231,13 +1368,16 @@ async fn demand(
     user_id: &str,
     secret: u8,
 ) -> Result<CreateEnrolmentResponse, tonic::Status> {
-    svc.create_enrolment(Request::new(CreateEnrolmentRequest {
-        user_id: user_id.into(),
-        secret_hash: vec![secret; 32],
-        expires_at: Some(at(3600)),
-        require_zero_credential_admin: true,
-        ..Default::default()
-    }))
+    svc.create_enrolment_as(
+        Some(IAM_CALLER),
+        Request::new(CreateEnrolmentRequest {
+            user_id: user_id.into(),
+            secret_hash: vec![secret; 32],
+            expires_at: Some(at(3600)),
+            require_zero_credential_admin: true,
+            ..Default::default()
+        }),
+    )
     .await
     .map(tonic::Response::into_inner)
 }
@@ -1395,20 +1535,26 @@ fn a_revoked_credential_still_refuses_the_bootstrap_demand() {
             let svc = fresh("iam_db_test_demand_revoked").await;
             let user_id = admin(&svc, 123).await;
             let cred = svc
-                .create_credential(Request::new(CreateCredentialRequest {
-                    user_id: user_id.clone(),
-                    token_hash: vec![123u8; 32],
-                    label: "the laptop they no longer have".into(),
-                    ..Default::default()
-                }))
+                .create_credential_as(
+                    Some(IAM_CALLER),
+                    Request::new(CreateCredentialRequest {
+                        user_id: user_id.clone(),
+                        token_hash: vec![123u8; 32],
+                        label: "the laptop they no longer have".into(),
+                        ..Default::default()
+                    }),
+                )
                 .await
                 .expect("create credential")
                 .into_inner()
                 .credential_id;
-            svc.revoke_credential(Request::new(RevokeCredentialRequest {
-                credential_id: cred,
-                ..Default::default()
-            }))
+            svc.revoke_credential_as(
+                Some(IAM_CALLER),
+                Request::new(RevokeCredentialRequest {
+                    credential_id: cred,
+                    ..Default::default()
+                }),
+            )
             .await
             .expect("revoke");
 
@@ -1699,13 +1845,16 @@ async fn a_demand_and_a_redemption_racing_never_enrol_a_person_who_gained_a_pass
             let user_id = user_id.clone();
             tokio::spawn(async move {
                 gate.wait().await;
-                svc.create_enrolment(Request::new(CreateEnrolmentRequest {
-                    user_id,
-                    secret_hash: vec![150 + round; 32],
-                    expires_at: Some(at(3600)),
-                    require_zero_credential_admin: true,
-                    ..Default::default()
-                }))
+                svc.create_enrolment_as(
+                    Some(IAM_CALLER),
+                    Request::new(CreateEnrolmentRequest {
+                        user_id,
+                        secret_hash: vec![150 + round; 32],
+                        expires_at: Some(at(3600)),
+                        require_zero_credential_admin: true,
+                        ..Default::default()
+                    }),
+                )
                 .await
             })
         };
@@ -1714,11 +1863,14 @@ async fn a_demand_and_a_redemption_racing_never_enrol_a_person_who_gained_a_pass
             let gate = std::sync::Arc::clone(&gate);
             tokio::spawn(async move {
                 gate.wait().await;
-                svc.redeem_enrolment(Request::new(RedeemEnrolmentRequest {
-                    secret_hash: vec![live; 32],
-                    argon2id_hash: GOOD_HASH.into(),
-                    idempotency: None,
-                }))
+                svc.redeem_enrolment_as(
+                    Some(IAM_CALLER),
+                    Request::new(RedeemEnrolmentRequest {
+                        secret_hash: vec![live; 32],
+                        argon2id_hash: GOOD_HASH.into(),
+                        idempotency: None,
+                    }),
+                )
                 .await
             })
         };
@@ -1824,10 +1976,13 @@ async fn a_replay_does_not_re_apply_the_password() {
     );
 
     let hash = svc
-        .get_password_hash(Request::new(GetPasswordHashRequest {
-            username_blind_index: vec![40u8; 32],
-            ..Default::default()
-        }))
+        .get_password_hash_as(
+            Some(IAM_CALLER),
+            Request::new(GetPasswordHashRequest {
+                username_blind_index: vec![40u8; 32],
+                ..Default::default()
+            }),
+        )
         .await
         .expect("get hash")
         .into_inner();
@@ -1855,13 +2010,16 @@ async fn a_key_reused_with_a_different_secret_is_refused() {
     redeem(&svc, 41, GOOD_HASH, "key-3").await;
 
     let err = svc
-        .redeem_enrolment(Request::new(RedeemEnrolmentRequest {
-            secret_hash: vec![42u8; 32],
-            argon2id_hash: GOOD_HASH.into(),
-            idempotency: Some(yadgar_iam_db::pb::yadgar::common::v1::Idempotency {
-                key: "key-3".into(),
+        .redeem_enrolment_as(
+            Some(IAM_CALLER),
+            Request::new(RedeemEnrolmentRequest {
+                secret_hash: vec![42u8; 32],
+                argon2id_hash: GOOD_HASH.into(),
+                idempotency: Some(yadgar_iam_db::pb::yadgar::common::v1::Idempotency {
+                    key: "key-3".into(),
+                }),
             }),
-        }))
+        )
         .await
         .expect_err("one key must not cover two different secrets");
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -1946,11 +2104,16 @@ async fn two_simultaneous_deliveries_of_one_key_both_get_the_original_outcome() 
             let key = key.clone();
             deliveries.push(tokio::spawn(async move {
                 gate.wait().await;
-                svc.redeem_enrolment(Request::new(RedeemEnrolmentRequest {
-                    secret_hash: vec![secret; 32],
-                    argon2id_hash: GOOD_HASH.into(),
-                    idempotency: Some(yadgar_iam_db::pb::yadgar::common::v1::Idempotency { key }),
-                }))
+                svc.redeem_enrolment_as(
+                    Some(IAM_CALLER),
+                    Request::new(RedeemEnrolmentRequest {
+                        secret_hash: vec![secret; 32],
+                        argon2id_hash: GOOD_HASH.into(),
+                        idempotency: Some(yadgar_iam_db::pb::yadgar::common::v1::Idempotency {
+                            key,
+                        }),
+                    }),
+                )
                 .await
                 .expect("neither delivery may error")
                 .into_inner()
@@ -2000,11 +2163,14 @@ async fn a_hash_the_column_cannot_hold_is_the_callers_mistake() {
     enrol(&svc, &user_id, 54, 3600).await;
 
     let err = svc
-        .redeem_enrolment(Request::new(RedeemEnrolmentRequest {
-            secret_hash: vec![54u8; 32],
-            argon2id_hash: oversized_hash(),
-            ..Default::default()
-        }))
+        .redeem_enrolment_as(
+            Some(IAM_CALLER),
+            Request::new(RedeemEnrolmentRequest {
+                secret_hash: vec![54u8; 32],
+                argon2id_hash: oversized_hash(),
+                ..Default::default()
+            }),
+        )
         .await
         .expect_err("a hash the column cannot hold must be refused");
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -2027,11 +2193,14 @@ async fn a_hash_the_column_cannot_hold_is_the_callers_mistake() {
 
     // SetPassword writes the same column and must answer the same way.
     let err = svc
-        .set_password(Request::new(SetPasswordRequest {
-            user_id,
-            argon2id_hash: oversized_hash(),
-            ..Default::default()
-        }))
+        .set_password_as(
+            Some(IAM_CALLER),
+            Request::new(SetPasswordRequest {
+                user_id,
+                argon2id_hash: oversized_hash(),
+                ..Default::default()
+            }),
+        )
         .await
         .expect_err("the other writer of that column must refuse it too");
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -2080,68 +2249,86 @@ async fn administrative_writes_refuse_a_person_who_is_not_live() {
     soft_delete(&svc, &user_id).await;
 
     let err = svc
-        .create_credential(Request::new(CreateCredentialRequest {
-            user_id: user_id.clone(),
-            token_hash: vec![54u8; 32],
-            label: "laptop".into(),
-            ..Default::default()
-        }))
+        .create_credential_as(
+            Some(IAM_CALLER),
+            Request::new(CreateCredentialRequest {
+                user_id: user_id.clone(),
+                token_hash: vec![54u8; 32],
+                label: "laptop".into(),
+                ..Default::default()
+            }),
+        )
         .await
         .expect_err("a credential for a removed person is one that authenticates nobody");
     assert_eq!(err.code(), tonic::Code::NotFound);
 
     let err = svc
-        .add_team_member(Request::new(AddTeamMemberRequest {
-            team_id: "yadgar:team:t6".into(),
-            user_id: user_id.clone(),
-            ..Default::default()
-        }))
+        .add_team_member_as(
+            Some(IAM_CALLER),
+            Request::new(AddTeamMemberRequest {
+                team_id: "yadgar:team:t6".into(),
+                user_id: user_id.clone(),
+                ..Default::default()
+            }),
+        )
         .await
         .expect_err("a team granted to a removed person is one no read returns");
     assert_eq!(err.code(), tonic::Code::NotFound);
 
     let err = svc
-        .create_enrolment(Request::new(CreateEnrolmentRequest {
-            user_id: user_id.clone(),
-            secret_hash: vec![55u8; 32],
-            expires_at: Some(at(3600)),
-            ..Default::default()
-        }))
+        .create_enrolment_as(
+            Some(IAM_CALLER),
+            Request::new(CreateEnrolmentRequest {
+                user_id: user_id.clone(),
+                secret_hash: vec![55u8; 32],
+                expires_at: Some(at(3600)),
+                ..Default::default()
+            }),
+        )
         .await
         .expect_err("an enrolment for a removed person is one nobody can ever redeem");
     assert_eq!(err.code(), tonic::Code::NotFound);
 
     let err = svc
-        .set_user_admin(Request::new(SetUserAdminRequest {
-            user_id: user_id.clone(),
-            is_admin: true,
-            ..Default::default()
-        }))
+        .set_user_admin_as(
+            Some(IAM_CALLER),
+            Request::new(SetUserAdminRequest {
+                user_id: user_id.clone(),
+                is_admin: true,
+                ..Default::default()
+            }),
+        )
         .await
         .expect_err("promoting a removed person must not report success");
     assert_eq!(err.code(), tonic::Code::NotFound);
 
     let err = svc
-        .set_rate_limit_override(Request::new(SetRateLimitOverrideRequest {
-            user_id: user_id.clone(),
-            module: "recall".into(),
-            kind: yadgar_iam_db::pb::yadgar::telemetry::v1::Kind::Read as i32,
-            limit: Some(RateLimit {
-                rate: 1.0,
-                burst: 1,
+        .set_rate_limit_override_as(
+            Some(IAM_CALLER),
+            Request::new(SetRateLimitOverrideRequest {
+                user_id: user_id.clone(),
+                module: "recall".into(),
+                kind: yadgar_iam_db::pb::yadgar::telemetry::v1::Kind::Read as i32,
+                limit: Some(RateLimit {
+                    rate: 1.0,
+                    burst: 1,
+                }),
+                ..Default::default()
             }),
-            ..Default::default()
-        }))
+        )
         .await
         .expect_err("a limit on a removed person is one an operator believes is in force");
     assert_eq!(err.code(), tonic::Code::NotFound);
 
     let err = svc
-        .set_password(Request::new(SetPasswordRequest {
-            user_id: user_id.clone(),
-            argon2id_hash: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA".into(),
-            ..Default::default()
-        }))
+        .set_password_as(
+            Some(IAM_CALLER),
+            Request::new(SetPasswordRequest {
+                user_id: user_id.clone(),
+                argon2id_hash: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA".into(),
+                ..Default::default()
+            }),
+        )
         .await
         .expect_err("a password set on a removed person is one no login will ever read");
     assert_eq!(err.code(), tonic::Code::NotFound);
@@ -2267,11 +2454,14 @@ async fn a_soft_delete_landing_mid_call_still_refuses_a_password() {
         &svc,
         Withdraw::User,
         &user,
-        svc.set_password(Request::new(SetPasswordRequest {
-            user_id: user.clone(),
-            argon2id_hash: GOOD_HASH.into(),
-            ..Default::default()
-        })),
+        svc.set_password_as(
+            Some(IAM_CALLER),
+            Request::new(SetPasswordRequest {
+                user_id: user.clone(),
+                argon2id_hash: GOOD_HASH.into(),
+                ..Default::default()
+            }),
+        ),
     )
     .await
     .expect_err("a hash written for a person who left mid-call is one no login reads");
@@ -2300,12 +2490,15 @@ async fn a_soft_delete_landing_mid_call_still_refuses_a_credential() {
         &svc,
         Withdraw::User,
         &user,
-        svc.create_credential(Request::new(CreateCredentialRequest {
-            user_id: user.clone(),
-            token_hash: vec![82u8; 32],
-            label: "laptop".into(),
-            ..Default::default()
-        })),
+        svc.create_credential_as(
+            Some(IAM_CALLER),
+            Request::new(CreateCredentialRequest {
+                user_id: user.clone(),
+                token_hash: vec![82u8; 32],
+                label: "laptop".into(),
+                ..Default::default()
+            }),
+        ),
     )
     .await
     .expect_err("a credential minted mid-delete authenticates nobody for its whole lifetime");
@@ -2334,12 +2527,15 @@ async fn a_soft_delete_landing_mid_call_still_refuses_an_enrolment() {
         &svc,
         Withdraw::User,
         &user,
-        svc.create_enrolment(Request::new(CreateEnrolmentRequest {
-            user_id: user.clone(),
-            secret_hash: vec![83u8; 32],
-            expires_at: Some(at(3600)),
-            ..Default::default()
-        })),
+        svc.create_enrolment_as(
+            Some(IAM_CALLER),
+            Request::new(CreateEnrolmentRequest {
+                user_id: user.clone(),
+                secret_hash: vec![83u8; 32],
+                expires_at: Some(at(3600)),
+                ..Default::default()
+            }),
+        ),
     )
     .await
     .expect_err("an enrolment minted mid-delete is permanently NOT_FOUND on redeem");
@@ -2369,11 +2565,14 @@ async fn a_soft_delete_landing_mid_call_still_refuses_a_membership() {
         &svc,
         Withdraw::User,
         &user,
-        svc.add_team_member(Request::new(AddTeamMemberRequest {
-            team_id: "yadgar:team:race".into(),
-            user_id: user.clone(),
-            ..Default::default()
-        })),
+        svc.add_team_member_as(
+            Some(IAM_CALLER),
+            Request::new(AddTeamMemberRequest {
+                team_id: "yadgar:team:race".into(),
+                user_id: user.clone(),
+                ..Default::default()
+            }),
+        ),
     )
     .await
     .expect_err("a membership granted mid-delete is one ResolveCredential never returns");
@@ -2405,11 +2604,14 @@ async fn a_team_soft_delete_landing_mid_call_still_refuses_a_membership() {
         &svc,
         Withdraw::Team,
         "yadgar:team:racedoomed",
-        svc.add_team_member(Request::new(AddTeamMemberRequest {
-            team_id: "yadgar:team:racedoomed".into(),
-            user_id: user.clone(),
-            ..Default::default()
-        })),
+        svc.add_team_member_as(
+            Some(IAM_CALLER),
+            Request::new(AddTeamMemberRequest {
+                team_id: "yadgar:team:racedoomed".into(),
+                user_id: user.clone(),
+                ..Default::default()
+            }),
+        ),
     )
     .await
     .expect_err("a membership in a team that left mid-call is a grant into nothing");
@@ -2441,16 +2643,19 @@ async fn a_soft_delete_landing_mid_call_still_refuses_a_rate_limit_override() {
         &svc,
         Withdraw::User,
         &user,
-        svc.set_rate_limit_override(Request::new(SetRateLimitOverrideRequest {
-            user_id: user.clone(),
-            module: "recall".into(),
-            kind: yadgar_iam_db::pb::yadgar::telemetry::v1::Kind::Read as i32,
-            limit: Some(RateLimit {
-                rate: 1.0,
-                burst: 1,
+        svc.set_rate_limit_override_as(
+            Some(IAM_CALLER),
+            Request::new(SetRateLimitOverrideRequest {
+                user_id: user.clone(),
+                module: "recall".into(),
+                kind: yadgar_iam_db::pb::yadgar::telemetry::v1::Kind::Read as i32,
+                limit: Some(RateLimit {
+                    rate: 1.0,
+                    burst: 1,
+                }),
+                ..Default::default()
             }),
-            ..Default::default()
-        })),
+        ),
     )
     .await
     .expect_err("a limit stored mid-delete is one an operator believes is in force");
@@ -2502,7 +2707,10 @@ async fn a_team_soft_delete_landing_mid_call_still_refuses_an_inherited_setting_
         &svc,
         Withdraw::Team,
         "yadgar:team:racesetting",
-        svc.set_inherited_setting(Request::new(team_request("yadgar:team:racesetting"))),
+        svc.set_inherited_setting_as(
+            Some(IAM_CALLER),
+            Request::new(team_request("yadgar:team:racesetting")),
+        ),
     )
     .await
     .expect_err("an override stored mid-delete is one an operator believes is in force");
@@ -2575,7 +2783,7 @@ async fn a_team_soft_delete_landing_after_the_idempotency_read_still_refuses_an_
         &svc,
         Withdraw::Team,
         "yadgar:team:racesettingkeyed",
-        svc.set_inherited_setting(Request::new(req)),
+        svc.set_inherited_setting_as(Some(IAM_CALLER), Request::new(req)),
     )
     .await
     .expect_err(
@@ -2613,11 +2821,14 @@ async fn setting_a_password_for_a_user_who_does_not_exist_is_not_found_rather_th
     let svc = fresh("iam_db_test_password_unknown").await;
 
     let err = svc
-        .set_password(Request::new(SetPasswordRequest {
-            user_id: "yadgar:user:never-existed".into(),
-            argon2id_hash: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA".into(),
-            ..Default::default()
-        }))
+        .set_password_as(
+            Some(IAM_CALLER),
+            Request::new(SetPasswordRequest {
+                user_id: "yadgar:user:never-existed".into(),
+                argon2id_hash: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA".into(),
+                ..Default::default()
+            }),
+        )
         .await
         .expect_err("a password for a person who does not exist must not report success");
     assert_eq!(err.code(), tonic::Code::NotFound);
@@ -2645,21 +2856,27 @@ async fn promoting_an_unknown_user_is_not_found_but_re_asserting_a_flag_is_not()
     let (user_id, _cred) = seed(&svc, &[56u8; 32], &[56u8; 32]).await;
 
     let err = svc
-        .set_user_admin(Request::new(SetUserAdminRequest {
-            user_id: "yadgar:user:never-existed".into(),
-            is_admin: true,
-            ..Default::default()
-        }))
+        .set_user_admin_as(
+            Some(IAM_CALLER),
+            Request::new(SetUserAdminRequest {
+                user_id: "yadgar:user:never-existed".into(),
+                is_admin: true,
+                ..Default::default()
+            }),
+        )
         .await
         .expect_err("a mistyped id promotes nobody and must not report success");
     assert_eq!(err.code(), tonic::Code::NotFound);
 
     for _ in 0..2 {
-        svc.set_user_admin(Request::new(SetUserAdminRequest {
-            user_id: user_id.clone(),
-            is_admin: true,
-            ..Default::default()
-        }))
+        svc.set_user_admin_as(
+            Some(IAM_CALLER),
+            Request::new(SetUserAdminRequest {
+                user_id: user_id.clone(),
+                is_admin: true,
+                ..Default::default()
+            }),
+        )
         .await
         .expect("setting the same flag twice must stay idempotent");
     }
@@ -2675,10 +2892,13 @@ async fn a_removed_persons_credentials_stop_being_listed() {
     let (user_id, _cred) = seed(&svc, &[57u8; 32], &[57u8; 32]).await;
 
     let before = svc
-        .list_credentials(Request::new(ListCredentialsRequest {
-            user_id: user_id.clone(),
-            ..Default::default()
-        }))
+        .list_credentials_as(
+            Some(IAM_CALLER),
+            Request::new(ListCredentialsRequest {
+                user_id: user_id.clone(),
+                ..Default::default()
+            }),
+        )
         .await
         .expect("list")
         .into_inner();
@@ -2687,10 +2907,13 @@ async fn a_removed_persons_credentials_stop_being_listed() {
     soft_delete(&svc, &user_id).await;
 
     let after = svc
-        .list_credentials(Request::new(ListCredentialsRequest {
-            user_id,
-            ..Default::default()
-        }))
+        .list_credentials_as(
+            Some(IAM_CALLER),
+            Request::new(ListCredentialsRequest {
+                user_id,
+                ..Default::default()
+            }),
+        )
         .await
         .expect("list")
         .into_inner();
@@ -2713,47 +2936,62 @@ async fn the_admin_flag_travels_with_the_identity() {
     // for a whole cache lifetime at the caller.
     let svc = fresh("iam_db_test_admin").await;
     let user = svc
-        .create_user(Request::new(CreateUserRequest {
-            external_id_blind_index: vec![50u8; 32],
-            external_id_ciphertext: b"c".to_vec(),
-            display_name_ciphertext: b"c".to_vec(),
-            is_admin: true,
-            ..Default::default()
-        }))
+        .create_user_as(
+            Some(IAM_CALLER),
+            Request::new(CreateUserRequest {
+                external_id_blind_index: vec![50u8; 32],
+                external_id_ciphertext: b"c".to_vec(),
+                display_name_ciphertext: b"c".to_vec(),
+                is_admin: true,
+                ..Default::default()
+            }),
+        )
         .await
         .expect("create admin")
         .into_inner();
     let user_id = user.meta.expect("meta").id;
 
-    svc.create_credential(Request::new(CreateCredentialRequest {
-        user_id: user_id.clone(),
-        token_hash: vec![50u8; 32],
-        ..Default::default()
-    }))
+    svc.create_credential_as(
+        Some(IAM_CALLER),
+        Request::new(CreateCredentialRequest {
+            user_id: user_id.clone(),
+            token_hash: vec![50u8; 32],
+            ..Default::default()
+        }),
+    )
     .await
     .expect("create credential");
 
     let before = svc
-        .resolve_credential(Request::new(ResolveCredentialRequest {
-            token_hash: vec![50u8; 32],
-        }))
+        .resolve_credential_as(
+            Some(IAM_CALLER),
+            Request::new(ResolveCredentialRequest {
+                token_hash: vec![50u8; 32],
+            }),
+        )
         .await
         .expect("resolve")
         .into_inner();
     assert!(before.is_admin, "an admin must resolve as one");
 
-    svc.set_user_admin(Request::new(SetUserAdminRequest {
-        user_id,
-        is_admin: false,
-        ..Default::default()
-    }))
+    svc.set_user_admin_as(
+        Some(IAM_CALLER),
+        Request::new(SetUserAdminRequest {
+            user_id,
+            is_admin: false,
+            ..Default::default()
+        }),
+    )
     .await
     .expect("demote");
 
     let after = svc
-        .resolve_credential(Request::new(ResolveCredentialRequest {
-            token_hash: vec![50u8; 32],
-        }))
+        .resolve_credential_as(
+            Some(IAM_CALLER),
+            Request::new(ResolveCredentialRequest {
+                token_hash: vec![50u8; 32],
+            }),
+        )
         .await
         .expect("resolve")
         .into_inner();
@@ -2773,23 +3011,29 @@ async fn clearing_a_rate_limit_override_deletes_it_rather_than_storing_zero() {
 
     let read = yadgar_iam_db::pb::yadgar::telemetry::v1::Kind::Read as i32;
 
-    svc.set_rate_limit_override(Request::new(SetRateLimitOverrideRequest {
-        user_id: user_id.clone(),
-        module: "recall".into(),
-        kind: read,
-        limit: Some(RateLimit {
-            rate: 12.5,
-            burst: 30,
+    svc.set_rate_limit_override_as(
+        Some(IAM_CALLER),
+        Request::new(SetRateLimitOverrideRequest {
+            user_id: user_id.clone(),
+            module: "recall".into(),
+            kind: read,
+            limit: Some(RateLimit {
+                rate: 12.5,
+                burst: 30,
+            }),
+            ..Default::default()
         }),
-        ..Default::default()
-    }))
+    )
     .await
     .expect("set override");
 
     let got = svc
-        .resolve_credential(Request::new(ResolveCredentialRequest {
-            token_hash: vec![51u8; 32],
-        }))
+        .resolve_credential_as(
+            Some(IAM_CALLER),
+            Request::new(ResolveCredentialRequest {
+                token_hash: vec![51u8; 32],
+            }),
+        )
         .await
         .expect("resolve")
         .into_inner();
@@ -2802,20 +3046,26 @@ async fn clearing_a_rate_limit_override_deletes_it_rather_than_storing_zero() {
         })
     );
 
-    svc.set_rate_limit_override(Request::new(SetRateLimitOverrideRequest {
-        user_id: user_id.clone(),
-        module: "recall".into(),
-        kind: read,
-        limit: None,
-        ..Default::default()
-    }))
+    svc.set_rate_limit_override_as(
+        Some(IAM_CALLER),
+        Request::new(SetRateLimitOverrideRequest {
+            user_id: user_id.clone(),
+            module: "recall".into(),
+            kind: read,
+            limit: None,
+            ..Default::default()
+        }),
+    )
     .await
     .expect("clear override");
 
     let after = svc
-        .resolve_credential(Request::new(ResolveCredentialRequest {
-            token_hash: vec![51u8; 32],
-        }))
+        .resolve_credential_as(
+            Some(IAM_CALLER),
+            Request::new(ResolveCredentialRequest {
+                token_hash: vec![51u8; 32],
+            }),
+        )
         .await
         .expect("resolve")
         .into_inner();
@@ -2856,21 +3106,27 @@ async fn re_setting_a_rate_limit_override_replaces_both_columns() {
             burst: 7,
         },
     ] {
-        svc.set_rate_limit_override(Request::new(SetRateLimitOverrideRequest {
-            user_id: user_id.clone(),
-            module: "recall".into(),
-            kind: read,
-            limit: Some(limit),
-            ..Default::default()
-        }))
+        svc.set_rate_limit_override_as(
+            Some(IAM_CALLER),
+            Request::new(SetRateLimitOverrideRequest {
+                user_id: user_id.clone(),
+                module: "recall".into(),
+                kind: read,
+                limit: Some(limit),
+                ..Default::default()
+            }),
+        )
         .await
         .expect("set override");
     }
 
     let got = svc
-        .resolve_credential(Request::new(ResolveCredentialRequest {
-            token_hash: vec![52u8; 32],
-        }))
+        .resolve_credential_as(
+            Some(IAM_CALLER),
+            Request::new(ResolveCredentialRequest {
+                token_hash: vec![52u8; 32],
+            }),
+        )
         .await
         .expect("resolve")
         .into_inner();
@@ -2897,20 +3153,26 @@ async fn listing_credentials_omits_the_revoked_ones() {
     let svc = fresh("iam_db_test_list").await;
     let (user_id, cred_id) = seed(&svc, &[52u8; 32], &[52u8; 32]).await;
 
-    svc.create_credential(Request::new(CreateCredentialRequest {
-        user_id: user_id.clone(),
-        token_hash: vec![53u8; 32],
-        label: "desktop".into(),
-        ..Default::default()
-    }))
+    svc.create_credential_as(
+        Some(IAM_CALLER),
+        Request::new(CreateCredentialRequest {
+            user_id: user_id.clone(),
+            token_hash: vec![53u8; 32],
+            label: "desktop".into(),
+            ..Default::default()
+        }),
+    )
     .await
     .expect("second credential");
 
     let all = svc
-        .list_credentials(Request::new(ListCredentialsRequest {
-            user_id: user_id.clone(),
-            ..Default::default()
-        }))
+        .list_credentials_as(
+            Some(IAM_CALLER),
+            Request::new(ListCredentialsRequest {
+                user_id: user_id.clone(),
+                ..Default::default()
+            }),
+        )
         .await
         .expect("list")
         .into_inner();
@@ -2920,18 +3182,24 @@ async fn listing_credentials_omits_the_revoked_ones() {
         "no row this returns carries a tombstone"
     );
 
-    svc.revoke_credential(Request::new(RevokeCredentialRequest {
-        credential_id: cred_id,
-        ..Default::default()
-    }))
+    svc.revoke_credential_as(
+        Some(IAM_CALLER),
+        Request::new(RevokeCredentialRequest {
+            credential_id: cred_id,
+            ..Default::default()
+        }),
+    )
     .await
     .expect("revoke");
 
     let live = svc
-        .list_credentials(Request::new(ListCredentialsRequest {
-            user_id,
-            ..Default::default()
-        }))
+        .list_credentials_as(
+            Some(IAM_CALLER),
+            Request::new(ListCredentialsRequest {
+                user_id,
+                ..Default::default()
+            }),
+        )
         .await
         .expect("list")
         .into_inner();
@@ -2962,9 +3230,12 @@ async fn the_shipped_default_is_readable_with_the_lock_engaged() {
     seed(&svc, &[60u8; 32], &[60u8; 32]).await;
 
     let got = svc
-        .resolve_credential(Request::new(ResolveCredentialRequest {
-            token_hash: vec![60u8; 32],
-        }))
+        .resolve_credential_as(
+            Some(IAM_CALLER),
+            Request::new(ResolveCredentialRequest {
+                token_hash: vec![60u8; 32],
+            }),
+        )
         .await
         .expect("resolve")
         .into_inner();
@@ -3010,9 +3281,12 @@ async fn every_team_override_comes_back_including_teams_the_caller_is_not_in() {
         .expect("seed override");
 
     let got = svc
-        .resolve_credential(Request::new(ResolveCredentialRequest {
-            token_hash: vec![61u8; 32],
-        }))
+        .resolve_credential_as(
+            Some(IAM_CALLER),
+            Request::new(ResolveCredentialRequest {
+                token_hash: vec![61u8; 32],
+            }),
+        )
         .await
         .expect("resolve")
         .into_inner();
@@ -3063,11 +3337,14 @@ async fn team_ids_and_team_override_answer_different_questions_in_one_resolve() 
         ("yadgar:team:b", &me),
         ("yadgar:team:c", &other),
     ] {
-        svc.add_team_member(Request::new(AddTeamMemberRequest {
-            team_id: team.into(),
-            user_id: user.clone(),
-            ..Default::default()
-        }))
+        svc.add_team_member_as(
+            Some(IAM_CALLER),
+            Request::new(AddTeamMemberRequest {
+                team_id: team.into(),
+                user_id: user.clone(),
+                ..Default::default()
+            }),
+        )
         .await
         .expect("add member");
     }
@@ -3090,9 +3367,12 @@ async fn team_ids_and_team_override_answer_different_questions_in_one_resolve() 
     }
 
     let got = svc
-        .resolve_credential(Request::new(ResolveCredentialRequest {
-            token_hash: vec![71u8; 32],
-        }))
+        .resolve_credential_as(
+            Some(IAM_CALLER),
+            Request::new(ResolveCredentialRequest {
+                token_hash: vec![71u8; 32],
+            }),
+        )
         .await
         .expect("resolve")
         .into_inner();
@@ -3142,9 +3422,12 @@ async fn an_absent_organisation_row_is_unspecified_and_never_off() {
         .expect("delete the organisation's row");
 
     let got = svc
-        .resolve_credential(Request::new(ResolveCredentialRequest {
-            token_hash: vec![62u8; 32],
-        }))
+        .resolve_credential_as(
+            Some(IAM_CALLER),
+            Request::new(ResolveCredentialRequest {
+                token_hash: vec![62u8; 32],
+            }),
+        )
         .await
         .expect("resolve")
         .into_inner();
@@ -3185,9 +3468,12 @@ async fn an_unlocked_organisation_comes_back_verbatim() {
         .expect("store the unlocked arm");
 
     let got = svc
-        .resolve_credential(Request::new(ResolveCredentialRequest {
-            token_hash: vec![63u8; 32],
-        }))
+        .resolve_credential_as(
+            Some(IAM_CALLER),
+            Request::new(ResolveCredentialRequest {
+                token_hash: vec![63u8; 32],
+            }),
+        )
         .await
         .expect("resolve")
         .into_inner();
@@ -3281,7 +3567,7 @@ fn team_request(team_id: &str) -> SetInheritedSettingRequest {
 }
 
 async fn refused(svc: &IamDb, req: SetInheritedSettingRequest) -> tonic::Status {
-    svc.set_inherited_setting(Request::new(req))
+    svc.set_inherited_setting_as(Some(IAM_CALLER), Request::new(req))
         .await
         .expect_err("this request must be refused")
 }
@@ -3295,7 +3581,7 @@ async fn the_organisations_value_and_lock_are_both_written() {
     let svc = fresh("iam_db_test_set_org").await;
 
     let got = svc
-        .set_inherited_setting(Request::new(org_request()))
+        .set_inherited_setting_as(Some(IAM_CALLER), Request::new(org_request()))
         .await
         .expect("write the organisation's level")
         .into_inner();
@@ -3316,11 +3602,14 @@ async fn the_organisations_value_and_lock_are_both_written() {
     // AND BACK, because a lock that can only be cleared is not a lock. The verb
     // states a wanted RESULT, so the reverse write must land the same way.
     let back = svc
-        .set_inherited_setting(Request::new(SetInheritedSettingRequest {
-            value: Some(SettingValue::On as i32),
-            locked: Some(true),
-            ..org_request()
-        }))
+        .set_inherited_setting_as(
+            Some(IAM_CALLER),
+            Request::new(SetInheritedSettingRequest {
+                value: Some(SettingValue::On as i32),
+                locked: Some(true),
+                ..org_request()
+            }),
+        )
         .await
         .expect("state the other value")
         .into_inner()
@@ -3336,7 +3625,10 @@ async fn a_team_override_is_written_and_comes_back_in_the_answer() {
     seed_team(&svc, "yadgar:team:a").await;
 
     let setting = svc
-        .set_inherited_setting(Request::new(team_request("yadgar:team:a")))
+        .set_inherited_setting_as(
+            Some(IAM_CALLER),
+            Request::new(team_request("yadgar:team:a")),
+        )
         .await
         .expect("write one team's override")
         .into_inner()
@@ -3381,10 +3673,13 @@ async fn re_stating_a_team_override_replaces_the_value_and_never_reports_not_fou
         (3, SettingValue::On),
     ] {
         let setting = svc
-            .set_inherited_setting(Request::new(SetInheritedSettingRequest {
-                value: Some(value as i32),
-                ..team_request("yadgar:team:a")
-            }))
+            .set_inherited_setting_as(
+                Some(IAM_CALLER),
+                Request::new(SetInheritedSettingRequest {
+                    value: Some(value as i32),
+                    ..team_request("yadgar:team:a")
+                }),
+            )
             .await
             .unwrap_or_else(|e| panic!("call {n} states an override for a LIVE team: {e:?}"))
             .into_inner()
@@ -3414,17 +3709,23 @@ async fn clearing_a_team_override_deletes_the_row_rather_than_storing_a_value() 
     let svc = fresh("iam_db_test_clear_team").await;
     seed_team(&svc, "yadgar:team:a").await;
 
-    svc.set_inherited_setting(Request::new(team_request("yadgar:team:a")))
-        .await
-        .expect("state an override to withdraw");
+    svc.set_inherited_setting_as(
+        Some(IAM_CALLER),
+        Request::new(team_request("yadgar:team:a")),
+    )
+    .await
+    .expect("state an override to withdraw");
     assert_eq!(overrides_for(&svc, "yadgar:team:a").await, 1);
 
     let setting = svc
-        .set_inherited_setting(Request::new(SetInheritedSettingRequest {
-            value: None,
-            clear: true,
-            ..team_request("yadgar:team:a")
-        }))
+        .set_inherited_setting_as(
+            Some(IAM_CALLER),
+            Request::new(SetInheritedSettingRequest {
+                value: None,
+                clear: true,
+                ..team_request("yadgar:team:a")
+            }),
+        )
         .await
         .expect("withdraw the override")
         .into_inner()
@@ -3452,9 +3753,12 @@ async fn an_absent_value_without_clear_is_refused_rather_than_read_as_a_deletion
     // pass an assertion on the status code alone.
     let svc = fresh("iam_db_test_absent_value").await;
     seed_team(&svc, "yadgar:team:a").await;
-    svc.set_inherited_setting(Request::new(team_request("yadgar:team:a")))
-        .await
-        .expect("state an override");
+    svc.set_inherited_setting_as(
+        Some(IAM_CALLER),
+        Request::new(team_request("yadgar:team:a")),
+    )
+    .await
+    .expect("state an override");
 
     for scope in [SettingScope::Org, SettingScope::Team] {
         let req = match scope {
@@ -3493,9 +3797,12 @@ async fn an_explicitly_unspecified_value_is_a_refusal_and_never_a_withdrawal() {
     // shapes the collapse merges.
     let svc = fresh("iam_db_test_explicit_zero").await;
     seed_team(&svc, "yadgar:team:a").await;
-    svc.set_inherited_setting(Request::new(team_request("yadgar:team:a")))
-        .await
-        .expect("state an override");
+    svc.set_inherited_setting_as(
+        Some(IAM_CALLER),
+        Request::new(team_request("yadgar:team:a")),
+    )
+    .await
+    .expect("state an override");
 
     let req = SetInheritedSettingRequest {
         value: Some(SettingValue::Unspecified as i32),
@@ -3520,11 +3827,14 @@ async fn clearing_an_override_that_is_not_there_succeeds_and_changes_nothing() {
     seed_team(&svc, "yadgar:team:a").await;
 
     let setting = svc
-        .set_inherited_setting(Request::new(SetInheritedSettingRequest {
-            value: None,
-            clear: true,
-            ..team_request("yadgar:team:a")
-        }))
+        .set_inherited_setting_as(
+            Some(IAM_CALLER),
+            Request::new(SetInheritedSettingRequest {
+                value: None,
+                clear: true,
+                ..team_request("yadgar:team:a")
+            }),
+        )
         .await
         .expect("clearing nothing is not an error")
         .into_inner()
@@ -3695,15 +4005,21 @@ async fn the_answer_carries_the_other_level_and_every_other_teams_override() {
     seed_team(&svc, "yadgar:team:a").await;
     seed_team(&svc, "yadgar:team:b").await;
 
-    svc.set_inherited_setting(Request::new(team_request("yadgar:team:a")))
-        .await
-        .expect("team a");
+    svc.set_inherited_setting_as(
+        Some(IAM_CALLER),
+        Request::new(team_request("yadgar:team:a")),
+    )
+    .await
+    .expect("team a");
 
     let setting = svc
-        .set_inherited_setting(Request::new(SetInheritedSettingRequest {
-            value: Some(SettingValue::On as i32),
-            ..team_request("yadgar:team:b")
-        }))
+        .set_inherited_setting_as(
+            Some(IAM_CALLER),
+            Request::new(SetInheritedSettingRequest {
+                value: Some(SettingValue::On as i32),
+                ..team_request("yadgar:team:b")
+            }),
+        )
         .await
         .expect("team b")
         .into_inner()
@@ -3732,21 +4048,30 @@ async fn the_write_is_visible_to_the_read_the_credential_path_makes() {
     seed(&svc, &[70u8; 32], &[70u8; 32]).await;
     seed_team(&svc, "yadgar:team:a").await;
 
-    svc.set_inherited_setting(Request::new(SetInheritedSettingRequest {
-        value: Some(SettingValue::Off as i32),
-        locked: Some(false),
-        ..org_request()
-    }))
+    svc.set_inherited_setting_as(
+        Some(IAM_CALLER),
+        Request::new(SetInheritedSettingRequest {
+            value: Some(SettingValue::Off as i32),
+            locked: Some(false),
+            ..org_request()
+        }),
+    )
     .await
     .expect("organisation");
-    svc.set_inherited_setting(Request::new(team_request("yadgar:team:a")))
-        .await
-        .expect("team");
+    svc.set_inherited_setting_as(
+        Some(IAM_CALLER),
+        Request::new(team_request("yadgar:team:a")),
+    )
+    .await
+    .expect("team");
 
     let got = svc
-        .resolve_credential(Request::new(ResolveCredentialRequest {
-            token_hash: vec![70u8; 32],
-        }))
+        .resolve_credential_as(
+            Some(IAM_CALLER),
+            Request::new(ResolveCredentialRequest {
+                token_hash: vec![70u8; 32],
+            }),
+        )
         .await
         .expect("resolve")
         .into_inner()
@@ -3782,10 +4107,13 @@ async fn an_unverified_actor_changes_what_is_recorded_and_never_what_happens() {
         }),
     ] {
         answers.push(
-            svc.set_inherited_setting(Request::new(SetInheritedSettingRequest {
-                unverified_actor: actor,
-                ..team_request("yadgar:team:a")
-            }))
+            svc.set_inherited_setting_as(
+                Some(IAM_CALLER),
+                Request::new(SetInheritedSettingRequest {
+                    unverified_actor: actor,
+                    ..team_request("yadgar:team:a")
+                }),
+            )
             .await
             .expect("an actor decides nothing, including whether this succeeds")
             .into_inner()
@@ -3816,11 +4144,14 @@ async fn an_override_for_a_team_that_does_not_exist_is_not_found_rather_than_una
     // clear names a row to REMOVE rather than a team to write to, so there is no
     // foreign key to satisfy — and migration 11 leaves the override a
     // soft-deleted team strands to be cleared by exactly this call.
-    svc.set_inherited_setting(Request::new(SetInheritedSettingRequest {
-        value: None,
-        clear: true,
-        ..team_request("yadgar:team:never-created")
-    }))
+    svc.set_inherited_setting_as(
+        Some(IAM_CALLER),
+        Request::new(SetInheritedSettingRequest {
+            value: None,
+            clear: true,
+            ..team_request("yadgar:team:never-created")
+        }),
+    )
     .await
     .expect("clearing an override for a team that is gone is not an error");
 }
@@ -3866,9 +4197,12 @@ async fn a_replayed_key_re_derives_the_setting_and_writes_nothing() {
     // put OFF back.
     let svc = fresh("iam_db_test_setting_replay").await;
 
-    svc.set_inherited_setting(Request::new(keyed("k-replay", org_request())))
-        .await
-        .expect("the first delivery");
+    svc.set_inherited_setting_as(
+        Some(IAM_CALLER),
+        Request::new(keyed("k-replay", org_request())),
+    )
+    .await
+    .expect("the first delivery");
     assert_eq!(org_value(&svc).await, SettingValue::Off as i32);
 
     sqlx::query("UPDATE iam_org_setting SET value = ? WHERE name = ?")
@@ -3879,7 +4213,10 @@ async fn a_replayed_key_re_derives_the_setting_and_writes_nothing() {
         .expect("somebody else changes the level");
 
     let setting = svc
-        .set_inherited_setting(Request::new(keyed("k-replay", org_request())))
+        .set_inherited_setting_as(
+            Some(IAM_CALLER),
+            Request::new(keyed("k-replay", org_request())),
+        )
         .await
         .expect("a replayed key is not an error")
         .into_inner()
@@ -3911,9 +4248,12 @@ async fn a_key_reused_with_a_different_request_is_refused_rather_than_replayed()
     seed_team(&svc, "yadgar:team:a").await;
     seed_team(&svc, "yadgar:team:b").await;
 
-    svc.set_inherited_setting(Request::new(keyed("k-diff", team_request("yadgar:team:a"))))
-        .await
-        .expect("the first delivery");
+    svc.set_inherited_setting_as(
+        Some(IAM_CALLER),
+        Request::new(keyed("k-diff", team_request("yadgar:team:a"))),
+    )
+    .await
+    .expect("the first delivery");
 
     let differing = [
         (
@@ -3949,7 +4289,7 @@ async fn a_key_reused_with_a_different_request_is_refused_rather_than_replayed()
 
     for (what, req) in differing {
         let refusal = svc
-            .set_inherited_setting(Request::new(keyed("k-diff", req)))
+            .set_inherited_setting_as(Some(IAM_CALLER), Request::new(keyed("k-diff", req)))
             .await
             .expect_err(&format!(
                 "a key reused with a different {what} must be refused"
@@ -3980,27 +4320,33 @@ async fn an_unverified_actor_is_never_part_of_the_payload_comparison() {
     let svc = fresh("iam_db_test_setting_actor_key").await;
     seed_team(&svc, "yadgar:team:a").await;
 
-    svc.set_inherited_setting(Request::new(keyed(
-        "k-actor",
-        SetInheritedSettingRequest {
-            unverified_actor: Some(UnverifiedActor {
-                user_id: "yadgar:user:first".into(),
-            }),
-            ..team_request("yadgar:team:a")
-        },
-    )))
+    svc.set_inherited_setting_as(
+        Some(IAM_CALLER),
+        Request::new(keyed(
+            "k-actor",
+            SetInheritedSettingRequest {
+                unverified_actor: Some(UnverifiedActor {
+                    user_id: "yadgar:user:first".into(),
+                }),
+                ..team_request("yadgar:team:a")
+            },
+        )),
+    )
     .await
     .expect("the first administrator");
 
-    svc.set_inherited_setting(Request::new(keyed(
-        "k-actor",
-        SetInheritedSettingRequest {
-            unverified_actor: Some(UnverifiedActor {
-                user_id: "yadgar:user:second".into(),
-            }),
-            ..team_request("yadgar:team:a")
-        },
-    )))
+    svc.set_inherited_setting_as(
+        Some(IAM_CALLER),
+        Request::new(keyed(
+            "k-actor",
+            SetInheritedSettingRequest {
+                unverified_actor: Some(UnverifiedActor {
+                    user_id: "yadgar:user:second".into(),
+                }),
+                ..team_request("yadgar:team:a")
+            },
+        )),
+    )
     .await
     .expect("a second administrator retrying the SAME operation must not be refused");
 }
@@ -4013,13 +4359,19 @@ async fn an_empty_key_is_no_idempotency_at_all_for_a_setting_write() {
     let svc = fresh("iam_db_test_setting_empty_key").await;
     seed_team(&svc, "yadgar:team:a").await;
 
-    svc.set_inherited_setting(Request::new(team_request("yadgar:team:a")))
-        .await
-        .expect("the first unkeyed write");
-    svc.set_inherited_setting(Request::new(SetInheritedSettingRequest {
-        value: Some(SettingValue::On as i32),
-        ..team_request("yadgar:team:a")
-    }))
+    svc.set_inherited_setting_as(
+        Some(IAM_CALLER),
+        Request::new(team_request("yadgar:team:a")),
+    )
+    .await
+    .expect("the first unkeyed write");
+    svc.set_inherited_setting_as(
+        Some(IAM_CALLER),
+        Request::new(SetInheritedSettingRequest {
+            value: Some(SettingValue::On as i32),
+            ..team_request("yadgar:team:a")
+        }),
+    )
     .await
     .expect("an unkeyed write must never be read as a replay of an unrelated one");
 
@@ -4055,9 +4407,12 @@ async fn a_refused_request_records_no_claim() {
         "a refusal leaves no ledger row, no row and no key spent"
     );
 
-    svc.set_inherited_setting(Request::new(keyed("k-refused", org_request())))
-        .await
-        .expect("the corrected request may reuse the key it never spent");
+    svc.set_inherited_setting_as(
+        Some(IAM_CALLER),
+        Request::new(keyed("k-refused", org_request())),
+    )
+    .await
+    .expect("the corrected request may reuse the key it never spent");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4095,13 +4450,16 @@ async fn two_simultaneous_deliveries_of_one_setting_key_agree() {
             let key = key.clone();
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;
-                svc.set_inherited_setting(Request::new(keyed(
-                    &key,
-                    SetInheritedSettingRequest {
-                        value: Some(value as i32),
-                        ..team_request("yadgar:team:a")
-                    },
-                )))
+                svc.set_inherited_setting_as(
+                    Some(IAM_CALLER),
+                    Request::new(keyed(
+                        &key,
+                        SetInheritedSettingRequest {
+                            value: Some(value as i32),
+                            ..team_request("yadgar:team:a")
+                        },
+                    )),
+                )
                 .await
                 .map(|r| r.into_inner())
             }));
@@ -4237,15 +4595,18 @@ async fn create_user_records_the_actor_that_asked_for_the_person_to_exist() {
     let (created, log) = {
         let (_guard, buf) = capturing();
         let created = svc
-            .create_user(Request::new(CreateUserRequest {
-                external_id_blind_index: vec![71u8; 32],
-                external_id_ciphertext: b"ciphertext".to_vec(),
-                display_name_ciphertext: b"ciphertext".to_vec(),
-                unverified_actor: Some(UnverifiedActor {
-                    user_id: "yadgar:user:actor-one".into(),
+            .create_user_as(
+                Some(IAM_CALLER),
+                Request::new(CreateUserRequest {
+                    external_id_blind_index: vec![71u8; 32],
+                    external_id_ciphertext: b"ciphertext".to_vec(),
+                    display_name_ciphertext: b"ciphertext".to_vec(),
+                    unverified_actor: Some(UnverifiedActor {
+                        user_id: "yadgar:user:actor-one".into(),
+                    }),
+                    ..Default::default()
                 }),
-                ..Default::default()
-            }))
+            )
             .await
             .expect("create user")
             .into_inner();
@@ -4279,13 +4640,16 @@ async fn create_user_without_a_usable_actor_records_it_as_unattributed() {
     {
         let log = {
             let (_guard, buf) = capturing();
-            svc.create_user(Request::new(CreateUserRequest {
-                external_id_blind_index: vec![80u8 + i as u8; 32],
-                external_id_ciphertext: b"ciphertext".to_vec(),
-                display_name_ciphertext: b"ciphertext".to_vec(),
-                unverified_actor: actor,
-                ..Default::default()
-            }))
+            svc.create_user_as(
+                Some(IAM_CALLER),
+                Request::new(CreateUserRequest {
+                    external_id_blind_index: vec![80u8 + i as u8; 32],
+                    external_id_ciphertext: b"ciphertext".to_vec(),
+                    display_name_ciphertext: b"ciphertext".to_vec(),
+                    unverified_actor: actor,
+                    ..Default::default()
+                }),
+            )
             .await
             .expect("an actor decides nothing, including whether this succeeds");
             rendered(&buf)
@@ -4309,15 +4673,18 @@ async fn create_enrolment_records_the_actor_and_never_the_person_enrolled() {
 
     let log = {
         let (_guard, buf) = capturing();
-        svc.create_enrolment(Request::new(CreateEnrolmentRequest {
-            user_id: target.clone(),
-            secret_hash: vec![23u8; 32],
-            expires_at: Some(at(3600)),
-            unverified_actor: Some(UnverifiedActor {
-                user_id: "yadgar:user:actor-two".into(),
+        svc.create_enrolment_as(
+            Some(IAM_CALLER),
+            Request::new(CreateEnrolmentRequest {
+                user_id: target.clone(),
+                secret_hash: vec![23u8; 32],
+                expires_at: Some(at(3600)),
+                unverified_actor: Some(UnverifiedActor {
+                    user_id: "yadgar:user:actor-two".into(),
+                }),
+                ..Default::default()
             }),
-            ..Default::default()
-        }))
+        )
         .await
         .expect("create enrolment");
         rendered(&buf)
@@ -4352,13 +4719,16 @@ async fn create_enrolment_without_a_usable_actor_records_it_as_unattributed() {
     {
         let log = {
             let (_guard, buf) = capturing();
-            svc.create_enrolment(Request::new(CreateEnrolmentRequest {
-                user_id: target.clone(),
-                secret_hash: vec![26u8 + i as u8; 32],
-                expires_at: Some(at(3600)),
-                unverified_actor: actor,
-                ..Default::default()
-            }))
+            svc.create_enrolment_as(
+                Some(IAM_CALLER),
+                Request::new(CreateEnrolmentRequest {
+                    user_id: target.clone(),
+                    secret_hash: vec![26u8 + i as u8; 32],
+                    expires_at: Some(at(3600)),
+                    unverified_actor: actor,
+                    ..Default::default()
+                }),
+            )
             .await
             .expect("an actor decides nothing, including whether this succeeds");
             rendered(&buf)
@@ -4385,14 +4755,17 @@ async fn set_user_admin_records_the_actor_and_never_the_person_promoted() {
 
     let log = {
         let (_guard, buf) = capturing();
-        svc.set_user_admin(Request::new(SetUserAdminRequest {
-            user_id: target.clone(),
-            is_admin: true,
-            unverified_actor: Some(UnverifiedActor {
-                user_id: "yadgar:user:actor-three".into(),
+        svc.set_user_admin_as(
+            Some(IAM_CALLER),
+            Request::new(SetUserAdminRequest {
+                user_id: target.clone(),
+                is_admin: true,
+                unverified_actor: Some(UnverifiedActor {
+                    user_id: "yadgar:user:actor-three".into(),
+                }),
+                ..Default::default()
             }),
-            ..Default::default()
-        }))
+        )
         .await
         .expect("promote");
         rendered(&buf)
@@ -4423,12 +4796,15 @@ async fn set_user_admin_without_a_usable_actor_records_it_as_unattributed() {
     {
         let log = {
             let (_guard, buf) = capturing();
-            svc.set_user_admin(Request::new(SetUserAdminRequest {
-                user_id: target.clone(),
-                is_admin: true,
-                unverified_actor: actor,
-                ..Default::default()
-            }))
+            svc.set_user_admin_as(
+                Some(IAM_CALLER),
+                Request::new(SetUserAdminRequest {
+                    user_id: target.clone(),
+                    is_admin: true,
+                    unverified_actor: actor,
+                    ..Default::default()
+                }),
+            )
             .await
             .expect("an actor decides nothing, including whether this succeeds");
             rendered(&buf)
@@ -4506,13 +4882,16 @@ async fn create_credential_records_the_actor_and_names_the_holder_and_the_creden
     let (minted, log) = {
         let (_guard, buf) = capturing();
         let minted = svc
-            .create_credential(Request::new(CreateCredentialRequest {
-                user_id: holder.clone(),
-                token_hash: vec![43u8; 32],
-                label: "laptop".into(),
-                unverified_actor: actor("yadgar:user:actor-four"),
-                ..Default::default()
-            }))
+            .create_credential_as(
+                Some(IAM_CALLER),
+                Request::new(CreateCredentialRequest {
+                    user_id: holder.clone(),
+                    token_hash: vec![43u8; 32],
+                    label: "laptop".into(),
+                    unverified_actor: actor("yadgar:user:actor-four"),
+                    ..Default::default()
+                }),
+            )
             .await
             .expect("create credential")
             .into_inner();
@@ -4551,14 +4930,17 @@ async fn create_credential_without_a_usable_actor_records_it_as_unattributed() {
     {
         let log = {
             let (_guard, buf) = capturing();
-            svc.create_credential(Request::new(CreateCredentialRequest {
-                user_id: holder.clone(),
-                // FRESH per round: `uq_iam_credential_token` refuses a repeat.
-                token_hash: vec![46u8 + i as u8; 32],
-                label: "laptop".into(),
-                unverified_actor,
-                ..Default::default()
-            }))
+            svc.create_credential_as(
+                Some(IAM_CALLER),
+                Request::new(CreateCredentialRequest {
+                    user_id: holder.clone(),
+                    // FRESH per round: `uq_iam_credential_token` refuses a repeat.
+                    token_hash: vec![46u8 + i as u8; 32],
+                    label: "laptop".into(),
+                    unverified_actor,
+                    ..Default::default()
+                }),
+            )
             .await
             .expect("an actor decides nothing, including whether this succeeds");
             rendered(&buf)
@@ -4574,11 +4956,14 @@ async fn revoke_credential_records_the_actor_and_names_the_credential() {
 
     let log = {
         let (_guard, buf) = capturing();
-        svc.revoke_credential(Request::new(RevokeCredentialRequest {
-            credential_id: credential.clone(),
-            unverified_actor: actor("yadgar:user:actor-five"),
-            ..Default::default()
-        }))
+        svc.revoke_credential_as(
+            Some(IAM_CALLER),
+            Request::new(RevokeCredentialRequest {
+                credential_id: credential.clone(),
+                unverified_actor: actor("yadgar:user:actor-five"),
+                ..Default::default()
+            }),
+        )
         .await
         .expect("revoke");
         rendered(&buf)
@@ -4606,11 +4991,14 @@ async fn revoke_credential_without_a_usable_actor_records_it_as_unattributed() {
     {
         let log = {
             let (_guard, buf) = capturing();
-            svc.revoke_credential(Request::new(RevokeCredentialRequest {
-                credential_id: credential.clone(),
-                unverified_actor,
-                ..Default::default()
-            }))
+            svc.revoke_credential_as(
+                Some(IAM_CALLER),
+                Request::new(RevokeCredentialRequest {
+                    credential_id: credential.clone(),
+                    unverified_actor,
+                    ..Default::default()
+                }),
+            )
             .await
             .expect("an actor decides nothing, including whether this succeeds");
             rendered(&buf)
@@ -4650,11 +5038,14 @@ async fn set_rate_limit_override_records_the_actor_and_names_the_bucket() {
     ] {
         let log = {
             let (_guard, buf) = capturing();
-            svc.set_rate_limit_override(Request::new(SetRateLimitOverrideRequest {
-                limit,
-                unverified_actor: actor("yadgar:user:actor-six"),
-                ..rate_limit_request(&person)
-            }))
+            svc.set_rate_limit_override_as(
+                Some(IAM_CALLER),
+                Request::new(SetRateLimitOverrideRequest {
+                    limit,
+                    unverified_actor: actor("yadgar:user:actor-six"),
+                    ..rate_limit_request(&person)
+                }),
+            )
             .await
             .expect("set or clear the override");
             rendered(&buf)
@@ -4682,10 +5073,13 @@ async fn set_rate_limit_override_without_a_usable_actor_records_it_as_unattribut
     {
         let log = {
             let (_guard, buf) = capturing();
-            svc.set_rate_limit_override(Request::new(SetRateLimitOverrideRequest {
-                unverified_actor,
-                ..rate_limit_request(&person)
-            }))
+            svc.set_rate_limit_override_as(
+                Some(IAM_CALLER),
+                Request::new(SetRateLimitOverrideRequest {
+                    unverified_actor,
+                    ..rate_limit_request(&person)
+                }),
+            )
             .await
             .expect("an actor decides nothing, including whether this succeeds");
             rendered(&buf)
@@ -4702,12 +5096,15 @@ async fn add_team_member_records_the_actor_and_names_the_team_and_the_person() {
 
     let log = {
         let (_guard, buf) = capturing();
-        svc.add_team_member(Request::new(AddTeamMemberRequest {
-            team_id: "yadgar:team:a".into(),
-            user_id: person.clone(),
-            unverified_actor: actor("yadgar:user:actor-seven"),
-            ..Default::default()
-        }))
+        svc.add_team_member_as(
+            Some(IAM_CALLER),
+            Request::new(AddTeamMemberRequest {
+                team_id: "yadgar:team:a".into(),
+                user_id: person.clone(),
+                unverified_actor: actor("yadgar:user:actor-seven"),
+                ..Default::default()
+            }),
+        )
         .await
         .expect("add member");
         rendered(&buf)
@@ -4737,12 +5134,15 @@ async fn add_team_member_without_a_usable_actor_records_it_as_unattributed() {
     {
         let log = {
             let (_guard, buf) = capturing();
-            svc.add_team_member(Request::new(AddTeamMemberRequest {
-                team_id: "yadgar:team:a".into(),
-                user_id: person.clone(),
-                unverified_actor,
-                ..Default::default()
-            }))
+            svc.add_team_member_as(
+                Some(IAM_CALLER),
+                Request::new(AddTeamMemberRequest {
+                    team_id: "yadgar:team:a".into(),
+                    user_id: person.clone(),
+                    unverified_actor,
+                    ..Default::default()
+                }),
+            )
             .await
             .expect("an actor decides nothing, including whether this succeeds");
             rendered(&buf)
@@ -4756,22 +5156,28 @@ async fn remove_team_member_records_the_actor_and_names_the_team_and_the_person(
     let svc = fresh("iam_db_test_actor_remove_member").await;
     let (person, _) = seed(&svc, &[65u8; 32], &[66u8; 32]).await;
     seed_team(&svc, "yadgar:team:a").await;
-    svc.add_team_member(Request::new(AddTeamMemberRequest {
-        team_id: "yadgar:team:a".into(),
-        user_id: person.clone(),
-        ..Default::default()
-    }))
+    svc.add_team_member_as(
+        Some(IAM_CALLER),
+        Request::new(AddTeamMemberRequest {
+            team_id: "yadgar:team:a".into(),
+            user_id: person.clone(),
+            ..Default::default()
+        }),
+    )
     .await
     .expect("add member");
 
     let log = {
         let (_guard, buf) = capturing();
-        svc.remove_team_member(Request::new(RemoveTeamMemberRequest {
-            team_id: "yadgar:team:a".into(),
-            user_id: person.clone(),
-            unverified_actor: actor("yadgar:user:actor-eight"),
-            ..Default::default()
-        }))
+        svc.remove_team_member_as(
+            Some(IAM_CALLER),
+            Request::new(RemoveTeamMemberRequest {
+                team_id: "yadgar:team:a".into(),
+                user_id: person.clone(),
+                unverified_actor: actor("yadgar:user:actor-eight"),
+                ..Default::default()
+            }),
+        )
         .await
         .expect("remove member");
         rendered(&buf)
@@ -4792,11 +5198,14 @@ async fn remove_team_member_without_a_usable_actor_records_it_as_unattributed() 
     let svc = fresh("iam_db_test_actor_remove_member_none").await;
     let (person, _) = seed(&svc, &[67u8; 32], &[68u8; 32]).await;
     seed_team(&svc, "yadgar:team:a").await;
-    svc.add_team_member(Request::new(AddTeamMemberRequest {
-        team_id: "yadgar:team:a".into(),
-        user_id: person.clone(),
-        ..Default::default()
-    }))
+    svc.add_team_member_as(
+        Some(IAM_CALLER),
+        Request::new(AddTeamMemberRequest {
+            team_id: "yadgar:team:a".into(),
+            user_id: person.clone(),
+            ..Default::default()
+        }),
+    )
     .await
     .expect("add member");
 
@@ -4808,12 +5217,15 @@ async fn remove_team_member_without_a_usable_actor_records_it_as_unattributed() 
     {
         let log = {
             let (_guard, buf) = capturing();
-            svc.remove_team_member(Request::new(RemoveTeamMemberRequest {
-                team_id: "yadgar:team:a".into(),
-                user_id: person.clone(),
-                unverified_actor,
-                ..Default::default()
-            }))
+            svc.remove_team_member_as(
+                Some(IAM_CALLER),
+                Request::new(RemoveTeamMemberRequest {
+                    team_id: "yadgar:team:a".into(),
+                    user_id: person.clone(),
+                    unverified_actor,
+                    ..Default::default()
+                }),
+            )
             .await
             .expect("an actor decides nothing, including whether this succeeds");
             rendered(&buf)
@@ -4842,10 +5254,13 @@ async fn set_inherited_setting_records_the_actor_and_names_the_level_it_writes()
     ] {
         let log = {
             let (_guard, buf) = capturing();
-            svc.set_inherited_setting(Request::new(SetInheritedSettingRequest {
-                unverified_actor: actor("yadgar:user:actor-nine"),
-                ..req
-            }))
+            svc.set_inherited_setting_as(
+                Some(IAM_CALLER),
+                Request::new(SetInheritedSettingRequest {
+                    unverified_actor: actor("yadgar:user:actor-nine"),
+                    ..req
+                }),
+            )
             .await
             .expect("write one level");
             rendered(&buf)
@@ -4871,10 +5286,13 @@ async fn set_inherited_setting_without_a_usable_actor_records_it_as_unattributed
     {
         let log = {
             let (_guard, buf) = capturing();
-            svc.set_inherited_setting(Request::new(SetInheritedSettingRequest {
-                unverified_actor,
-                ..team_request("yadgar:team:a")
-            }))
+            svc.set_inherited_setting_as(
+                Some(IAM_CALLER),
+                Request::new(SetInheritedSettingRequest {
+                    unverified_actor,
+                    ..team_request("yadgar:team:a")
+                }),
+            )
             .await
             .expect("an actor decides nothing, including whether this succeeds");
             rendered(&buf)
@@ -4962,120 +5380,150 @@ async fn every_actor_record_carries_the_request_id_of_its_call() {
 
     check!(
         "CreateUser",
-        svc.create_user(with_request_id(
-            CreateUserRequest {
-                external_id_blind_index: vec![93u8; 32],
-                external_id_ciphertext: b"ciphertext".to_vec(),
-                display_name_ciphertext: b"ciphertext".to_vec(),
-                unverified_actor: who.clone(),
-                ..Default::default()
-            },
-            "rid-CreateUser",
-        ))
+        svc.create_user_as(
+            Some(IAM_CALLER),
+            with_request_id(
+                CreateUserRequest {
+                    external_id_blind_index: vec![93u8; 32],
+                    external_id_ciphertext: b"ciphertext".to_vec(),
+                    display_name_ciphertext: b"ciphertext".to_vec(),
+                    unverified_actor: who.clone(),
+                    ..Default::default()
+                },
+                "rid-CreateUser",
+            )
+        )
     );
     check!(
         "CreateEnrolment",
-        svc.create_enrolment(with_request_id(
-            CreateEnrolmentRequest {
-                user_id: person.clone(),
-                secret_hash: vec![94u8; 32],
-                expires_at: Some(at(3600)),
-                unverified_actor: who.clone(),
-                ..Default::default()
-            },
-            "rid-CreateEnrolment",
-        ))
+        svc.create_enrolment_as(
+            Some(IAM_CALLER),
+            with_request_id(
+                CreateEnrolmentRequest {
+                    user_id: person.clone(),
+                    secret_hash: vec![94u8; 32],
+                    expires_at: Some(at(3600)),
+                    unverified_actor: who.clone(),
+                    ..Default::default()
+                },
+                "rid-CreateEnrolment",
+            )
+        )
     );
     check!(
         "SetUserAdmin",
-        svc.set_user_admin(with_request_id(
-            SetUserAdminRequest {
-                user_id: person.clone(),
-                is_admin: true,
-                unverified_actor: who.clone(),
-                ..Default::default()
-            },
-            "rid-SetUserAdmin",
-        ))
+        svc.set_user_admin_as(
+            Some(IAM_CALLER),
+            with_request_id(
+                SetUserAdminRequest {
+                    user_id: person.clone(),
+                    is_admin: true,
+                    unverified_actor: who.clone(),
+                    ..Default::default()
+                },
+                "rid-SetUserAdmin",
+            )
+        )
     );
     check!(
         "CreateCredential",
-        svc.create_credential(with_request_id(
-            CreateCredentialRequest {
-                user_id: person.clone(),
-                token_hash: vec![95u8; 32],
-                label: "laptop".into(),
-                unverified_actor: who.clone(),
-                ..Default::default()
-            },
-            "rid-CreateCredential",
-        ))
+        svc.create_credential_as(
+            Some(IAM_CALLER),
+            with_request_id(
+                CreateCredentialRequest {
+                    user_id: person.clone(),
+                    token_hash: vec![95u8; 32],
+                    label: "laptop".into(),
+                    unverified_actor: who.clone(),
+                    ..Default::default()
+                },
+                "rid-CreateCredential",
+            )
+        )
     );
     check!(
         "RevokeCredential",
-        svc.revoke_credential(with_request_id(
-            RevokeCredentialRequest {
-                credential_id: credential.clone(),
-                unverified_actor: who.clone(),
-                ..Default::default()
-            },
-            "rid-RevokeCredential",
-        ))
+        svc.revoke_credential_as(
+            Some(IAM_CALLER),
+            with_request_id(
+                RevokeCredentialRequest {
+                    credential_id: credential.clone(),
+                    unverified_actor: who.clone(),
+                    ..Default::default()
+                },
+                "rid-RevokeCredential",
+            )
+        )
     );
     check!(
         "SetRateLimitOverride",
-        svc.set_rate_limit_override(with_request_id(
-            SetRateLimitOverrideRequest {
-                unverified_actor: who.clone(),
-                ..rate_limit_request(&person)
-            },
-            "rid-SetRateLimitOverride",
-        ))
+        svc.set_rate_limit_override_as(
+            Some(IAM_CALLER),
+            with_request_id(
+                SetRateLimitOverrideRequest {
+                    unverified_actor: who.clone(),
+                    ..rate_limit_request(&person)
+                },
+                "rid-SetRateLimitOverride",
+            )
+        )
     );
     check!(
         "AddTeamMember",
-        svc.add_team_member(with_request_id(
-            AddTeamMemberRequest {
-                team_id: "yadgar:team:a".into(),
-                user_id: person.clone(),
-                unverified_actor: who.clone(),
-                ..Default::default()
-            },
-            "rid-AddTeamMember",
-        ))
+        svc.add_team_member_as(
+            Some(IAM_CALLER),
+            with_request_id(
+                AddTeamMemberRequest {
+                    team_id: "yadgar:team:a".into(),
+                    user_id: person.clone(),
+                    unverified_actor: who.clone(),
+                    ..Default::default()
+                },
+                "rid-AddTeamMember",
+            )
+        )
     );
     check!(
         "RemoveTeamMember",
-        svc.remove_team_member(with_request_id(
-            RemoveTeamMemberRequest {
-                team_id: "yadgar:team:a".into(),
-                user_id: person.clone(),
-                unverified_actor: who.clone(),
-                ..Default::default()
-            },
-            "rid-RemoveTeamMember",
-        ))
+        svc.remove_team_member_as(
+            Some(IAM_CALLER),
+            with_request_id(
+                RemoveTeamMemberRequest {
+                    team_id: "yadgar:team:a".into(),
+                    user_id: person.clone(),
+                    unverified_actor: who.clone(),
+                    ..Default::default()
+                },
+                "rid-RemoveTeamMember",
+            )
+        )
     );
     check!(
         "RevokeAllCredentials",
-        svc.revoke_all_credentials(with_request_id(
-            RevokeAllCredentialsRequest {
-                user_id: person.clone(),
-                unverified_actor: who.clone(),
-                ..Default::default()
-            },
-            "rid-RevokeAllCredentials",
-        ))
+        svc.revoke_all_credentials_as(
+            Some(IAM_CALLER),
+            with_request_id(
+                RevokeAllCredentialsRequest {
+                    user_id: person.clone(),
+                    unverified_actor: who.clone(),
+                    ..Default::default()
+                },
+                "rid-RevokeAllCredentials",
+            )
+        )
     );
     check!(
         "SetInheritedSetting",
-        svc.set_inherited_setting(with_request_id(
-            SetInheritedSettingRequest {
-                unverified_actor: who.clone(),
-                ..team_request("yadgar:team:a")
-            },
-            "rid-SetInheritedSetting",
-        ))
+        svc.set_inherited_setting_as(
+            Some(IAM_CALLER),
+            with_request_id(
+                SetInheritedSettingRequest {
+                    unverified_actor: who.clone(),
+                    ..team_request("yadgar:team:a")
+                },
+                "rid-SetInheritedSetting",
+            )
+        )
     );
 }
 
@@ -5090,16 +5538,19 @@ async fn an_actor_record_is_written_for_an_attempt_the_store_refuses() {
     let log = {
         let (_guard, buf) = capturing();
         let err = svc
-            .create_credential(with_request_id(
-                CreateCredentialRequest {
-                    user_id: "yadgar:user:nobody".into(),
-                    token_hash: vec![96u8; 32],
-                    label: "laptop".into(),
-                    unverified_actor: actor("yadgar:user:actor-eleven"),
-                    ..Default::default()
-                },
-                "rid-refused",
-            ))
+            .create_credential_as(
+                Some(IAM_CALLER),
+                with_request_id(
+                    CreateCredentialRequest {
+                        user_id: "yadgar:user:nobody".into(),
+                        token_hash: vec![96u8; 32],
+                        label: "laptop".into(),
+                        unverified_actor: actor("yadgar:user:actor-eleven"),
+                        ..Default::default()
+                    },
+                    "rid-refused",
+                ),
+            )
             .await
             .expect_err("no such person");
         assert_eq!(err.code(), tonic::Code::NotFound);
@@ -5128,11 +5579,14 @@ async fn a_caller_supplied_segment_is_escaped_so_a_target_cannot_be_forged() {
             // The outcome is not this test's subject: the line records the
             // attempt whatever the store then does with the module.
             let _ = svc
-                .set_rate_limit_override(Request::new(SetRateLimitOverrideRequest {
-                    module: module.into(),
-                    unverified_actor: actor("yadgar:user:actor-twelve"),
-                    ..rate_limit_request(&person)
-                }))
+                .set_rate_limit_override_as(
+                    Some(IAM_CALLER),
+                    Request::new(SetRateLimitOverrideRequest {
+                        module: module.into(),
+                        unverified_actor: actor("yadgar:user:actor-twelve"),
+                        ..rate_limit_request(&person)
+                    }),
+                )
                 .await;
             rendered(&buf)
         };
@@ -5157,11 +5611,14 @@ async fn a_caller_supplied_string_reaches_the_actor_record_capped() {
     let log = {
         let (_guard, buf) = capturing();
         let _ = svc
-            .set_rate_limit_override(Request::new(SetRateLimitOverrideRequest {
-                module: long_module,
-                unverified_actor: actor(&long_actor),
-                ..rate_limit_request(&person)
-            }))
+            .set_rate_limit_override_as(
+                Some(IAM_CALLER),
+                Request::new(SetRateLimitOverrideRequest {
+                    module: long_module,
+                    unverified_actor: actor(&long_actor),
+                    ..rate_limit_request(&person)
+                }),
+            )
             .await;
         rendered(&buf)
     };
@@ -5205,16 +5662,19 @@ async fn a_long_request_id_is_capped_identically_on_the_actor_line_and_the_call_
         let (_guard, buf) = capturing();
         let _sink_guard = record::set_sink(std::sync::Arc::new(records.clone()));
         let _ = svc
-            .create_user(with_request_id(
-                CreateUserRequest {
-                    external_id_blind_index: vec![95u8; 32],
-                    external_id_ciphertext: b"ciphertext".to_vec(),
-                    display_name_ciphertext: b"ciphertext".to_vec(),
-                    unverified_actor: actor("yadgar:user:actor-rid-cap"),
-                    ..Default::default()
-                },
-                &long_rid,
-            ))
+            .create_user_as(
+                Some(IAM_CALLER),
+                with_request_id(
+                    CreateUserRequest {
+                        external_id_blind_index: vec![95u8; 32],
+                        external_id_ciphertext: b"ciphertext".to_vec(),
+                        display_name_ciphertext: b"ciphertext".to_vec(),
+                        unverified_actor: actor("yadgar:user:actor-rid-cap"),
+                        ..Default::default()
+                    },
+                    &long_rid,
+                ),
+            )
             .await;
         rendered(&buf)
     };
@@ -5271,10 +5731,13 @@ fn fingerprint(tag: u8) -> Vec<u8> {
 }
 
 async fn get_marker(svc: &IamDb, fp: &[u8], version: u32) -> KeyIdentityOutcome {
-    svc.get_key_identity(Request::new(GetKeyIdentityRequest {
-        key_fingerprint: fp.to_vec(),
-        derivation_version: version,
-    }))
+    svc.get_key_identity_as(
+        Some(IAM_CALLER),
+        Request::new(GetKeyIdentityRequest {
+            key_fingerprint: fp.to_vec(),
+            derivation_version: version,
+        }),
+    )
     .await
     .expect("GetKeyIdentity puts no refusal about the marker on the status channel")
     .into_inner()
@@ -5323,7 +5786,10 @@ async fn recording_a_marker_reports_recorded_and_the_same_pair_then_matches() {
     let svc = fresh("iam_db_test_key_recorded").await;
 
     let first = svc
-        .set_key_identity(Request::new(set_request(&fingerprint(1), 1, "")))
+        .set_key_identity_as(
+            Some(IAM_CALLER),
+            Request::new(set_request(&fingerprint(1), 1, "")),
+        )
         .await
         .expect("an empty store with no marker records")
         .into_inner()
@@ -5337,11 +5803,14 @@ async fn recording_a_marker_reports_recorded_and_the_same_pair_then_matches() {
     // A SECOND CALLER under a FRESH key, presenting the same pair, finds the
     // marker the first attempt wrote — the contract's own words.
     assert_eq!(
-        svc.set_key_identity(Request::new(set_request(&fingerprint(1), 1, "")))
-            .await
-            .expect("a repeat of the same pair is not a refusal")
-            .into_inner()
-            .outcome(),
+        svc.set_key_identity_as(
+            Some(IAM_CALLER),
+            Request::new(set_request(&fingerprint(1), 1, ""))
+        )
+        .await
+        .expect("a repeat of the same pair is not a refusal")
+        .into_inner()
+        .outcome(),
         KeyIdentityOutcome::Match
     );
 }
@@ -5355,9 +5824,12 @@ async fn a_wrong_fingerprint_is_a_mismatch_and_never_absent() {
     // can never fail. THE ASSERTION THAT REDDENS: both `assert_eq!`s below,
     // each reading `Absent` where the contract requires `Mismatch`.
     let svc = fresh("iam_db_test_key_mismatch").await;
-    svc.set_key_identity(Request::new(set_request(&fingerprint(1), 1, "")))
-        .await
-        .expect("record");
+    svc.set_key_identity_as(
+        Some(IAM_CALLER),
+        Request::new(set_request(&fingerprint(1), 1, "")),
+    )
+    .await
+    .expect("record");
 
     assert_eq!(
         get_marker(&svc, &fingerprint(2), 1).await,
@@ -5365,11 +5837,14 @@ async fn a_wrong_fingerprint_is_a_mismatch_and_never_absent() {
         "a wrong key must be told apart from an unwritten marker"
     );
     assert_eq!(
-        svc.set_key_identity(Request::new(set_request(&fingerprint(2), 1, "")))
-            .await
-            .expect("a mismatch is a finding on an OK response, never a status")
-            .into_inner()
-            .outcome(),
+        svc.set_key_identity_as(
+            Some(IAM_CALLER),
+            Request::new(set_request(&fingerprint(2), 1, ""))
+        )
+        .await
+        .expect("a mismatch is a finding on an OK response, never a status")
+        .into_inner()
+        .outcome(),
         KeyIdentityOutcome::Mismatch
     );
 }
@@ -5387,9 +5862,12 @@ async fn a_different_derivation_version_is_a_skew_on_both_arms_and_writes_nothin
     // is dropped from the comparison or from the lookup, and `stored_marker`
     // reddens when the skewed Set writes anything at all.
     let svc = fresh("iam_db_test_key_skew").await;
-    svc.set_key_identity(Request::new(set_request(&fingerprint(1), 1, "")))
-        .await
-        .expect("record under version 1");
+    svc.set_key_identity_as(
+        Some(IAM_CALLER),
+        Request::new(set_request(&fingerprint(1), 1, "")),
+    )
+    .await
+    .expect("record under version 1");
 
     assert_eq!(
         get_marker(&svc, &fingerprint(1), 2).await,
@@ -5402,11 +5880,14 @@ async fn a_different_derivation_version_is_a_skew_on_both_arms_and_writes_nothin
         "a DIFFERENT fingerprint under another version is not MISMATCH either"
     );
     assert_eq!(
-        svc.set_key_identity(Request::new(set_request(&fingerprint(2), 2, "")))
-            .await
-            .expect("a skew is an outcome on an OK response, never a status")
-            .into_inner()
-            .outcome(),
+        svc.set_key_identity_as(
+            Some(IAM_CALLER),
+            Request::new(set_request(&fingerprint(2), 2, ""))
+        )
+        .await
+        .expect("a skew is an outcome on an OK response, never a status")
+        .into_inner()
+        .outcome(),
         KeyIdentityOutcome::DerivationSkew
     );
 
@@ -5439,7 +5920,10 @@ async fn recording_is_refused_when_the_store_already_holds_rows() {
     );
 
     let refusal = svc
-        .set_key_identity(Request::new(set_request(&fingerprint(1), 1, "")))
+        .set_key_identity_as(
+            Some(IAM_CALLER),
+            Request::new(set_request(&fingerprint(1), 1, "")),
+        )
         .await
         .expect_err("a populated store with no marker is an incident, not a first boot");
     assert_eq!(refusal.code(), tonic::Code::FailedPrecondition);
@@ -5462,16 +5946,22 @@ async fn a_second_recording_under_a_different_fingerprint_does_not_overwrite() {
     // SECOND caller's fingerprint. The outcome assertion above it reddens too,
     // reading `Recorded` where the winner's marker requires `Mismatch`.
     let svc = fresh("iam_db_test_key_write_once").await;
-    svc.set_key_identity(Request::new(set_request(&fingerprint(1), 1, "")))
-        .await
-        .expect("the first call records");
+    svc.set_key_identity_as(
+        Some(IAM_CALLER),
+        Request::new(set_request(&fingerprint(1), 1, "")),
+    )
+    .await
+    .expect("the first call records");
 
     assert_eq!(
-        svc.set_key_identity(Request::new(set_request(&fingerprint(2), 1, "")))
-            .await
-            .expect("a second key set is a finding, not a status")
-            .into_inner()
-            .outcome(),
+        svc.set_key_identity_as(
+            Some(IAM_CALLER),
+            Request::new(set_request(&fingerprint(2), 1, ""))
+        )
+        .await
+        .expect("a second key set is a finding, not a status")
+        .into_inner()
+        .outcome(),
         KeyIdentityOutcome::Mismatch
     );
 
@@ -5526,8 +6016,14 @@ async fn two_concurrent_recordings_produce_exactly_one_recorded_and_one_mismatch
     );
 
     let (one, two) = tokio::join!(
-        svc.set_key_identity(Request::new(set_request(&fingerprint(1), 1, "pod-one"))),
-        svc.set_key_identity(Request::new(set_request(&fingerprint(2), 1, "pod-two"))),
+        svc.set_key_identity_as(
+            Some(IAM_CALLER),
+            Request::new(set_request(&fingerprint(1), 1, "pod-one"))
+        ),
+        svc.set_key_identity_as(
+            Some(IAM_CALLER),
+            Request::new(set_request(&fingerprint(2), 1, "pod-two"))
+        ),
     );
     let one = one.expect("a split rollout is a finding about the marker that won");
     let two = two.expect("a split rollout is a finding about the marker that won");
@@ -5578,16 +6074,22 @@ async fn an_empty_fingerprint_and_a_zero_version_are_refused_on_both_arms() {
         (Vec::new(), 0u32, "both absent"),
     ] {
         let got = svc
-            .get_key_identity(Request::new(GetKeyIdentityRequest {
-                key_fingerprint: fp.clone(),
-                derivation_version: version,
-            }))
+            .get_key_identity_as(
+                Some(IAM_CALLER),
+                Request::new(GetKeyIdentityRequest {
+                    key_fingerprint: fp.clone(),
+                    derivation_version: version,
+                }),
+            )
             .await
             .expect_err(what);
         assert_eq!(got.code(), tonic::Code::InvalidArgument, "Get: {what}");
 
         let put = svc
-            .set_key_identity(Request::new(set_request(&fp, version, "")))
+            .set_key_identity_as(
+                Some(IAM_CALLER),
+                Request::new(set_request(&fp, version, "")),
+            )
             .await
             .expect_err(what);
         assert_eq!(put.code(), tonic::Code::InvalidArgument, "Set: {what}");
@@ -5608,16 +6110,22 @@ async fn a_replayed_key_returns_the_original_outcome_and_a_changed_payload_is_re
     // replay answering the first one's outcome would report a marker the second
     // caller does not hold.
     let svc = fresh("iam_db_test_key_replay").await;
-    svc.set_key_identity(Request::new(set_request(&fingerprint(1), 1, "boot-1")))
-        .await
-        .expect("record");
+    svc.set_key_identity_as(
+        Some(IAM_CALLER),
+        Request::new(set_request(&fingerprint(1), 1, "boot-1")),
+    )
+    .await
+    .expect("record");
 
     assert_eq!(
-        svc.set_key_identity(Request::new(set_request(&fingerprint(1), 1, "boot-1")))
-            .await
-            .expect("a replay of the recording call")
-            .into_inner()
-            .outcome(),
+        svc.set_key_identity_as(
+            Some(IAM_CALLER),
+            Request::new(set_request(&fingerprint(1), 1, "boot-1"))
+        )
+        .await
+        .expect("a replay of the recording call")
+        .into_inner()
+        .outcome(),
         KeyIdentityOutcome::Recorded,
         "a replay returns the ORIGINAL outcome, not MATCH"
     );
@@ -5627,7 +6135,10 @@ async fn a_replayed_key_returns_the_original_outcome_and_a_changed_payload_is_re
         (fingerprint(1), 2u32, "a different version"),
     ] {
         let refusal = svc
-            .set_key_identity(Request::new(set_request(&fp, version, "boot-1")))
+            .set_key_identity_as(
+                Some(IAM_CALLER),
+                Request::new(set_request(&fp, version, "boot-1")),
+            )
             .await
             .expect_err(what);
         assert_eq!(refusal.code(), tonic::Code::InvalidArgument, "{what}");
@@ -5650,7 +6161,10 @@ async fn a_fingerprint_wider_than_the_column_is_refused_as_a_bad_request() {
     let svc = fresh("iam_db_test_key_width").await;
 
     let refusal = svc
-        .set_key_identity(Request::new(set_request(&vec![7u8; 256], 1, "")))
+        .set_key_identity_as(
+            Some(IAM_CALLER),
+            Request::new(set_request(&vec![7u8; 256], 1, "")),
+        )
         .await
         .expect_err("the column holds 255 bytes");
     assert_eq!(refusal.code(), tonic::Code::InvalidArgument);
@@ -5686,11 +6200,26 @@ async fn five_concurrent_recordings_answer_one_recorded_and_four_mismatch() {
     let svc = fresh("iam_db_test_key_concurrent_five").await;
     let fps: Vec<Vec<u8>> = (1..=5u8).map(fingerprint).collect();
     let (a, b, c, d, e) = tokio::join!(
-        svc.set_key_identity(Request::new(set_request(&fps[0], 1, "pod-1"))),
-        svc.set_key_identity(Request::new(set_request(&fps[1], 1, "pod-2"))),
-        svc.set_key_identity(Request::new(set_request(&fps[2], 1, "pod-3"))),
-        svc.set_key_identity(Request::new(set_request(&fps[3], 1, "pod-4"))),
-        svc.set_key_identity(Request::new(set_request(&fps[4], 1, "pod-5"))),
+        svc.set_key_identity_as(
+            Some(IAM_CALLER),
+            Request::new(set_request(&fps[0], 1, "pod-1"))
+        ),
+        svc.set_key_identity_as(
+            Some(IAM_CALLER),
+            Request::new(set_request(&fps[1], 1, "pod-2"))
+        ),
+        svc.set_key_identity_as(
+            Some(IAM_CALLER),
+            Request::new(set_request(&fps[2], 1, "pod-3"))
+        ),
+        svc.set_key_identity_as(
+            Some(IAM_CALLER),
+            Request::new(set_request(&fps[3], 1, "pod-4"))
+        ),
+        svc.set_key_identity_as(
+            Some(IAM_CALLER),
+            Request::new(set_request(&fps[4], 1, "pod-5"))
+        ),
     );
     let mut outcomes = Vec::new();
     for r in [a, b, c, d, e] {
@@ -5726,13 +6255,16 @@ async fn five_concurrent_recordings_answer_one_recorded_and_four_mismatch() {
 
 /// `CreateEnrolment` on the ordinary arm, carrying the revoke instruction.
 async fn enrol_revoking(svc: &IamDb, user_id: &str, secret: u8) -> String {
-    svc.create_enrolment(Request::new(CreateEnrolmentRequest {
-        user_id: user_id.into(),
-        secret_hash: vec![secret; 32],
-        expires_at: Some(at(3600)),
-        revoke_existing_credentials: true,
-        ..Default::default()
-    }))
+    svc.create_enrolment_as(
+        Some(IAM_CALLER),
+        Request::new(CreateEnrolmentRequest {
+            user_id: user_id.into(),
+            secret_hash: vec![secret; 32],
+            expires_at: Some(at(3600)),
+            revoke_existing_credentials: true,
+            ..Default::default()
+        }),
+    )
     .await
     .expect("create a revoking enrolment")
     .into_inner()
@@ -5741,12 +6273,15 @@ async fn enrol_revoking(svc: &IamDb, user_id: &str, secret: u8) -> String {
 
 /// One more credential for `user_id`, under the token hash `[token; 32]`.
 async fn credential(svc: &IamDb, user_id: &str, token: u8) -> String {
-    svc.create_credential(Request::new(CreateCredentialRequest {
-        user_id: user_id.into(),
-        token_hash: vec![token; 32],
-        label: "another device".into(),
-        ..Default::default()
-    }))
+    svc.create_credential_as(
+        Some(IAM_CALLER),
+        Request::new(CreateCredentialRequest {
+            user_id: user_id.into(),
+            token_hash: vec![token; 32],
+            label: "another device".into(),
+            ..Default::default()
+        }),
+    )
     .await
     .expect("create credential")
     .into_inner()
@@ -5757,9 +6292,12 @@ async fn credential(svc: &IamDb, user_id: &str, token: u8) -> String {
 /// is an answer and never an error — the shape
 /// `a_revoked_credential_stops_resolving` pins.
 async fn resolves_to(svc: &IamDb, token: u8) -> String {
-    svc.resolve_credential(Request::new(ResolveCredentialRequest {
-        token_hash: vec![token; 32],
-    }))
+    svc.resolve_credential_as(
+        Some(IAM_CALLER),
+        Request::new(ResolveCredentialRequest {
+            token_hash: vec![token; 32],
+        }),
+    )
     .await
     .expect("resolve must not error")
     .into_inner()
@@ -5834,14 +6372,17 @@ async fn the_bootstrap_demand_can_never_carry_the_revoke_instruction() {
     let user_id = admin(&svc, 170).await;
 
     let err = svc
-        .create_enrolment(Request::new(CreateEnrolmentRequest {
-            user_id: user_id.clone(),
-            secret_hash: vec![170u8; 32],
-            expires_at: Some(at(3600)),
-            require_zero_credential_admin: true,
-            revoke_existing_credentials: true,
-            ..Default::default()
-        }))
+        .create_enrolment_as(
+            Some(IAM_CALLER),
+            Request::new(CreateEnrolmentRequest {
+                user_id: user_id.clone(),
+                secret_hash: vec![170u8; 32],
+                expires_at: Some(at(3600)),
+                require_zero_credential_admin: true,
+                revoke_existing_credentials: true,
+                ..Default::default()
+            }),
+        )
         .await
         .expect_err("the demand and the revoke instruction together must be refused");
 
@@ -5870,11 +6411,14 @@ async fn a_revoking_redemption_that_fails_partway_revokes_nothing() {
 
     narrow_password_column(&svc, "VARCHAR(8)").await;
     let err = svc
-        .redeem_enrolment(Request::new(RedeemEnrolmentRequest {
-            secret_hash: vec![182u8; 32],
-            argon2id_hash: GOOD_HASH.into(),
-            ..Default::default()
-        }))
+        .redeem_enrolment_as(
+            Some(IAM_CALLER),
+            Request::new(RedeemEnrolmentRequest {
+                secret_hash: vec![182u8; 32],
+                argon2id_hash: GOOD_HASH.into(),
+                ..Default::default()
+            }),
+        )
         .await
         .expect_err("a password write the engine refuses must fail the call");
     assert_eq!(err.code(), tonic::Code::Unavailable);
@@ -5983,11 +6527,14 @@ async fn no_credential_can_be_created_while_a_revoking_reset_is_in_flight() {
     // the reset rather than commit inside it.
     let svc = std::sync::Arc::new(fresh("iam_db_test_revoke_race_during").await);
     let (user_id, _) = seed(&svc, &[210u8; 32], &[211u8; 32]).await;
-    svc.set_password(Request::new(SetPasswordRequest {
-        user_id: user_id.clone(),
-        argon2id_hash: GOOD_HASH.into(),
-        ..Default::default()
-    }))
+    svc.set_password_as(
+        Some(IAM_CALLER),
+        Request::new(SetPasswordRequest {
+            user_id: user_id.clone(),
+            argon2id_hash: GOOD_HASH.into(),
+            ..Default::default()
+        }),
+    )
     .await
     .expect("set password");
     enrol_revoking(&svc, &user_id, 212).await;
@@ -6056,10 +6603,13 @@ async fn no_credential_can_be_created_while_a_revoking_reset_is_in_flight() {
 
 /// `RevokeAllCredentials` for `user_id`, with no actor.
 async fn revoke_all(svc: &IamDb, user_id: &str) -> Result<u32, tonic::Status> {
-    svc.revoke_all_credentials(Request::new(RevokeAllCredentialsRequest {
-        user_id: user_id.into(),
-        ..Default::default()
-    }))
+    svc.revoke_all_credentials_as(
+        Some(IAM_CALLER),
+        Request::new(RevokeAllCredentialsRequest {
+            user_id: user_id.into(),
+            ..Default::default()
+        }),
+    )
     .await
     .map(|r| r.into_inner().revoked)
 }
@@ -6337,14 +6887,17 @@ async fn revoke_all_records_the_actor_and_names_the_person() {
 
     let log = {
         let (_guard, buf) = capturing();
-        svc.revoke_all_credentials(with_request_id(
-            RevokeAllCredentialsRequest {
-                user_id: holder.clone(),
-                unverified_actor: actor("yadgar:user:actor-revoke-all"),
-                ..Default::default()
-            },
-            "rid-RevokeAllCredentials",
-        ))
+        svc.revoke_all_credentials_as(
+            Some(IAM_CALLER),
+            with_request_id(
+                RevokeAllCredentialsRequest {
+                    user_id: holder.clone(),
+                    unverified_actor: actor("yadgar:user:actor-revoke-all"),
+                    ..Default::default()
+                },
+                "rid-RevokeAllCredentials",
+            ),
+        )
         .await
         .expect("revoke all");
         rendered(&buf)
@@ -6383,11 +6936,14 @@ async fn revoke_all_without_a_usable_actor_records_it_as_unattributed() {
     for unverified_actor in [None, Some(UnverifiedActor::default())] {
         let log = {
             let (_guard, buf) = capturing();
-            svc.revoke_all_credentials(Request::new(RevokeAllCredentialsRequest {
-                user_id: holder.clone(),
-                unverified_actor,
-                ..Default::default()
-            }))
+            svc.revoke_all_credentials_as(
+                Some(IAM_CALLER),
+                Request::new(RevokeAllCredentialsRequest {
+                    user_id: holder.clone(),
+                    unverified_actor,
+                    ..Default::default()
+                }),
+            )
             .await
             .expect("an actor decides nothing, including whether this succeeds");
             rendered(&buf)

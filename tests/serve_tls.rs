@@ -58,7 +58,9 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::codegen::{http, Service};
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
 
+use yadgar_iam_db::pb::yadgar::iamdb::v1::iam_db_service_server::IamDbServiceServer;
 use yadgar_iam_db::serve::{self, ServeTlsError, ServerTls};
+use yadgar_iam_db::service::IamDb;
 
 /// The name the test certificates are issued for, and the name the rig listens
 /// on.
@@ -112,6 +114,12 @@ struct ClientPki {
 /// Mint a client authority and a leaf carrying the `clientAuth` extended key
 /// usage, the one a verifying listener accepts.
 fn client_pki() -> ClientPki {
+    client_pki_named("iam")
+}
+
+/// The same, with the leaf's common name chosen by the caller: the field the
+/// caller gate reads (ledger 1629, ADR-0972).
+fn client_pki_named(common_name: &str) -> ClientPki {
     let ca_key = KeyPair::generate().unwrap();
     let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -122,9 +130,11 @@ fn client_pki() -> ClientPki {
     let ca = CertifiedIssuer::self_signed(ca_params, ca_key).unwrap();
 
     let key = KeyPair::generate().unwrap();
-    let mut params = CertificateParams::new(vec!["iam".to_string()]).unwrap();
+    let mut params = CertificateParams::new(vec![common_name.to_string()]).unwrap();
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
-    params.distinguished_name.push(DnType::CommonName, "iam");
+    params
+        .distinguished_name
+        .push(DnType::CommonName, common_name);
     let cert = params.signed_by(&key, &ca).unwrap();
 
     ClientPki {
@@ -792,5 +802,137 @@ async fn an_empty_client_ca_file_is_refused_naming_the_path() {
     assert!(
         message.contains(ca.path().to_str().unwrap()),
         "the message must name the client CA file"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// THE CALLER GATE, THROUGH THE REAL TRANSPORT (ledger 1629, ADR-0972 (1)).
+//
+// `tests/caller_gate.rs` proves the gate at the `_as` seam. These cases prove
+// the other half: the verified peer chain reaches the handler through tonic, so
+// the name the gate reads is the leaf the caller presented. `project` proved
+// the same for its own gate.
+// ---------------------------------------------------------------------------
+
+/// The listener above, serving the REAL `IamDbService` rather than
+/// `Routes::default()`. Its pool points at a closed port, so an admitted call
+/// fails on the store and a refused one never gets there.
+async fn serve_the_service(tls: &ServerTls) -> u16 {
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((SERVED_NAME, 0))
+        .await
+        .unwrap()
+        .collect();
+    let (port, listeners) = bind_one_port_on_every_address(&addrs).await;
+    for listener in listeners {
+        let pool = sqlx::mysql::MySqlPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(300))
+            .connect_lazy("mysql://gate:gate@127.0.0.1:1/gate")
+            .expect("a lazy pool");
+        let mut server = serve::builder(Some(tls)).expect("a usable certificate and key");
+        let router = server.add_service(IamDbServiceServer::new(IamDb::new(pool)));
+        tokio::spawn(async move {
+            let _ = router
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await;
+        });
+    }
+    ready(port).await;
+    port
+}
+
+/// Call `GetKeyIdentity` with an empty request and return the `grpc-status`
+/// the server answered with. A refusal is a trailers-only response, so the
+/// status is on the headers; `None` means the call was not refused there.
+async fn get_key_identity_status(
+    port: u16,
+    tls: ClientTlsConfig,
+) -> Result<Option<String>, String> {
+    let mut channel = Endpoint::from_shared(format!("https://{SERVED_NAME}:{port}"))
+        .unwrap()
+        .connect_timeout(Duration::from_secs(5))
+        .tls_config(tls)
+        .map_err(|e| format!("{e}"))?
+        .connect_lazy();
+
+    // ONE gRPC frame carrying the empty message: no compression, length zero.
+    let frame = http_body_util::Full::new(tonic::codegen::Bytes::from_static(&[0, 0, 0, 0, 0]));
+    let req = http::Request::builder()
+        .version(http::Version::HTTP_2)
+        .method("POST")
+        .uri(format!(
+            "https://{SERVED_NAME}/yadgar.iamdb.v1.IamDbService/GetKeyIdentity"
+        ))
+        .header("content-type", "application/grpc")
+        .header("te", "trailers")
+        .body(tonic::body::Body::new(frame))
+        .unwrap();
+
+    std::future::poll_fn(|cx| channel.poll_ready(cx))
+        .await
+        .map_err(|e| format!("{e}"))?;
+    match tokio::time::timeout(Duration::from_secs(10), channel.call(req)).await {
+        Err(_) => Err("the request timed out".to_string()),
+        Ok(Err(e)) => Err(format!("{e}")),
+        Ok(Ok(resp)) => Ok(resp
+            .headers()
+            .get("grpc-status")
+            .map(|v| v.to_str().unwrap_or("<not ascii>").to_string())),
+    }
+}
+
+/// `PERMISSION_DENIED`'s wire value.
+const PERMISSION_DENIED: &str = "7";
+
+/// A leaf the configured authority signed, naming ANOTHER module, crosses the
+/// handshake and is refused by the gate.
+#[tokio::test]
+async fn a_leaf_naming_another_module_is_refused_by_the_gate_over_tls() {
+    let client = client_pki_named("task-caller");
+    let p = pki(SERVED_NAME);
+    let cert = TempPem::with(&p.cert_pem);
+    let key = TempPem::with(&p.key_pem);
+    let ca = TempPem::with(&client.ca_pem);
+    let tls = configured_with(cert.path(), key.path(), "required", Some(ca.path()));
+    let port = serve_the_service(&tls).await;
+
+    assert_eq!(
+        get_key_identity_status(port, presenting(&p.ca_pem, &client)).await,
+        Ok(Some(PERMISSION_DENIED.to_string()))
+    );
+}
+
+/// THE POSITIVE CONTROL: `iam`'s leaf passes the gate over the same transport.
+/// The call then fails on the closed store, with any code but
+/// `PERMISSION_DENIED`.
+#[tokio::test]
+async fn the_iam_leaf_passes_the_gate_over_tls() {
+    let client = client_pki_named(yadgar_iam_db::service::IAM_CALLER);
+    let p = pki(SERVED_NAME);
+    let cert = TempPem::with(&p.cert_pem);
+    let key = TempPem::with(&p.key_pem);
+    let ca = TempPem::with(&client.ca_pem);
+    let tls = configured_with(cert.path(), key.path(), "required", Some(ca.path()));
+    let port = serve_the_service(&tls).await;
+
+    let status = get_key_identity_status(port, presenting(&p.ca_pem, &client)).await;
+    assert!(
+        matches!(&status, Ok(s) if s.as_deref() != Some(PERMISSION_DENIED)),
+        "iam's leaf must pass the gate, got {status:?}"
+    );
+}
+
+/// `clientAuth: "off"` verifies no leaf, so no name reaches the gate, and the
+/// gate refuses (ADR-0972 (1): fail closed).
+#[tokio::test]
+async fn an_off_listener_hands_the_gate_no_name_and_the_gate_refuses() {
+    let p = pki(SERVED_NAME);
+    let cert = TempPem::with(&p.cert_pem);
+    let key = TempPem::with(&p.key_pem);
+    let tls = configured_with(cert.path(), key.path(), "off", None);
+    let port = serve_the_service(&tls).await;
+
+    assert_eq!(
+        get_key_identity_status(port, trusting(&p.ca_pem, SERVED_NAME)).await,
+        Ok(Some(PERMISSION_DENIED.to_string()))
     );
 }

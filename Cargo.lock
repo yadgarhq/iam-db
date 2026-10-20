@@ -2791,6 +2791,7 @@ dependencies = [
 name = "yadgar-iam-db"
 version = "0.1.0"
 dependencies = [
+ "http-body-util",
  "metrics",
  "metrics-util",
  "prost",

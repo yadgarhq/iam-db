@@ -165,6 +165,11 @@ yadgar-dial = { git = "https://github.com/yadgarhq/dial.git", tag = "v0.2.20" }
 # this tree at v1.0.151 (`tracing-subscriber`'s `json` feature), so this adds
 # nothing to the resolved dependency graph; only the manifest line is new.
 serde_json = "1"
+# `tests/serve_tls.rs` sends one framed gRPC request to the real service, to
+# prove the caller gate through the transport (ledger 1629). `build.rs` builds
+# no client, so the body is a `Full` frame. Already in this tree via tonic, so
+# this adds nothing to the resolved dependency graph.
+http-body-util = "0.1"
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -8,7 +8,9 @@
 //! **Nor does it see a `Scope`.** Every other `-db` in the system enforces scope
 //! on every path, because every other one serves data belonging to somebody. This
 //! one runs *before* there is a caller identity — resolving a credential is how
-//! identity comes to exist. Its access control is that only `iam` can reach it.
+//! identity comes to exist. Its access control is that only `iam` can reach it:
+//! every verb admits only the client leaf named `iam-caller` and refuses a call
+//! with no client-certificate name (`caller`, ledger 1629, ADR-0972).
 //!
 //! # What happens to `Idempotency`, per RPC
 //!
@@ -71,6 +73,7 @@
 
 use sqlx::{MySqlPool, Row};
 use tonic::{Request, Response, Status};
+use yadgar_lifecycle::serve_tls::caller_common_name;
 use yadgar_telemetry::grpc::status_name;
 use yadgar_telemetry::observe::{Call, Outcome};
 use yadgar_telemetry::pb::yadgar::telemetry::v1::Kind;
@@ -94,14 +97,18 @@ use crate::pb::yadgar::telemetry::v1::Kind as ContractKind;
 // `IamDbService` implementation are reached exactly as they were, and being
 // children is also what lets them see this module's `pool`, `db`, `label` and
 // the liveness predicates without anything widening.
+mod caller;
 mod credential;
 mod enrolment;
 mod handlers;
+use caller::admitted;
+pub use caller::{CALLER_REFUSED, IAM_CALLER};
 pub use enrolment::DEMAND_INSERT;
 mod identity;
 mod key_identity;
 mod password;
 mod policy;
+mod seam;
 mod setting;
 
 /// This service's name, on every telemetry record and on the rotation
