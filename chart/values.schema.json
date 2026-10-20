@@ -23,7 +23,7 @@
         "certSecretKey": {},
         "keySecretKey": {},
         "clientAuth": {
-          "description": "No default (X-ADR-1, extending ADR-0845; card B-U5): it renders LISTEN_TLS_CLIENT_AUTH, which iam-db refuses to boot without whether or not TLS is on. `required` here and deliberately UNTYPED (ADR-0847): `templates/render-checks.yaml` refuses a non-string (a bare YAML off is the boolean false), a value outside `off | optional | required`, and a verifying mode beside `tls.enabled: false` or with no `tls.clientCaSecret`, each with a sentence naming the key. A schema `type` or `enum` would pre-empt those sentences with a generic line."
+          "description": "No default (X-ADR-1, extending ADR-0845; card B-U5): it renders LISTEN_TLS_CLIENT_AUTH, which iam-db refuses to boot without whether or not TLS is on. `required` here and deliberately UNTYPED (ADR-0847): `templates/render-checks.yaml` refuses a non-string (a bare YAML off is the boolean false), a value outside `off | optional | required`, and a verifying mode with no `tls.clientCaSecret`, each with a sentence naming the key. From K1 (ADR-0972, ADR-0975) `off` is also refused while `tls.enabled` is true; with `tls.enabled: false` the chart ignores and does not validate the value and renders the constant `off`, so a cleartext listener boots and refuses every RPC. The key stays `required` either way. A schema `type` or `enum` would pre-empt those sentences with a generic line."
         },
         "clientCaSecret": {},
         "clientCaSecretKey": {}
