@@ -14,8 +14,12 @@ impl IamDb {
         r: GetPasswordHashRequest,
         call: Call,
     ) -> Result<Response<GetPasswordHashResponse>, Status> {
+        // THE EPOCH IN THE SAME STATEMENT AS THE HASH (ADR-0972 (4)), so the
+        // two are one snapshot: `iam` mints the Login's credential against
+        // this epoch, and a reset or revoke-all that lands after this read
+        // makes that mint refuse.
         let row = sqlx::query(
-            "SELECT u.id AS user_id, p.argon2id_hash
+            "SELECT u.id AS user_id, p.argon2id_hash, u.credential_epoch
                FROM iam_user u
                JOIN iam_password p ON p.user_id = u.id
               WHERE u.external_id_blind_index = ?
@@ -35,7 +39,7 @@ impl IamDb {
             Some(row) => GetPasswordHashResponse {
                 user_id: row.try_get("user_id").map_err(db)?,
                 argon2id_hash: row.try_get("argon2id_hash").map_err(db)?,
-                credential_epoch: 0,
+                credential_epoch: row.try_get("credential_epoch").map_err(db)?,
             },
             None => GetPasswordHashResponse::default(),
         };
@@ -118,6 +122,13 @@ impl IamDb {
         // `INSERT ... SELECT` is not a question to settle by experiment on the
         // statement that stores a password. Two binds of one parameter say it
         // outright.
+        // ADR-0972 (4): the epoch bump, FIRST and in one transaction with the
+        // write — see `epoch::bump_live` for why first. Its zero is NOT_FOUND.
+        let mut tx = self.pool.begin().await.map_err(db)?;
+        if epoch::bump_live(&mut tx, &r.user_id).await? == 0 {
+            live_user(&mut *tx, &r.user_id).await?;
+        }
+
         let done = sqlx::query(
             "INSERT INTO iam_password (user_id, argon2id_hash)
              SELECT id, ? FROM iam_user
@@ -128,7 +139,7 @@ impl IamDb {
         .bind(&r.argon2id_hash)
         .bind(&r.user_id)
         .bind(&r.argon2id_hash)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(db)?;
 
@@ -137,10 +148,11 @@ impl IamDb {
         // was already that value"; it can only mean the SELECT found no live row
         // for this id. The re-read turns that into NOT_FOUND rather than a
         // silent OK, and answers the same whether the id is unknown or the
-        // person is soft-deleted.
+        // person is soft-deleted. The bump holding the row makes it unreachable.
         if done.rows_affected() == 0 {
-            live_user(&self.pool, &r.user_id).await?;
+            live_user(&mut *tx, &r.user_id).await?;
         }
+        tx.commit().await.map_err(db)?;
 
         call.finish(Outcome {
             status: "OK",

@@ -2,9 +2,10 @@
 //!
 //! `resolve` is the hot path and the reason this store exists: a token hash to
 //! an identity, in one transaction, with liveness decided IN the queries. The
-//! other four are the lifecycle around it — minting one, tombstoning one,
-//! tombstoning every one a person holds (the child module `all`, ADR-0945), and
-//! listing what a person holds.
+//! other four are the lifecycle around it — minting one (the child module
+//! `mint`, epoch-checked under ADR-0972 (4)), tombstoning one, tombstoning every
+//! one a person holds (the child module `all`, ADR-0945), and listing what a
+//! person holds.
 //!
 //! They are one module because they are one table, and because the liveness
 //! clauses that make `resolve` correct are the same clauses the other four must
@@ -13,6 +14,7 @@
 use super::*;
 
 mod all;
+mod mint;
 
 impl IamDb {
     pub(super) async fn resolve(
@@ -39,7 +41,11 @@ impl IamDb {
         let mut tx = self.pool.begin().await.map_err(db)?;
 
         let row = sqlx::query(
-            "SELECT c.id AS credential_id, c.user_id, u.is_admin
+            // `expires_at` IN THIS STATEMENT (ADR-0972 (3)), so the expiry `iam`
+            // clamps the gateway's cache to belongs to the very row that
+            // matched. UNIX_TIMESTAMP for the reason `credential_page` gives.
+            "SELECT c.id AS credential_id, c.user_id, u.is_admin,
+                    CAST(UNIX_TIMESTAMP(c.expires_at) AS SIGNED) AS expires_at
                FROM iam_credential c
                JOIN iam_user u ON u.id = c.user_id
               WHERE c.token_hash = ?
@@ -66,6 +72,10 @@ impl IamDb {
         let user_id: String = row.try_get("user_id").map_err(db)?;
         let credential_id: String = row.try_get("credential_id").map_err(db)?;
         let is_admin: bool = row.try_get("is_admin").map_err(db)?;
+        let expires_at = row
+            .try_get::<Option<i64>, _>("expires_at")
+            .map_err(db)?
+            .map(epoch);
 
         let team_ids: Vec<String> =
             sqlx::query("SELECT team_id FROM iam_team_member WHERE user_id = ?")
@@ -116,7 +126,7 @@ impl IamDb {
             is_admin,
             rate_limit_overrides,
             owner_reads_own_record: Some(owner_reads_own_record),
-            expires_at: None,
+            expires_at,
         };
         call.finish(Outcome {
             status: "OK",
@@ -124,116 +134,6 @@ impl IamDb {
             ..Default::default()
         });
         Ok(Response::new(resp))
-    }
-
-    pub(super) async fn mint_credential(
-        &self,
-        r: CreateCredentialRequest,
-        rid: &str,
-        call: Call,
-    ) -> Result<Response<CreateCredentialResponse>, Status> {
-        // `idempotency` IS DISCARDED HERE, AND A RETRY IS NOT A REPLAY. Measured
-        // against mariadb:11.8.8: a second call carrying the SAME `token_hash`
-        // hits `uq_iam_credential_token` and renders through `db()` as
-        // UNAVAILABLE — a retryable status for a request that can never succeed —
-        // while one carrying a FRESH hash mints a SECOND credential. `iam` sends
-        // no key on this hop at all (ADR-0519), so there is nothing here to read;
-        // the module header carries what has to land, and where.
-        //
-        // THE WRITE THE LIVENESS SWEEP MISSED, and the argument is CreateEnrolment's
-        // verbatim rather than a new one. The FOREIGN KEY proves the user row
-        // EXISTS; it does not prove the person is live. `ResolveCredential` joins
-        // `deleted_at IS NULL`, so a credential minted for a soft-deleted account
-        // is accepted, reported OK WITH AN ID the caller then hands to somebody,
-        // and authenticates nobody for the whole of its lifetime.
-        //
-        // NOT DELIBERATE, and the two candidate reasons for leaving it out both
-        // fail. There is no not-yet-live window to protect: `iam_user.deleted_at`
-        // is `NULL DEFAULT NULL`, so a person is live from the INSERT that creates
-        // them. And the one caller that mints a credential right after another
-        // write — `RedeemEnrolment`, then `IssueCredential` — already spends the
-        // enrolment under `user_id IN (SELECT id FROM iam_user WHERE deleted_at IS
-        // NULL)`, so liveness is established one call earlier on that path too.
-        // THE PREDICATE IS IN THE INSERT, on `SetPassword`'s argument and for
-        // its reasons (ledger 695). A `live_user` here followed by an INSERT
-        // below is two statements, and a person soft-deleted between them still
-        // got a credential — one handed back with an id and accepted by nobody,
-        // because `ResolveCredential` joins `deleted_at IS NULL`.
-        //
-        // THE FOREIGN KEY IS WHAT MADE IT REACHABLE. A soft delete leaves the
-        // parent row in place, so `fk_iam_credential_user` is satisfied by an
-        // account nobody expects to act again; the constraint proves existence
-        // and never liveness, which is this handler's own argument above.
-        let id = format!("yadgar:credential:{}", uuid::Uuid::now_v7());
-
-        // ADR-0534's RECORDING HALF, AFTER the id on `CreateUser`'s argument:
-        // minting it cannot fail, and the credential id is what joins this
-        // record to a later `RevokeCredential`'s.
-        let target = format!("{}/{}", seg(&r.user_id), id);
-        record_actor(
-            rid,
-            r.unverified_actor.as_ref(),
-            "CreateCredential",
-            &target,
-        );
-
-        let done = sqlx::query(
-            // FROM_UNIXTIME, because the contract carries epoch SECONDS and the
-            // column is a TIMESTAMP. Binding the integer directly makes MariaDB
-            // read 1798761600 as a datetime literal — it does not error, it
-            // stores something else, and the credential then expires at a time
-            // nobody chose. Converting in SQL keeps the one representation the
-            // column understands.
-            "INSERT INTO iam_credential (id, user_id, token_hash, label, expires_at)
-             SELECT ?, id, ?, ?, FROM_UNIXTIME(?) FROM iam_user
-              WHERE id = ? AND deleted_at IS NULL
-              LOCK IN SHARE MODE",
-        )
-        .bind(&id)
-        .bind(&r.token_hash)
-        .bind(&r.label)
-        .bind(r.expires_at.map(|t| t.seconds))
-        .bind(&r.user_id)
-        .execute(&self.pool)
-        .await
-        .map_err(db)?;
-
-        // Zero MATCHED rows is no live person, and `live_user` is here only to
-        // say so as NOT_FOUND. `SetPassword` carries the full argument.
-        //
-        // THE BRANCH FALLS THROUGH IF THE RE-READ DISAGREES, AND THAT IS NEW
-        // WITH LEDGER 695 RATHER THAN INHERITED. Before this change a zero row
-        // count was impossible here; now `live_user` returning Ok after a zero
-        // match sends this handler on to report OK with a `credential_id` for a
-        // row it never inserted. Reaching it needs `deleted_at` to go set and
-        // then back to NULL between two statements, and nothing in this estate
-        // un-deletes a person — that column has no writer outside a test helper
-        // that only ever sets it. `SetUserAdmin` has carried the identical
-        // branch since it was written, and its exposure is milder only because
-        // its response carries nothing to fabricate. THE HONEST FIX is to make a
-        // zero-row write terminal whatever the re-read says. That is a change to
-        // these three handlers AND to `SetUserAdmin`, so it belongs with the
-        // argument for changing `SetUserAdmin` rather than smuggled in beside a
-        // race fix. `CreateEnrolment` and `AddTeamMember` carry the same branch
-        // and point here.
-        if done.rows_affected() == 0 {
-            live_user(&self.pool, &r.user_id).await?;
-        }
-
-        call.finish(Outcome {
-            status: "OK",
-            // STILL A LITERAL, AND THE REASON IS NARROWER THAN "THE NONE CASE
-            // ALREADY RETURNED". This statement inserts exactly one row or none;
-            // none returns NOT_FOUND unless the re-read above disagrees, which
-            // is the fall-through that branch describes and which nothing can
-            // currently cause. Only `SetPassword`'s upsert can report a number a
-            // constant cannot predict.
-            rows: 1,
-            ..Default::default()
-        });
-        Ok(Response::new(CreateCredentialResponse {
-            credential_id: id,
-        }))
     }
 
     pub(super) async fn revoke(
@@ -250,35 +150,59 @@ impl IamDb {
             &seg(&r.credential_id),
         );
 
+        // ADR-0972 (2): THE OWNER IS REQUIRED. Refused after the record, which
+        // logs the attempt (ADR-0534), and before any statement runs.
+        if r.user_id.is_empty() {
+            let refusal = Status::invalid_argument("a revoke must name the credential's user");
+            call.fail(label(&refusal));
+            return Err(refusal);
+        }
+
         // A tombstone, not a delete (D26). Idempotent by the WHERE clause:
         // revoking twice leaves the first timestamp, so the record still says
         // when access actually ended rather than when someone last asked.
+        //
+        // MATCHED ON THE PAIR (ADR-0972 (2)), so an administrator naming one
+        // person cannot revoke another person's credential by its id.
         let row = sqlx::query(
             "UPDATE iam_credential
                 SET revoked_at = CURRENT_TIMESTAMP
-              WHERE id = ? AND revoked_at IS NULL",
+              WHERE id = ? AND user_id = ? AND revoked_at IS NULL",
         )
         .bind(&r.credential_id)
+        .bind(&r.user_id)
         .execute(&self.pool)
         .await
         .map_err(db)?;
 
-        let user_id: String = sqlx::query("SELECT user_id FROM iam_credential WHERE id = ?")
-            .bind(&r.credential_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(db)?
-            .map(|r| r.try_get::<String, _>("user_id"))
-            .transpose()
-            .map_err(db)?
-            .ok_or_else(|| Status::not_found("no such credential"))?;
+        // ZERO ROWS IS EITHER "ALREADY REVOKED, AND THIS USER'S" — OK, as it
+        // always was — or "NO SUCH PAIR", which is NOT_FOUND whether the id is
+        // unknown or belongs to somebody else. The two read the same to a
+        // caller naming the wrong person, so the answer reveals nothing about
+        // another person's credentials.
+        if row.rows_affected() == 0 {
+            let owned: Option<String> =
+                sqlx::query_scalar("SELECT id FROM iam_credential WHERE id = ? AND user_id = ?")
+                    .bind(&r.credential_id)
+                    .bind(&r.user_id)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(db)?;
+            if owned.is_none() {
+                let refusal = Status::not_found("no such credential");
+                call.fail(label(&refusal));
+                return Err(refusal);
+            }
+        }
 
         call.finish(Outcome {
             status: "OK",
             rows: row.rows_affected() as u32,
             ..Default::default()
         });
-        Ok(Response::new(RevokeCredentialResponse { user_id }))
+        Ok(Response::new(RevokeCredentialResponse {
+            user_id: r.user_id,
+        }))
     }
 
     pub(super) async fn credential_page(

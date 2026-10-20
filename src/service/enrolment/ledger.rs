@@ -81,13 +81,20 @@ pub(super) async fn replay(
             .await
             .map_err(db)?;
 
+    // ADR-0972 (4): THE USER'S CURRENT EPOCH, read now on this transaction and
+    // NOT the first delivery's. `iam` mints the redemption's credential
+    // against it; the first delivery's value is stale once anything bumped
+    // since, and a retry minting against it would be refused every time.
+    let credential_epoch = epoch::current(&mut *conn, &user_id).await?;
+
     Ok(Some(RedeemEnrolmentResponse {
         outcome: RedeemOutcome::Redeemed as i32,
         user_id,
         enrolment_id,
         external_id_ciphertext,
         revoked_existing_credentials,
-        credential_epoch: 0,
+        credential_epoch,
+        // A replay changed nothing, so it voided nothing (ADR-0972 (5)).
         voided_enrolments: 0,
     }))
 }
@@ -95,9 +102,12 @@ pub(super) async fn replay(
 /// Why a redemption did not happen, decided by a SELECT rather than guessed.
 ///
 /// Reached only when the check-and-spend UPDATE matched nothing, and it has to
-/// tell three cases apart that the caller must be able to distinguish from a
-/// broken store: the secret is unknown, it was already spent, or its deadline
-/// has passed.
+/// tell four cases apart that the caller must be able to distinguish from a
+/// broken store: the secret is unknown, it was already spent, it was voided
+/// (ADR-0972 (5)), or its deadline has passed. VOIDED IS CHECKED BEFORE
+/// EXPIRED: the void is what ended it, whatever the clock says since. Spent and
+/// voided are never both set — the void skips spent rows and the spend skips
+/// voided ones.
 ///
 /// A SOFT-DELETED PERSON'S ENROLMENT IS `NOT_FOUND`. The join makes it so, and
 /// the enum has no fourth arm to say anything else — as far as this boundary is
@@ -111,7 +121,8 @@ where
     E: sqlx::Executor<'e, Database = sqlx::MySql>,
 {
     let row = sqlx::query(
-        "SELECT CAST(e.spent_at IS NOT NULL AS SIGNED) AS is_spent
+        "SELECT CAST(e.spent_at IS NOT NULL AS SIGNED) AS is_spent,
+                CAST(e.voided_at IS NOT NULL AS SIGNED) AS is_voided
            FROM iam_enrolment e JOIN iam_user u ON u.id = e.user_id
           WHERE e.secret_hash = ? AND u.deleted_at IS NULL",
     )
@@ -123,8 +134,11 @@ where
     let Some(row) = row else {
         return Ok(RedeemOutcome::NotFound);
     };
-    match row.try_get::<i64, _>("is_spent").map_err(db)? {
-        0 => Ok(RedeemOutcome::Expired),
-        _ => Ok(RedeemOutcome::Spent),
+    let spent = row.try_get::<i64, _>("is_spent").map_err(db)? != 0;
+    let voided = row.try_get::<i64, _>("is_voided").map_err(db)? != 0;
+    match (spent, voided) {
+        (true, _) => Ok(RedeemOutcome::Spent),
+        (false, true) => Ok(RedeemOutcome::Voided),
+        (false, false) => Ok(RedeemOutcome::Expired),
     }
 }
