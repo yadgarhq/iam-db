@@ -147,12 +147,13 @@ async fn an_unknown_token_is_an_empty_answer_and_not_an_error() {
 #[tokio::test]
 async fn a_revoked_credential_stops_resolving() {
     let svc = fresh("iam_db_test_revoked").await;
-    let (_user, cred_id) = seed(&svc, &[2u8; 32], &[8u8; 32]).await;
+    let (user_id, cred_id) = seed(&svc, &[2u8; 32], &[8u8; 32]).await;
 
     svc.revoke_credential_as(
         Some(IAM_CALLER),
         Request::new(RevokeCredentialRequest {
             credential_id: cred_id,
+            user_id,
             ..Default::default()
         }),
     )
@@ -189,6 +190,7 @@ async fn revoke_returns_the_owner_so_the_cache_can_be_invalidated() {
             Some(IAM_CALLER),
             Request::new(RevokeCredentialRequest {
                 credential_id: cred_id,
+                user_id: user_id.clone(),
                 ..Default::default()
             }),
         )
@@ -204,13 +206,14 @@ async fn revoking_twice_is_accepted_and_keeps_the_first_timestamp() {
     // Idempotent (D9), and the timestamp must say when access actually ended
     // rather than when someone last asked.
     let svc = fresh("iam_db_test_revoke_twice").await;
-    let (_user, cred_id) = seed(&svc, &[4u8; 32], &[6u8; 32]).await;
+    let (user_id, cred_id) = seed(&svc, &[4u8; 32], &[6u8; 32]).await;
 
     for _ in 0..2 {
         svc.revoke_credential_as(
             Some(IAM_CALLER),
             Request::new(RevokeCredentialRequest {
                 credential_id: cred_id.clone(),
+                user_id: user_id.clone(),
                 ..Default::default()
             }),
         )
@@ -855,12 +858,14 @@ async fn revoking_an_unknown_credential_is_not_found() {
     // MUTATION THIS CATCHES: replacing the `ok_or_else` with
     // `unwrap_or_default()`.
     let svc = fresh("iam_db_test_revoke_unknown").await;
+    let (user_id, _) = seed(&svc, &[5u8; 32], &[5u8; 32]).await;
 
     let err = svc
         .revoke_credential_as(
             Some(IAM_CALLER),
             Request::new(RevokeCredentialRequest {
                 credential_id: "yadgar:credential:never-existed".into(),
+                user_id,
                 ..Default::default()
             }),
         )
@@ -1552,6 +1557,7 @@ fn a_revoked_credential_still_refuses_the_bootstrap_demand() {
                 Some(IAM_CALLER),
                 Request::new(RevokeCredentialRequest {
                     credential_id: cred,
+                    user_id: user_id.clone(),
                     ..Default::default()
                 }),
             )
@@ -3186,6 +3192,7 @@ async fn listing_credentials_omits_the_revoked_ones() {
         Some(IAM_CALLER),
         Request::new(RevokeCredentialRequest {
             credential_id: cred_id,
+            user_id: user_id.clone(),
             ..Default::default()
         }),
     )
@@ -4961,6 +4968,7 @@ async fn revoke_credential_records_the_actor_and_names_the_credential() {
             Request::new(RevokeCredentialRequest {
                 credential_id: credential.clone(),
                 unverified_actor: actor("yadgar:user:actor-five"),
+                user_id: holder.clone(),
                 ..Default::default()
             }),
         )
@@ -4981,7 +4989,7 @@ async fn revoke_credential_records_the_actor_and_names_the_credential() {
 #[tokio::test]
 async fn revoke_credential_without_a_usable_actor_records_it_as_unattributed() {
     let svc = fresh("iam_db_test_actor_revoke_credential_none").await;
-    let (_, credential) = seed(&svc, &[53u8; 32], &[54u8; 32]).await;
+    let (holder, credential) = seed(&svc, &[53u8; 32], &[54u8; 32]).await;
 
     // The second round revokes an already-revoked credential, which the WHERE
     // clause makes a no-op answered OK — so both rounds reach the record.
@@ -4996,6 +5004,7 @@ async fn revoke_credential_without_a_usable_actor_records_it_as_unattributed() {
                 Request::new(RevokeCredentialRequest {
                     credential_id: credential.clone(),
                     unverified_actor,
+                    user_id: holder.clone(),
                     ..Default::default()
                 }),
             )
@@ -5449,6 +5458,7 @@ async fn every_actor_record_carries_the_request_id_of_its_call() {
                 RevokeCredentialRequest {
                     credential_id: credential.clone(),
                     unverified_actor: who.clone(),
+                    user_id: person.clone(),
                     ..Default::default()
                 },
                 "rid-RevokeCredential",
