@@ -31,7 +31,7 @@ pub(super) async fn replay(
     presented: &[u8],
     lock: Lock,
 ) -> Result<Option<RedeemEnrolmentResponse>, Status> {
-    const BASE: &str = "SELECT secret_hash, enrolment_id, user_id
+    const BASE: &str = "SELECT secret_hash, enrolment_id, user_id, credential_epoch
                           FROM iam_enrolment_redemption
                          WHERE idempotency_key = ?";
     // AUDIT: both arms are literals in this file; `key` is bound, never
@@ -81,11 +81,15 @@ pub(super) async fn replay(
             .await
             .map_err(db)?;
 
-    // ADR-0972 (4): THE USER'S CURRENT EPOCH, read now on this transaction and
-    // NOT the first delivery's. `iam` mints the redemption's credential
-    // against it; the first delivery's value is stale once anything bumped
-    // since, and a retry minting against it would be refused every time.
-    let credential_epoch = epoch::current(&mut *conn, &user_id).await?;
+    // ADR-0972 (4): THE EPOCH THE FIRST DELIVERY'S BUMP PRODUCED, as recorded
+    // on the ledger row — deliberately NOT the user's current epoch. `iam`
+    // mints the retry's credential against it. With nothing in between, that
+    // is still the current epoch and the retry mints. After a revoke-all, a
+    // reset or a SetPassword it is stale and the mint is refused, which is the
+    // point: a replayed key must never yield a credential that the later
+    // revocation was meant to end. Answering the current epoch let a replay
+    // mint straight through a revoke-all (security review of this change).
+    let credential_epoch: u64 = prior.try_get("credential_epoch").map_err(db)?;
 
     Ok(Some(RedeemEnrolmentResponse {
         outcome: RedeemOutcome::Redeemed as i32,

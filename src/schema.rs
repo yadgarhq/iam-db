@@ -44,6 +44,7 @@ pub fn migrations() -> Result<MigrationSet, MigrationError> {
         enrolment_revokes_existing_credentials(),
         user_credential_epoch(),
         enrolment_voided_at(),
+        redemption_credential_epoch(),
     ])
 }
 
@@ -63,6 +64,26 @@ fn user_credential_epoch() -> Migration {
         // below: MariaDB auto-commits each ALTER, so a set split this way can
         // stop only between whole migrations, which the ledger records.
         sql: "ALTER TABLE iam_user
+                  ADD COLUMN credential_epoch BIGINT UNSIGNED NOT NULL DEFAULT 0"
+            .into(),
+    }
+}
+
+fn redemption_credential_epoch() -> Migration {
+    Migration {
+        version: 18,
+        name: "redemption_credential_epoch".into(),
+        // ADR-0972 (4): the epoch a redemption's own bump produced, recorded on
+        // its idempotency row so a REPLAY answers with it rather than with the
+        // current epoch. A replay after a revoke-all, a reset or a SetPassword
+        // then carries a stale epoch and its mint is refused; answering the
+        // current epoch let a replayed key mint straight through the
+        // revocation (security review of this change).
+        //
+        // DEFAULT 0 for rows written before this migration: no bump was
+        // recorded for them, and 0 mints only while the person's epoch is
+        // still 0, i.e. nothing has bumped it since the upgrade.
+        sql: "ALTER TABLE iam_enrolment_redemption
                   ADD COLUMN credential_epoch BIGINT UNSIGNED NOT NULL DEFAULT 0"
             .into(),
     }

@@ -214,14 +214,17 @@ pub(super) async fn redeemed(
 
     if !key.is_empty() {
         sqlx::query(
+            // `credential_epoch` IS WHAT A REPLAY ANSWERS (migration 18), so a
+            // replay after a later bump carries a stale epoch and mints nothing.
             "INSERT INTO iam_enrolment_redemption
-                 (idempotency_key, secret_hash, enrolment_id, user_id)
-             VALUES (?, ?, ?, ?)",
+                 (idempotency_key, secret_hash, enrolment_id, user_id, credential_epoch)
+             VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&key)
         .bind(&r.secret_hash)
         .bind(&enrolment_id)
         .bind(&user_id)
+        .bind(credential_epoch)
         .execute(&mut *tx)
         .await
         .map_err(db)?;
