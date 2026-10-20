@@ -287,38 +287,86 @@ async fn the_redemptions_own_credential_is_minted_under_the_new_epoch() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// The replay (D9). A replayed redemption key answers with the epoch THE FIRST
+// DELIVERY recorded, never the current one. A retry with nothing in between
+// mints; a retry after a revoke-all, a reset or a SetPassword is refused at the
+// mint, because a replay must never yield a credential that the later
+// revocation was meant to end. The first build of this branch returned the
+// CURRENT epoch and minted straight through a revoke-all (security review).
+// ---------------------------------------------------------------------------
+
 #[tokio::test]
-async fn a_replayed_redemption_mints_under_the_current_epoch() {
-    // Without the replay reading the CURRENT epoch, it answered 0 (the
-    // `..Default::default()` it was built with), and every D9 retry's mint was
-    // refused.
+async fn a_replayed_redemption_with_nothing_in_between_mints() {
+    // THE D9 RETRY THE REPLAY EXISTS FOR: the first response was lost, and the
+    // retry's mint must succeed under the first delivery's epoch.
     let svc = fresh("iam_db_epoch_replay").await;
     let user_id = person(&svc, 25).await;
     enrol(&svc, &user_id, 25, false, 3600).await;
 
     let first = redeem(&svc, 25, GOOD_HASH, "epoch-replay-key").await;
-    assert_eq!(first.credential_epoch, 1);
-    revoke_all(&svc, &user_id)
-        .await
-        .expect("an intervening bump");
-
     let again = redeem(&svc, 25, GOOD_HASH, "epoch-replay-key").await;
-    assert_eq!(again.outcome, RedeemOutcome::Redeemed as i32);
-    assert_eq!(
-        again.credential_epoch,
-        stored_epoch(&svc, &user_id).await,
-        "a replay returns the user's CURRENT epoch"
-    );
-    assert_eq!(again.voided_enrolments, 0, "a replay changed nothing");
 
-    refused_as_stale(
-        mint(&svc, &user_id, 26, Some(first.credential_epoch)).await,
-        "the first delivery's epoch is stale after the bump",
-    );
+    assert_eq!(again.outcome, RedeemOutcome::Redeemed as i32);
+    assert_eq!(again.credential_epoch, first.credential_epoch);
+    assert_eq!(again.voided_enrolments, 0, "a replay changed nothing");
     mint(&svc, &user_id, 27, Some(again.credential_epoch))
         .await
-        .expect("the replay's epoch mints");
-    assert_eq!(credential_rows(&svc, &user_id).await, 1);
+        .expect("the retry mints under the first delivery's epoch");
+}
+
+#[tokio::test]
+async fn a_replay_after_revoke_all_mints_nothing() {
+    let svc = fresh("iam_db_epoch_replay_revoke_all").await;
+    let user_id = person(&svc, 26).await;
+    enrol(&svc, &user_id, 26, false, 3600).await;
+    redeem(&svc, 26, GOOD_HASH, "replay-revoke-all").await;
+    revoke_all(&svc, &user_id).await.expect("revoke all");
+
+    let again = redeem(&svc, 26, GOOD_HASH, "replay-revoke-all").await;
+
+    refused_as_stale(
+        mint(&svc, &user_id, 28, Some(again.credential_epoch)).await,
+        "a replay after revoke-all must not mint a live credential",
+    );
+    assert_eq!(credential_rows(&svc, &user_id).await, 0, "nothing inserted");
+}
+
+#[tokio::test]
+async fn a_replay_after_a_revoking_reset_mints_nothing() {
+    // A flagged re-enrolment redeemed after the first redemption: the reset
+    // that was meant to contain a leak must also contain the replay.
+    let svc = fresh("iam_db_epoch_replay_reset").await;
+    let user_id = person(&svc, 29).await;
+    enrol(&svc, &user_id, 29, false, 3600).await;
+    redeem(&svc, 29, GOOD_HASH, "replay-reset").await;
+    enrol(&svc, &user_id, 30, true, 3600).await;
+    redeem(&svc, 30, OTHER_HASH, "").await;
+
+    let again = redeem(&svc, 29, GOOD_HASH, "replay-reset").await;
+
+    refused_as_stale(
+        mint(&svc, &user_id, 31, Some(again.credential_epoch)).await,
+        "a replay after a revoking reset must not mint",
+    );
+    assert_eq!(credential_rows(&svc, &user_id).await, 0, "nothing inserted");
+}
+
+#[tokio::test]
+async fn a_replay_after_set_password_mints_nothing() {
+    let svc = fresh("iam_db_epoch_replay_set_password").await;
+    let user_id = person(&svc, 32).await;
+    enrol(&svc, &user_id, 32, false, 3600).await;
+    redeem(&svc, 32, GOOD_HASH, "replay-set-password").await;
+    set_password(&svc, &user_id, OTHER_HASH).await;
+
+    let again = redeem(&svc, 32, GOOD_HASH, "replay-set-password").await;
+
+    refused_as_stale(
+        mint(&svc, &user_id, 33, Some(again.credential_epoch)).await,
+        "a replay after the password was replaced must not mint",
+    );
+    assert_eq!(credential_rows(&svc, &user_id).await, 0, "nothing inserted");
 }
 
 #[tokio::test]
