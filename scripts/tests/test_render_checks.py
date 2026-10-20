@@ -1678,16 +1678,16 @@ CLIENT_AUTH_SHAPE_ARMS = {
     ),
     # K1 (ADR-0972): `"off"` is refused by name, before the two cross-checks.
     "off-refused": (
-        "which iam-db refuses: iam-db admits a caller by",
-        '{{- if eq .Values.tls.clientAuth "off" }}',
+        "which iam-db refuses while `tls.enabled` is true",
+        '{{- if and (eq .Values.tls.clientAuth "off") .Values.tls.enabled }}',
     ),
     "verifying-without-tls": (
         "but `tls.enabled` is false: a cleartext listener",
-        "{{- if not .Values.tls.enabled }}",
+        '{{- if and (ne .Values.tls.clientAuth "off") (not .Values.tls.enabled) }}',
     ),
     "verifying-without-ca": (
         "but `tls.clientCaSecret` names no authority to",
-        "{{- if not .Values.tls.clientCaSecret }}",
+        '{{- if and (ne .Values.tls.clientAuth "off") (not .Values.tls.clientCaSecret) }}',
     ),
 }
 
@@ -1698,12 +1698,13 @@ CA = "  clientCaSecret: iam-db-client-ca\n  clientCaSecretKey: ca.crt\n"
 # volume rendered exactly when `ca` (TLS on AND a CA Secret named). `("schema",)` means refused by
 # `values.schema.json` naming `clientAuth`; `("refuse", arm)` by THAT arm.
 CLIENT_AUTH_SHAPES = (
-    # K1 (ADR-0972): `"off"` is refused whatever sits beside it — with no CA,
-    # with a CA, and with TLS disabled. The constructed red case: this chart
-    # must fail at render with the `off-refused` arm's named sentence.
+    # K1 (ADR-0972): `"off"` with TLS on is refused whatever sits beside it —
+    # with no CA and with a CA. The constructed red case: this chart must fail
+    # at render with the `off-refused` arm's named sentence. With TLS off,
+    # `"off"` renders (fail-closed at runtime; D80's all-off render).
     ("off", 'tls:\n  enabled: true\n  clientAuth: "off"\n', ("refuse", "off-refused")),
     ("off-with-ca", 'tls:\n  enabled: true\n  clientAuth: "off"\n' + CA, ("refuse", "off-refused")),
-    ("off-tls-disabled", 'tls:\n  enabled: false\n  clientAuth: "off"\n' + CA, ("refuse", "off-refused")),
+    ("off-tls-disabled", 'tls:\n  enabled: false\n  clientAuth: "off"\n' + CA, ("render", "off", False)),
     ("optional", 'tls:\n  enabled: true\n  clientAuth: "optional"\n' + CA, ("render", "optional", True)),
     ("required", 'tls:\n  enabled: true\n  clientAuth: "required"\n' + CA, ("render", "required", True)),
     ("absent", "tls:\n  enabled: true\n", ("schema",)),
@@ -1732,9 +1733,9 @@ CLIENT_AUTH_SHAPES = (
 )
 
 EXPECTED_CLIENT_AUTH_SHAPES = 14
-EXPECTED_CLIENT_AUTH_SHAPES_RENDERED = 2
+EXPECTED_CLIENT_AUTH_SHAPES_RENDERED = 3
 EXPECTED_CLIENT_AUTH_SHAPES_SCHEMA = 1
-EXPECTED_CLIENT_AUTH_SHAPES_REFUSED = 11
+EXPECTED_CLIENT_AUTH_SHAPES_REFUSED = 10
 
 # The one shape the schema catches (absence, by `required`), rendered WITH THE
 # SCHEMA SKIPPED: it must then reach its own render-check arm rather than a Go
@@ -1866,7 +1867,7 @@ def test_client_auth_renders_unconditionally_beside_both_tls_switches(tmp_path):
 
 def test_client_auth_off_is_refused_by_name_in_the_ci_values_too(tmp_path):
     """K1 (ADR-0972), the constructed red case: `chart/ci/values.yaml` states
-    `required`, so an overlay moving it back to `"off"` must fail the render
+    `required` with TLS on, so an overlay moving it back to `"off"` must fail the render
     with the named sentence. Asserted with schema validation ON."""
     overlay = shape_overlay('tls:\n  clientAuth: "off"\n', tmp_path)
     result = render(CHART, "--values", str(overlay))
