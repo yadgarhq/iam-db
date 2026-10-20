@@ -253,16 +253,20 @@ spec:
             - name: LISTEN_TLS_KEY_FILE
               value: /var/run/secrets/iam-db-tls/tls-key.pem
             {{- end }}
-            # RENDERED UNCONDITIONALLY (card B-U5, X-ADR-1), for the reason the
-            # flag above is: the binary reads `LISTEN_TLS_CLIENT_AUTH` WHETHER
-            # OR NOT TLS IS ON and refuses to boot without it, so nesting it
-            # under `tls.enabled` — the expand's shape, B-U5E — would hand a
-            # cleartext deployment a binary that cannot start.
-            # `templates/render-checks.yaml` has already confirmed the value is
-            # one of `off`, `optional` or `required`, and refused a verifying
-            # mode beside `tls.enabled: false` or with no `tls.clientCaSecret`.
+            # ADR-0975: ALWAYS RENDERED, because the binary reads
+            # LISTEN_TLS_CLIENT_AUTH whether TLS is on or off and refuses it
+            # absent (lifecycle `ServerTls::from_lookup`), and refuses any value
+            # but "off" beside a cleartext listener. With TLS on it is the
+            # operator's mode (`render-checks.yaml` refuses "off" and validates
+            # the rest). With TLS off it is the CONSTANT "off": the user's value
+            # is ignored and not validated, so a cleartext listener boots, sees
+            # no client certificate name, and refuses every RPC (ADR-0972).
             - name: LISTEN_TLS_CLIENT_AUTH
+              {{- if .Values.tls.enabled }}
               value: {{ .Values.tls.clientAuth | quote }}
+              {{- else }}
+              value: "off"
+              {{- end }}
             {{- if and .Values.tls.enabled .Values.tls.clientCaSecret }}
             # THE AUTHORITY iam-db CHECKS A CALLER'S CERTIFICATE AGAINST under
             # `optional` or `required` (card B-U5). RENDERED ONLY WHEN TLS IS

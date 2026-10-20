@@ -1628,6 +1628,8 @@ def test_the_unconditional_ternary_agrees_with_tls_enabled_in_both_directions(tm
     test in this file — the shape tables above assert refusals, and the
     golden render below states `tls.enabled: true` throughout, so neither
     sees the false case at all. This is the one test that would redden."""
+    # ADR-0975: with `tls.enabled` false the chart renders and does not validate
+    # `tls.clientAuth`, so the false direction renders again.
     for enabled, want in [(False, '"0"'), (True, '"1"')]:
         overlay = shape_overlay(f"tls:\n  enabled: {str(enabled).lower()}\n", tmp_path / str(enabled))
         result = render(CHART, "--values", str(overlay))
@@ -1668,13 +1670,14 @@ CLIENT_AUTH_SHAPE_ARMS = {
         "must be `off`, `optional` or `required`",
         '{{- if not (has .Values.tls.clientAuth (list "off" "optional" "required")) }}',
     ),
-    "verifying-without-tls": (
-        "but `tls.enabled` is false: a cleartext listener",
-        '{{- if and (ne .Values.tls.clientAuth "off") (not .Values.tls.enabled) }}',
+    # K1 (ADR-0972): `"off"` is refused by name, before the two cross-checks.
+    "off-refused": (
+        "which iam-db refuses while `tls.enabled` is true",
+        '{{- if eq .Values.tls.clientAuth "off" }}',
     ),
     "verifying-without-ca": (
         "but `tls.clientCaSecret` names no authority to",
-        '{{- if and (ne .Values.tls.clientAuth "off") (not .Values.tls.clientCaSecret) }}',
+        "{{- if not .Values.tls.clientCaSecret }}",
     ),
 }
 
@@ -1685,11 +1688,17 @@ CA = "  clientCaSecret: iam-db-client-ca\n  clientCaSecretKey: ca.crt\n"
 # volume rendered exactly when `ca` (TLS on AND a CA Secret named). `("schema",)` means refused by
 # `values.schema.json` naming `clientAuth`; `("refuse", arm)` by THAT arm.
 CLIENT_AUTH_SHAPES = (
-    ("off", 'tls:\n  enabled: true\n  clientAuth: "off"\n', ("render", "off", False)),
-    # A CA named beside `off` is still mounted (the expand's gate, kept so an
-    # `off` render is unchanged): it lets a hop stage the CA before it moves
-    # to `optional`. The binary logs that it verifies nothing.
-    ("off-with-ca", 'tls:\n  enabled: true\n  clientAuth: "off"\n' + CA, ("render", "off", True)),
+    # K1 (ADR-0972): `"off"` with TLS on is refused whatever sits beside it —
+    # with no CA and with a CA. The constructed red case: this chart must fail
+    # at render with the `off-refused` arm's named sentence. With TLS off,
+    # `"off"` renders (fail-closed at runtime; D80's all-off render).
+    ("off", 'tls:\n  enabled: true\n  clientAuth: "off"\n', ("refuse", "off-refused")),
+    ("off-with-ca", 'tls:\n  enabled: true\n  clientAuth: "off"\n' + CA, ("refuse", "off-refused")),
+    # ADR-0975: with TLS off the chart neither validates the mode nor renders the
+    # user's value. The binary reads `LISTEN_TLS_CLIENT_AUTH` unconditionally
+    # (absent: ClientAuthMissing; non-off beside cleartext: ClientAuthWithoutTls),
+    # so every one of these rows renders the CONSTANT "off". MUTATION: moving the
+    # env var back under the TLS gate, or rendering the user's value, reddens them.
     ("off-tls-disabled", 'tls:\n  enabled: false\n  clientAuth: "off"\n' + CA, ("render", "off", False)),
     ("optional", 'tls:\n  enabled: true\n  clientAuth: "optional"\n' + CA, ("render", "optional", True)),
     ("required", 'tls:\n  enabled: true\n  clientAuth: "required"\n' + CA, ("render", "required", True)),
@@ -1704,8 +1713,16 @@ CLIENT_AUTH_SHAPES = (
     (
         "required-tls-disabled",
         'tls:\n  enabled: false\n  clientAuth: "required"\n' + CA,
-        ("refuse", "verifying-without-tls"),
+        ("render", "off", False),
     ),
+    (
+        "bad-mode-tls-disabled",
+        'tls:\n  enabled: false\n  clientAuth: "nope"\n',
+        ("render", "off", False),
+    ),
+    ("unquoted-off-tls-disabled", "tls:\n  enabled: false\n  clientAuth: off\n", ("render", "off", False)),
+    ("null-tls-disabled", "tls:\n  enabled: false\n  clientAuth:\n", ("render", "off", False)),
+    ("optional-tls-disabled", 'tls:\n  enabled: false\n  clientAuth: "optional"\n', ("render", "off", False)),
     (
         "required-no-ca",
         'tls:\n  enabled: true\n  clientAuth: "required"\n',
@@ -1718,10 +1735,10 @@ CLIENT_AUTH_SHAPES = (
     ),
 )
 
-EXPECTED_CLIENT_AUTH_SHAPES = 14
-EXPECTED_CLIENT_AUTH_SHAPES_RENDERED = 5
+EXPECTED_CLIENT_AUTH_SHAPES = 18
+EXPECTED_CLIENT_AUTH_SHAPES_RENDERED = 8
 EXPECTED_CLIENT_AUTH_SHAPES_SCHEMA = 1
-EXPECTED_CLIENT_AUTH_SHAPES_REFUSED = 8
+EXPECTED_CLIENT_AUTH_SHAPES_REFUSED = 9
 
 # The one shape the schema catches (absence, by `required`), rendered WITH THE
 # SCHEMA SKIPPED: it must then reach its own render-check arm rather than a Go
@@ -1765,8 +1782,9 @@ def examine_the_client_auth_shapes(chart: Path, destination: Path) -> tuple[list
                 failures.append(f"{label}: expected a render, refused instead: {result.stderr.strip()}")
                 continue
             rendered = env_value(result.stdout, "LISTEN_TLS_CLIENT_AUTH")
-            if rendered != f'value: "{mode}"':
-                failures.append(f"{label}: LISTEN_TLS_CLIENT_AUTH rendered as {rendered!r}, expected {mode!r}")
+            want = f'value: "{mode}"'
+            if rendered != want:
+                failures.append(f"{label}: LISTEN_TLS_CLIENT_AUTH rendered as {rendered!r}, expected {want!r}")
             want_ca = ca
             for marker in CLIENT_CA_MARKERS:
                 if (marker in result.stdout) != want_ca:
@@ -1832,22 +1850,30 @@ def test_with_the_schema_skipped_each_shape_reaches_its_own_arm(tmp_path):
     assert failures == [], "\n".join(failures)
 
 
-def test_client_auth_renders_unconditionally_beside_both_tls_switches(tmp_path):
-    """K-1 for the mode: `LISTEN_TLS_CLIENT_AUTH` renders whether `tls.enabled`
-    is true or false, because the binary reads it either way.
+def test_client_auth_renders_the_constant_off_with_tls_off(tmp_path):
+    """ADR-0975: `LISTEN_TLS_CLIENT_AUTH` renders the operator's mode with
+    `tls.enabled` true and the constant "off" with it false, where the mode is
+    not validated. The binary refuses it absent either way. MUTATION: moving the
+    env var back under `tls.enabled` turns the `false` row red."""
+    on = shape_overlay('tls:\n  enabled: true\n  clientAuth: "required"\n' + CA, tmp_path / "true")
+    result = render(CHART, "--values", str(on))
+    assert result.returncode == 0, result.stderr
+    assert env_value(result.stdout, "LISTEN_TLS_CLIENT_AUTH") == 'value: "required"'
+    off = shape_overlay('tls:\n  enabled: false\n  clientAuth: "required"\n' + CA, tmp_path / "false")
+    result = render(CHART, "--values", str(off))
+    assert result.returncode == 0, result.stderr
+    assert env_value(result.stdout, "LISTEN_TLS_CLIENT_AUTH") == 'value: "off"'
 
-    MUTATION: nest the env var back under `tls.enabled` (the expand's shape)
-    and the `false` row reddens — a cleartext deployment would get a binary
-    that refuses to boot."""
-    for enabled in (False, True):
-        overlay = shape_overlay(
-            f'tls:\n  enabled: {str(enabled).lower()}\n  clientAuth: "off"\n', tmp_path / str(enabled)
-        )
-        result = render(CHART, "--values", str(overlay))
-        assert result.returncode == 0, result.stderr
-        assert env_value(result.stdout, "LISTEN_TLS_CLIENT_AUTH") == 'value: "off"', (
-            f"tls.enabled: {enabled} did not render LISTEN_TLS_CLIENT_AUTH as \"off\""
-        )
+
+def test_client_auth_off_is_refused_by_name_in_the_ci_values_too(tmp_path):
+    """K1 (ADR-0972), the constructed red case: `chart/ci/values.yaml` states
+    `required` with TLS on, so an overlay moving it back to `"off"` must fail the render
+    with the named sentence. Asserted with schema validation ON."""
+    overlay = shape_overlay('tls:\n  clientAuth: "off"\n', tmp_path)
+    result = render(CHART, "--values", str(overlay))
+    assert result.returncode != 0, result.stdout
+    assert CLIENT_AUTH_SHAPE_ARMS["off-refused"][0] in result.stderr, result.stderr
+    assert "ADR-0972" in result.stderr, result.stderr
 
 
 def test_the_client_ca_mount_is_the_path_the_env_names(tmp_path):

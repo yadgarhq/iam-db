@@ -79,11 +79,15 @@ tls:
   # the `LISTEN_TLS_CLIENT_AUTH` it renders, whether or not TLS is on. Set
   # it explicitly, QUOTED (YAML 1.1 reads a bare off as false):
   #
-  #   clientAuth: "off"         # verify no caller; the value every hop
-  #                              # runs until its own flip, and the
-  #                              # emergency value. Deleting the key is a
-  #                              # render refusal, not a way to turn
-  #                              # verification off.
+  #   clientAuth: "off"         # REFUSED at render with `enabled: true`
+  #                              # (K1, ADR-0972): it verifies no caller,
+  #                              # and iam-db admits a caller by the name
+  #                              # in its client certificate. With
+  #                              # `enabled: false` this value is ignored
+  #                              # and the constant "off" is rendered
+  #                              # (ADR-0975): the cleartext listener
+  #                              # boots and refuses every RPC. Deleting
+  #                              # the key is a schema refusal either way.
   #   clientAuth: "optional"    # verify a presented certificate, admit a
   #                              # caller presenting none — a staging step,
   #                              # not a control
