@@ -1,11 +1,13 @@
 //! `IamDbService`, and nothing else.
 //!
 //! ONE MECHANICAL RULE DECIDES WHAT IS IN THIS FILE, so a reader never guesses
-//! and a later change never negotiates: a trait method here turns a `Request`
-//! into a `Call` and hands the work to the operation next door. What it keeps is
-//! what differs per RPC and per RPC only — the name on every telemetry record,
-//! D67's `Kind`, and which identity the record is scoped to. What it hands over
-//! is every statement that touches the store.
+//! and a later change never negotiates: a trait method here reads the caller's
+//! client-certificate name and calls its `_as` twin in `seam`. The twin turns
+//! the `Request` into a `Call`, passes it through the caller gate
+//! (`caller::admitted`), and hands the work to the operation next door. What
+//! the twin keeps is what differs per RPC and per RPC only — the name on every
+//! telemetry record, D67's `Kind`, and which identity the record is scoped to.
+//! What it hands over is every statement that touches the store.
 //!
 //! **THE `Call` IS PASSED IN RATHER THAN WRAPPED AROUND.** An operation finishes
 //! or fails its own `Call`, at the point it knows the outcome, which is what lets
@@ -32,10 +34,8 @@ impl IamDbService for IamDb {
         &self,
         req: Request<ResolveCredentialRequest>,
     ) -> Result<Response<ResolveCredentialResponse>, Status> {
-        let rid = request_id_of(&req);
-        let r = req.into_inner();
-        let call = Call::start(SERVICE, "ResolveCredential", Kind::Read, tel(rid, ""));
-        self.resolve(r, call).await
+        let caller = caller_common_name(&req);
+        self.resolve_credential_as(caller.as_deref(), req).await
     }
 
     /// Return the stored hash for `iam` to verify against.
@@ -47,35 +47,24 @@ impl IamDbService for IamDb {
         &self,
         req: Request<GetPasswordHashRequest>,
     ) -> Result<Response<GetPasswordHashResponse>, Status> {
-        let rid = request_id_of(&req);
-        let r = req.into_inner();
-        let call = Call::start(SERVICE, "GetPasswordHash", Kind::Read, tel(rid, ""));
-        self.password_hash(r, call).await
+        let caller = caller_common_name(&req);
+        self.get_password_hash_as(caller.as_deref(), req).await
     }
 
     async fn set_password(
         &self,
         req: Request<SetPasswordRequest>,
     ) -> Result<Response<SetPasswordResponse>, Status> {
-        let rid = request_id_of(&req);
-        let r = req.into_inner();
-        let call = Call::start(SERVICE, "SetPassword", Kind::Write, tel(rid, &r.user_id));
-        self.store_password(r, call).await
+        let caller = caller_common_name(&req);
+        self.set_password_as(caller.as_deref(), req).await
     }
 
     async fn create_credential(
         &self,
         req: Request<CreateCredentialRequest>,
     ) -> Result<Response<CreateCredentialResponse>, Status> {
-        let rid = request_id_of(&req);
-        let r = req.into_inner();
-        let call = Call::start(
-            SERVICE,
-            "CreateCredential",
-            Kind::Write,
-            tel(rid.clone(), &r.user_id),
-        );
-        self.mint_credential(r, &rid, call).await
+        let caller = caller_common_name(&req);
+        self.create_credential_as(caller.as_deref(), req).await
     }
 
     /// Revoke, and return who it belonged to.
@@ -88,15 +77,8 @@ impl IamDbService for IamDb {
         &self,
         req: Request<RevokeCredentialRequest>,
     ) -> Result<Response<RevokeCredentialResponse>, Status> {
-        let rid = request_id_of(&req);
-        let r = req.into_inner();
-        let call = Call::start(
-            SERVICE,
-            "RevokeCredential",
-            Kind::Write,
-            tel(rid.clone(), ""),
-        );
-        self.revoke(r, &rid, call).await
+        let caller = caller_common_name(&req);
+        self.revoke_credential_as(caller.as_deref(), req).await
     }
 
     /// Revoke every live credential one person holds, and say how many
@@ -110,40 +92,24 @@ impl IamDbService for IamDb {
         &self,
         req: Request<RevokeAllCredentialsRequest>,
     ) -> Result<Response<RevokeAllCredentialsResponse>, Status> {
-        let rid = request_id_of(&req);
-        let r = req.into_inner();
-        let call = Call::start(
-            SERVICE,
-            "RevokeAllCredentials",
-            Kind::Write,
-            tel(rid.clone(), &r.user_id),
-        );
-        self.revoke_all(r, &rid, call).await
+        let caller = caller_common_name(&req);
+        self.revoke_all_credentials_as(caller.as_deref(), req).await
     }
 
     async fn create_user(
         &self,
         req: Request<CreateUserRequest>,
     ) -> Result<Response<CreateUserResponse>, Status> {
-        let rid = request_id_of(&req);
-        let r = req.into_inner();
-        let call = Call::start(SERVICE, "CreateUser", Kind::Write, tel(rid.clone(), ""));
-        self.insert_user(r, &rid, call).await
+        let caller = caller_common_name(&req);
+        self.create_user_as(caller.as_deref(), req).await
     }
 
     async fn add_team_member(
         &self,
         req: Request<AddTeamMemberRequest>,
     ) -> Result<Response<AddTeamMemberResponse>, Status> {
-        let rid = request_id_of(&req);
-        let r = req.into_inner();
-        let call = Call::start(
-            SERVICE,
-            "AddTeamMember",
-            Kind::Write,
-            tel(rid.clone(), &r.user_id),
-        );
-        self.add_member(r, &rid, call).await
+        let caller = caller_common_name(&req);
+        self.add_team_member_as(caller.as_deref(), req).await
     }
 
     /// Removing a member changes what that user can see, so the caller MUST
@@ -153,40 +119,24 @@ impl IamDbService for IamDb {
         &self,
         req: Request<RemoveTeamMemberRequest>,
     ) -> Result<Response<RemoveTeamMemberResponse>, Status> {
-        let rid = request_id_of(&req);
-        let r = req.into_inner();
-        let call = Call::start(
-            SERVICE,
-            "RemoveTeamMember",
-            Kind::Write,
-            tel(rid.clone(), &r.user_id),
-        );
-        self.remove_member(r, &rid, call).await
+        let caller = caller_common_name(&req);
+        self.remove_team_member_as(caller.as_deref(), req).await
     }
 
     async fn create_enrolment(
         &self,
         req: Request<CreateEnrolmentRequest>,
     ) -> Result<Response<CreateEnrolmentResponse>, Status> {
-        let rid = request_id_of(&req);
-        let r = req.into_inner();
-        let call = Call::start(
-            SERVICE,
-            "CreateEnrolment",
-            Kind::Write,
-            tel(rid.clone(), &r.user_id),
-        );
-        self.mint_enrolment(r, &rid, call).await
+        let caller = caller_common_name(&req);
+        self.create_enrolment_as(caller.as_deref(), req).await
     }
 
     async fn redeem_enrolment(
         &self,
         req: Request<RedeemEnrolmentRequest>,
     ) -> Result<Response<RedeemEnrolmentResponse>, Status> {
-        let rid = request_id_of(&req);
-        let r = req.into_inner();
-        let call = Call::start(SERVICE, "RedeemEnrolment", Kind::Write, tel(rid, ""));
-        self.redeem(r, call).await
+        let caller = caller_common_name(&req);
+        self.redeem_enrolment_as(caller.as_deref(), req).await
     }
 
     /// The read behind `ListCredentials`, and the only arm returning a
@@ -200,40 +150,25 @@ impl IamDbService for IamDb {
         &self,
         req: Request<ListCredentialsRequest>,
     ) -> Result<Response<ListCredentialsResponse>, Status> {
-        let rid = request_id_of(&req);
-        let r = req.into_inner();
-        let call = Call::start(SERVICE, "ListCredentials", Kind::Read, tel(rid, &r.user_id));
-        self.credential_page(r, call).await
+        let caller = caller_common_name(&req);
+        self.list_credentials_as(caller.as_deref(), req).await
     }
 
     async fn set_user_admin(
         &self,
         req: Request<SetUserAdminRequest>,
     ) -> Result<Response<SetUserAdminResponse>, Status> {
-        let rid = request_id_of(&req);
-        let r = req.into_inner();
-        let call = Call::start(
-            SERVICE,
-            "SetUserAdmin",
-            Kind::Write,
-            tel(rid.clone(), &r.user_id),
-        );
-        self.set_admin(r, &rid, call).await
+        let caller = caller_common_name(&req);
+        self.set_user_admin_as(caller.as_deref(), req).await
     }
 
     async fn set_rate_limit_override(
         &self,
         req: Request<SetRateLimitOverrideRequest>,
     ) -> Result<Response<SetRateLimitOverrideResponse>, Status> {
-        let rid = request_id_of(&req);
-        let r = req.into_inner();
-        let call = Call::start(
-            SERVICE,
-            "SetRateLimitOverride",
-            Kind::Write,
-            tel(rid.clone(), &r.user_id),
-        );
-        self.set_rate_limit(r, &rid, call).await
+        let caller = caller_common_name(&req);
+        self.set_rate_limit_override_as(caller.as_deref(), req)
+            .await
     }
 
     /// Write ONE LEVEL of ADR-0522's inheritable setting.
@@ -285,20 +220,8 @@ impl IamDbService for IamDb {
         &self,
         req: Request<SetInheritedSettingRequest>,
     ) -> Result<Response<SetInheritedSettingResponse>, Status> {
-        let rid = request_id_of(&req);
-        let r = req.into_inner();
-        // `tel`'s `user_id` STAYS EMPTY, and that is ADR-0534 rather than an
-        // oversight. The only identity in this request is `unverified_actor`,
-        // which is self-asserted; putting it where every other record in the
-        // estate carries an ATTESTED `Scope.user_id` would make a dashboard join
-        // an unverifiable string to a verified one.
-        let call = Call::start(
-            SERVICE,
-            "SetInheritedSetting",
-            Kind::Write,
-            tel(rid.clone(), ""),
-        );
-        self.store_setting(r, &rid, call).await
+        let caller = caller_common_name(&req);
+        self.set_inherited_setting_as(caller.as_deref(), req).await
     }
 
     /// Whether this store's rows were encrypted under the key set the caller
@@ -315,10 +238,8 @@ impl IamDbService for IamDb {
         &self,
         req: Request<GetKeyIdentityRequest>,
     ) -> Result<Response<GetKeyIdentityResponse>, Status> {
-        let rid = request_id_of(&req);
-        let r = req.into_inner();
-        let call = Call::start(SERVICE, "GetKeyIdentity", Kind::Read, tel(rid, ""));
-        self.key_identity(r, call).await
+        let caller = caller_common_name(&req);
+        self.get_key_identity_as(caller.as_deref(), req).await
     }
 
     /// Record the marker, ONCE, and only where this store holds neither a
@@ -338,9 +259,7 @@ impl IamDbService for IamDb {
         &self,
         req: Request<SetKeyIdentityRequest>,
     ) -> Result<Response<SetKeyIdentityResponse>, Status> {
-        let rid = request_id_of(&req);
-        let r = req.into_inner();
-        let call = Call::start(SERVICE, "SetKeyIdentity", Kind::Write, tel(rid, ""));
-        self.store_key_identity(r, call).await
+        let caller = caller_common_name(&req);
+        self.set_key_identity_as(caller.as_deref(), req).await
     }
 }
