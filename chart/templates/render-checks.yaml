@@ -181,6 +181,14 @@ render.
 `optional` and `required` were refused outright while B-U5E's expand was the
 only half shipped. This release reads them, so that refusal is gone.
 */}}
+{{/*
+ADR-0974: WITH `tls.enabled` FALSE THIS CHART DOES NOT VALIDATE OR RENDER
+`tls.clientAuth` AT ALL. A cleartext listener carries no client certificate, so
+the binary sees no name and refuses every RPC (ADR-0972): validating the mode
+there protects nothing, and the D80 all-off render needs it to render. Every
+check below therefore sits inside `tls.enabled`.
+*/}}
+{{- if .Values.tls.enabled }}
 {{- if not (hasKey .Values.tls "clientAuth") }}
 {{- fail (join "" (list
       "iam-db: `tls.clientAuth` is absent from the values. It renders "
@@ -201,36 +209,27 @@ only half shipped. This release reads them, so that refusal is gone.
       .Values.tls.clientAuth) }}
 {{- end }}
 {{/*
-K1 (ADR-0972): `"off"` IS REFUSED WHILE TLS IS ON. iam-db gates every verb on
+K1 (ADR-0972, ADR-0974): `"off"` IS REFUSED (TLS IS ON HERE). iam-db gates every verb on
 the caller's certificate name, and `"off"` verifies no caller, so no name
 reaches the gate and every RPC is refused at runtime. The refusal moves that
-outage to the render. With `tls.enabled` false (a cleartext listener, which the
-D80 all-off render produces) `"off"` still renders: the binary then has no
-client certificate name either and refuses every call at runtime, so no path is
-open silently (ADR-0972 fail-closed). `required` and `optional` over a
-cleartext listener stay refused by the cross-check below.
+outage to the render. With `tls.enabled` false none of this runs (ADR-0974,
+see above).
 */}}
-{{- if and (eq .Values.tls.clientAuth "off") .Values.tls.enabled }}
+{{- if eq .Values.tls.clientAuth "off" }}
 {{- fail (join "" (list
       "iam-db: `tls.clientAuth` is \"off\", which iam-db refuses while `tls.enabled` is true: iam-db admits a caller by "
       "the name in its client certificate, and \"off\" verifies no certificate, so every RPC "
       "would be refused (ADR-0972). Set `tls.clientAuth: \"required\"`, and name the client "
       "CA in `tls.clientCaSecret` and `tls.clientCaSecretKey`.")) }}
 {{- end }}
-{{- if and (ne .Values.tls.clientAuth "off") (not .Values.tls.enabled) }}
-{{- fail (printf (join "" (list
-      "iam-db: `tls.clientAuth` is %q but `tls.enabled` is false: a cleartext listener "
-      "cannot verify a client certificate, and iam-db refuses to boot this way. Set "
-      "`tls.enabled: true`, or `tls.clientAuth: \"off\"`."))
-      .Values.tls.clientAuth) }}
-{{- end }}
-{{- if and (ne .Values.tls.clientAuth "off") (not .Values.tls.clientCaSecret) }}
+{{- if not .Values.tls.clientCaSecret }}
 {{- fail (printf (join "" (list
       "iam-db: `tls.clientAuth` is %q but `tls.clientCaSecret` names no authority to "
       "verify a caller's certificate against, and iam-db refuses to boot this way. Name "
       "the Secret holding that authority in `tls.clientCaSecret`, and its key in "
       "`tls.clientCaSecretKey`."))
       .Values.tls.clientAuth) }}
+{{- end }}
 {{- end }}
 
 {{/*
