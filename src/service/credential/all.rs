@@ -54,6 +54,9 @@ impl IamDb {
             rows: revoked,
             ..Default::default()
         });
-        Ok(Response::new(RevokeAllCredentialsResponse { revoked }))
+        Ok(Response::new(RevokeAllCredentialsResponse {
+            revoked,
+            voided_enrolments: 0,
+        }))
     }
 }

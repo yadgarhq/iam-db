@@ -35,6 +35,7 @@ impl IamDb {
             Some(row) => GetPasswordHashResponse {
                 user_id: row.try_get("user_id").map_err(db)?,
                 argon2id_hash: row.try_get("argon2id_hash").map_err(db)?,
+                credential_epoch: 0,
             },
             None => GetPasswordHashResponse::default(),
         };

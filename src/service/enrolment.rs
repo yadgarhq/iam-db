@@ -479,5 +479,7 @@ async fn redeemed(
         enrolment_id,
         external_id_ciphertext,
         revoked_existing_credentials: revoking,
+        credential_epoch: 0,
+        voided_enrolments: 0,
     }))
 }

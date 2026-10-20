@@ -87,6 +87,8 @@ pub(super) async fn replay(
         enrolment_id,
         external_id_ciphertext,
         revoked_existing_credentials,
+        credential_epoch: 0,
+        voided_enrolments: 0,
     }))
 }
 

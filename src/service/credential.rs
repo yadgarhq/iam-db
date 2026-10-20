@@ -116,6 +116,7 @@ impl IamDb {
             is_admin,
             rate_limit_overrides,
             owner_reads_own_record: Some(owner_reads_own_record),
+            expires_at: None,
         };
         call.finish(Outcome {
             status: "OK",
