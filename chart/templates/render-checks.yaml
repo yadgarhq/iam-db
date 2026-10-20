@@ -192,7 +192,7 @@ only half shipped. This release reads them, so that refusal is gone.
 {{- fail (printf (join "" (list
       "iam-db: `tls.clientAuth` must be a quoted string (\"off\", \"optional\" or "
       "\"required\") and is %s (%s). YAML 1.1 reads a bare off as false: write "
-      "`clientAuth: \"off\"`."))
+      "`clientAuth: \"required\"`."))
       (kindOf .Values.tls.clientAuth) (toJson .Values.tls.clientAuth)) }}
 {{- end }}
 {{- if not (has .Values.tls.clientAuth (list "off" "optional" "required")) }}
@@ -200,14 +200,28 @@ only half shipped. This release reads them, so that refusal is gone.
       "iam-db: `tls.clientAuth` must be `off`, `optional` or `required` and is %q."
       .Values.tls.clientAuth) }}
 {{- end }}
-{{- if and (ne .Values.tls.clientAuth "off") (not .Values.tls.enabled) }}
+{{/*
+K1 (ADR-0972): `"off"` IS REFUSED. iam-db gates every verb on the caller's
+certificate name, and `"off"` verifies no caller, so no name reaches the gate
+and every RPC is refused at runtime. The refusal moves that outage to the
+render. It sits before the two cross-checks below, which therefore apply to
+every value that reaches them.
+*/}}
+{{- if eq .Values.tls.clientAuth "off" }}
+{{- fail (join "" (list
+      "iam-db: `tls.clientAuth` is \"off\", which iam-db refuses: iam-db admits a caller by "
+      "the name in its client certificate, and \"off\" verifies no certificate, so every RPC "
+      "would be refused (ADR-0972). Set `tls.clientAuth: \"required\"`, and name the client "
+      "CA in `tls.clientCaSecret` and `tls.clientCaSecretKey`.")) }}
+{{- end }}
+{{- if not .Values.tls.enabled }}
 {{- fail (printf (join "" (list
       "iam-db: `tls.clientAuth` is %q but `tls.enabled` is false: a cleartext listener "
       "cannot verify a client certificate, and iam-db refuses to boot this way. Set "
-      "`tls.enabled: true`, or `tls.clientAuth: \"off\"`."))
+      "`tls.enabled: true`."))
       .Values.tls.clientAuth) }}
 {{- end }}
-{{- if and (ne .Values.tls.clientAuth "off") (not .Values.tls.clientCaSecret) }}
+{{- if not .Values.tls.clientCaSecret }}
 {{- fail (printf (join "" (list
       "iam-db: `tls.clientAuth` is %q but `tls.clientCaSecret` names no authority to "
       "verify a caller's certificate against, and iam-db refuses to boot this way. Name "

@@ -16,10 +16,13 @@
 # `applications/yadgar.yaml`) already states `true` for this module — this
 # file matches what gets deployed, not a value chosen for this suite alone.
 #
-# `clientAuth: "off"` FOR THE SAME REASON (card B-U5, X-ADR-1, K-8 step 3):
-# the key is required with no default now, and `"off"` is the value every
-# hop runs until its own flip — the value `yadgarhq/chart`'s B-P1 fixture
-# states for this module. QUOTED: a bare off is the boolean false.
+# `clientAuth: "required"` FOR THE SAME REASON (card B-U5, X-ADR-1, K-8 step 3;
+# K1, ADR-0972): the key is required with no default, and the chart refuses
+# `"off"` at render, because iam-db admits a caller by the name in its client
+# certificate. The client CA is named, as `required` demands. QUOTED: a bare
+# off is the boolean false.
 tls:
   enabled: true
-  clientAuth: "off"
+  clientAuth: "required"
+  clientCaSecret: iam-db-tls
+  clientCaSecretKey: ca.crt
