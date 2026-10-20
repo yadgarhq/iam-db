@@ -42,6 +42,13 @@ async fn rows_written_before_the_epoch_and_void_migrations_keep_working() {
         "INSERT INTO iam_enrolment (id, user_id, secret_hash, expires_at)
          VALUES ('yadgar:enrolment:old', 'yadgar:user:old', REPEAT(CHAR(2), 32),
                  CURRENT_TIMESTAMP + INTERVAL 1 HOUR)",
+        // A redemption the previous release recorded, already spent.
+        "INSERT INTO iam_enrolment (id, user_id, secret_hash, expires_at, spent_at)
+         VALUES ('yadgar:enrolment:spent', 'yadgar:user:old', REPEAT(CHAR(4), 32),
+                 CURRENT_TIMESTAMP + INTERVAL 1 HOUR, CURRENT_TIMESTAMP)",
+        "INSERT INTO iam_enrolment_redemption
+             (idempotency_key, secret_hash, enrolment_id, user_id)
+         VALUES ('old-key', REPEAT(CHAR(4), 32), 'yadgar:enrolment:spent', 'yadgar:user:old')",
     ] {
         sqlx::raw_sql(sqlx::AssertSqlSafe(stmt))
             .execute(&pool)
@@ -62,7 +69,17 @@ async fn rows_written_before_the_epoch_and_void_migrations_keep_working() {
         .await
         .expect("a Login against an upgraded person mints");
 
+    // MIGRATION 18'S DEFAULT: a ledger row from before the upgrade replays
+    // with epoch 0, which mints only while nothing has bumped the person since.
+    let replayed = redeem(&svc, 4, OTHER_HASH, "old-key").await;
+    assert_eq!(replayed.outcome, RedeemOutcome::Redeemed as i32);
+    assert_eq!(replayed.credential_epoch, 0);
+
     let got = redeem(&svc, 2, OTHER_HASH, "").await;
     assert_eq!(got.outcome, RedeemOutcome::Redeemed as i32);
     assert_eq!(got.credential_epoch, 1);
+    let err = mint(&svc, "yadgar:user:old", 5, Some(replayed.credential_epoch))
+        .await
+        .expect_err("the pre-upgrade replay's epoch is stale after the bump");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
 }

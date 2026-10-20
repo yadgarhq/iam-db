@@ -228,8 +228,9 @@ impl IamDb {
             // each transaction's gap lock blocks the other's ledger INSERT
             // below, so the race turns into a deadlock.
             //
-            // The real serialisation point is the enrolment row, locked by the
-            // spend UPDATE further down. The second check on that statement's
+            // The real serialisation point is the owner's user row, locked by
+            // `lock_owner` just ahead of the spend (ADR-0972), and then the
+            // enrolment row the spend locks. The second check on the spend's
             // no-op branch is what reads the winner's answer.
             if let Some(replayed) = replay(&mut tx, &key, &r.secret_hash, Lock::No).await? {
                 tx.commit().await.map_err(db)?;

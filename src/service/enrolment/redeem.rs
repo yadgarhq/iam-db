@@ -117,9 +117,10 @@ pub(super) async fn unspent(
     // with no resend.
     //
     // The winner is guaranteed to have COMMITTED by the time this runs.
-    // The loser's UPDATE blocks on the winner's exclusive row lock and
-    // only returns once that transaction ends, so a zero row count here
-    // is already a post-commit observation.
+    // The loser blocks on the winner's exclusive lock on the user row
+    // (`lock_owner`, ahead of the spend) and only proceeds once that
+    // transaction ends, so a zero row count here is already a post-commit
+    // observation.
     //
     // `Lock::Yes` here, `Lock::No` above, and the asymmetry is
     // deliberate. Locking a key that does not exist yet is what would
