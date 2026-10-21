@@ -38,7 +38,7 @@ repos:
     # alone: it adds the `ADR-0523-LIBRARY-WATCHED` declaration this tree now
     # needs, because adopting `yadgar-lifecycle`'s `ServerTls` moved the last
     # boot read in `src/` into the library. No new hook id, so none to adopt.
-    rev: v1.34.0
+    rev: v1.36.1
     hooks:
       - id: gitleaks
       - id: prettier
@@ -52,24 +52,6 @@ repos:
       - id: actionlint
       - id: cargo-fmt
       - id: cargo-clippy
-      - id: cargo-deny
-      - id: observe-coverage
-      - id: helm-lint
-      # ADR-0569's gate (ledger 648), now shared instead of the byte-identical
-      # copy this repository carried at scripts/no_compiled_in_defaults.sh.
-      # Publishing let the sweep run against repositories the copy never
-      # covered; converting this repository's OWN reference changes no verdict
-      # here (see PR body).
-      - id: no-compiled-in-defaults
-      # LEDGER 658. Adopted though it checks nothing today: the largest `run:`
-      # block outside yadgarhq/actions is 303 bytes against an 8000-byte limit,
-      # and this repository measures 0. It is a tripwire for a block someone
-      # writes later, not a fix for anything present now.
-      - id: run-block-size
-      # LEDGER 734, adopting ledger 726's gate: a file read at boot is marked
-      # ADR-0523-WATCHED naming a src/rotate.rs material, or ADR-0523-UNWATCHED
-      # with a reason. This repository had never run it before this PR.
-      - id: boot-reads-watched
       # LEDGER 719. Two ceilings, and they measure different things. `complexity`
       # is the line count — 500 per file, 120 per function — which catches a flat
       # file that grew rather than a tangled one. `cargo-clippy-complexity` is
@@ -102,6 +84,24 @@ repos:
       # so no other hook in this block changes behaviour.
       - id: complexity
       - id: cargo-clippy-complexity
+      - id: cargo-deny
+      - id: observe-coverage
+      - id: helm-lint
+      # ADR-0569's gate (ledger 648), now shared instead of the byte-identical
+      # copy this repository carried at scripts/no_compiled_in_defaults.sh.
+      # Publishing let the sweep run against repositories the copy never
+      # covered; converting this repository's OWN reference changes no verdict
+      # here (see PR body).
+      - id: no-compiled-in-defaults
+      # LEDGER 658. Adopted though it checks nothing today: the largest `run:`
+      # block outside yadgarhq/actions is 303 bytes against an 8000-byte limit,
+      # and this repository measures 0. It is a tripwire for a block someone
+      # writes later, not a fix for anything present now.
+      - id: run-block-size
+      # LEDGER 734, adopting ledger 726's gate: a file read at boot is marked
+      # ADR-0523-WATCHED naming a src/rotate.rs material, or ADR-0523-UNWATCHED
+      # with a reason. This repository had never run it before this PR.
+      - id: boot-reads-watched
       # LEDGER 837. `hooks/no_test_skips.py` refuses a test that stops
       # running — a skip marker, an unsatisfiable cfg, an environment-probe
       # guard at the first statement, a narrowed `cargo test`/pytest
