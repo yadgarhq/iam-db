@@ -1,5 +1,15 @@
 // The identity module's STORAGE boundary (D4). Only `iam` calls this.
 //
+// AND ONLY `iam` IS ADMITTED, ON EVERY RPC (ADR-0972 (1)). An `iam-db` that
+// implements ADR-0972 (1) admits a call only when the peer's verified client
+// certificate has the common name `iam-caller`, iam's leaf. Any other name,
+// and no name at all (a listener with client authentication off, or no client
+// certificate), is refused with PERMISSION_DENIED before the store is touched.
+// That includes GetKeyIdentity and SetKeyIdentity. An `iam-db` built before
+// ADR-0972 (1) checks no name, and NetworkPolicy is then the only control.
+// This is transport identity, not the actor: `unverified_actor` stays
+// audit-only.
+//
 // Every RPC is one business operation and one transaction (D5). There is no
 // generic "run this query" arm, deliberately: a storage API shaped like SQL is
 // one the logic tier can drive into states the module never intended.
@@ -156,6 +166,22 @@ message ResolveCredentialResponse {
   // lock and every team's override, and resolves none of them. See
   // `yadgar.common.v1.InheritedSetting`, which states the resolution once.
   yadgar.common.v1.InheritedSetting owner_reads_own_record = 6;
+
+  // The matched credential's `expires_at`, read in the SAME statement as the
+  // credential (ADR-0972 (3)). `iam` reads it to set
+  // yadgar.iam.v1.ResolveCredentialResponse.valid_for_seconds to
+  // min(300, expires_at - now), floor 1, so the gateway's cache never outlives
+  // the credential. The statement already filters out an expired row, so when
+  // this is present on a live answer it is in the future.
+  //
+  // ABSENT ON A LIVE ANSWER MEANS THE ROW HAS NO EXPIRY: a credential minted
+  // before ADR-0972 (3), which is not backfilled, or an IssueCredential mint
+  // with expires_in_seconds 0. `iam` then keeps 300. Absent
+  // on the negative answer (empty `user_id`) too, where it means nothing. An
+  // `iam-db` too old to set it leaves it absent, which an `iam` reads as "no
+  // expiry" and caches for 300 — today's behaviour, not a new exposure. An old
+  // `iam` ignores the field.
+  optional google.protobuf.Timestamp expires_at = 7;
 }
 
 // Fetch what is needed to verify a password, and nothing else.
@@ -179,6 +205,27 @@ message GetPasswordHashResponse {
   // "wrong password" and the endpoint enumerates accounts.
   string user_id = 1;
   string argon2id_hash = 2;
+
+  // The user's credential epoch, read in the SAME statement as the hash, so
+  // the two are one snapshot (ADR-0972 (4)). `iam` passes it unchanged as
+  // CreateCredentialRequest.expected_credential_epoch when it mints the Login
+  // credential. If a password-setting redemption, RevokeAllCredentials or
+  // SetPassword bumped the epoch after this read, the mint is refused, so a
+  // Login that verified the old password cannot mint a credential that
+  // survives the reset or the revoke-all.
+  //
+  // ZERO IS A REAL EPOCH: the column starts at 0 for every user, so 0 is the
+  // value for a user whose epoch was never bumped. Zero is also what an
+  // `iam-db` built before ADR-0972 (4) sends, because it never sets the field.
+  // That is safe ONLY because such an `iam-db` also ignores
+  // `expected_credential_epoch`, so the mint stays unchecked, as today. 0 and
+  // meaningless when `user_id` is empty.
+  //
+  // MID-ROLL, WITH OLD AND NEW `iam-db` REPLICAS ON ONE DATABASE, an old
+  // replica can answer this read with 0 while the stored epoch is above 0, and
+  // a new replica then refuses the mint: a transient, spurious refusal that
+  // fails closed. The person logs in again once the roll completes.
+  uint64 credential_epoch = 3;
 }
 
 // Replace a password for a user who already has one.
@@ -327,11 +374,11 @@ message CreateEnrolmentResponse {
 // What a redemption attempt actually was.
 //
 // THE SERVER DISTINGUISHES THESE AND THE CALLER MUST NOT. They arrive as a
-// field on a successful response rather than as four different errors, which is
+// field on a successful response rather than as separate errors, which is
 // the shape ResolveCredentialResponse already uses for "no live credential
 // matched" and for the same reason: "this secret was already spent" and "the
-// store is broken" are different outcomes, and only the first three are safe to
-// collapse. `iam` collapses NOT_FOUND, SPENT and EXPIRED into one
+// store is broken" are different outcomes, and only the refusal outcomes are
+// safe to collapse. `iam` collapses NOT_FOUND, SPENT, EXPIRED and VOIDED into one
 // UNAUTHENTICATED before the answer leaves the deployment, and records which of
 // them it was.
 enum RedeemOutcome {
@@ -340,6 +387,15 @@ enum RedeemOutcome {
   REDEEM_OUTCOME_NOT_FOUND = 2;
   REDEEM_OUTCOME_SPENT = 3;
   REDEEM_OUTCOME_EXPIRED = 4;
+
+  // The enrolment was voided before it was redeemed (ADR-0972 (5)): a
+  // revoking redemption or RevokeAllCredentials set its `voided_at`. `iam`
+  // collapses it into the same single UNAUTHENTICATED refusal as NOT_FOUND,
+  // SPENT and EXPIRED, inside the same floor, and records which it was. An
+  // `iam` built before ADR-0972 (5) reads this value as UNSPECIFIED and gives
+  // that same refusal, because it refuses every outcome other than
+  // REDEEM_OUTCOME_REDEEMED.
+  REDEEM_OUTCOME_VOIDED = 5;
 }
 
 // Spend an enrolment AND set the password, in ONE transaction (D5).
@@ -396,6 +452,12 @@ message RedeemEnrolmentRequest {
   // PRECEDES THE LOOKUP of the presented secret, or the refusal itself reports
   // whether that secret exists.
   //
+  // TWO RESPONSE FIELDS ARE NOT THE ORIGINAL OUTCOME ON A REPLAY (ADR-0972).
+  // `credential_epoch` is the user's CURRENT epoch, read inside the replay's
+  // transaction, because the first delivery's value may be stale.
+  // `voided_enrolments` is 0, because it counts what this delivery changed and
+  // a replay changes nothing. See each field.
+  //
   // THE CREDENTIAL IS NOT COVERED BY THIS KEY. See that same field for why it
   // cannot be.
   yadgar.common.v1.Idempotency idempotency = 1;
@@ -449,6 +511,39 @@ message RedeemEnrolmentResponse {
   // that lost the first response with nothing to evict on. False on every
   // outcome but REDEEM_OUTCOME_REDEEMED.
   bool revoked_existing_credentials = 5;
+
+  // The user's credential epoch AFTER this redemption's bump (ADR-0972 (4)).
+  // Every redemption sets a password, so every redemption bumps the epoch,
+  // flagged or not, inside this transaction. `iam` passes the value as
+  // CreateCredentialRequest.expected_credential_epoch for the redemption's
+  // own credential, so that credential is minted under the new epoch and a
+  // concurrent second reset or revoke-all refuses it.
+  //
+  // A REPLAY RETURNS THE USER'S CURRENT EPOCH, read inside the replay's
+  // transaction, and NOT the first delivery's value. A first delivery's value
+  // is stale once anything bumped since, and a retry minting against it
+  // would be refused on every attempt.
+  //
+  // Set only when outcome is REDEEM_OUTCOME_REDEEMED; 0 otherwise. An
+  // `iam-db` built before ADR-0972 (4) sends 0, which is safe for the reason
+  // GetPasswordHashResponse.credential_epoch states: that `iam-db` also
+  // ignores `expected_credential_epoch`.
+  uint64 credential_epoch = 6;
+
+  // The number of the user's OTHER live enrolments this delivery voided
+  // (ADR-0972 (5)). ONLY A REVOKING REDEMPTION VOIDS — one whose enrolment
+  // carried CreateEnrolmentRequest.revoke_existing_credentials — and it voids
+  // every enrolment of the user that is neither spent nor already voided. The
+  // void runs after the spend, so the enrolment being redeemed is spent, never
+  // voided. An unflagged redemption voids nothing and reports 0.
+  //
+  // COUNTED, NOT READ FROM A ROW — unlike `revoked_existing_credentials`
+  // above. A REPLAY REPORTS 0, because it changed nothing; it never returns the
+  // first delivery's count. Zero is a success. An `iam-db` built before
+  // ADR-0972 (5) reports 0 because it voids nothing, so zero does not prove no
+  // enrolment was live. `iam` does not return this to the redeemer: the
+  // person redeeming is not the administrator who asked for the void.
+  uint32 voided_enrolments = 7;
 }
 
 message CreateCredentialRequest {
@@ -462,6 +557,32 @@ message CreateCredentialRequest {
   // service cannot verify it and MUST NOT authorise on it. The rule is stated
   // once, on yadgar.common.v1.UnverifiedActor, rather than restated here.
   yadgar.common.v1.UnverifiedActor unverified_actor = 6;
+
+  // The credential epoch the caller read for this user (ADR-0972 (4)): from
+  // GetPasswordHashResponse.credential_epoch on a Login, and from
+  // RedeemEnrolmentResponse.credential_epoch on a redemption.
+  //
+  // PRESENT: the insert matches the user row only if its epoch still equals
+  // this value, under the same share lock that already checks the user is
+  // live. If the user is live and the epoch has moved, nothing is written and
+  // the answer is FAILED_PRECONDITION ("the account changed since this
+  // credential was asked for"). A bump inside a redemption, RevokeAllCredentials
+  // or SetPassword takes an exclusive lock on the user row, so a mint that
+  // read the old epoch waits for that commit and then fails this check.
+  //
+  // ABSENT: no epoch check, which is the behaviour before ADR-0972 (4).
+  // IssueCredential sends none. OPTIONAL BECAUSE 0 IS A REAL EPOCH, so
+  // presence and not value says whether to check.
+  //
+  // An `iam` that implements ADR-0972 (4) ALWAYS sets it on Login and
+  // RedeemEnrolment mints. Absent is legitimate only from IssueCredential or
+  // from an `iam` built before ADR-0972 (4). `iam-db` cannot tell the paths
+  // apart, so setting it is the caller's obligation.
+  //
+  // MIXED VERSIONS. An `iam` built before ADR-0972 (4) never sets this, so its
+  // mints stay unchecked against a new `iam-db`. An `iam-db` built before it
+  // ignores the field, so a new `iam`'s mints are unchecked against it.
+  optional uint64 expected_credential_epoch = 7;
 }
 message CreateCredentialResponse {
   string credential_id = 1;
@@ -475,6 +596,25 @@ message RevokeCredentialRequest {
   // service cannot verify it and MUST NOT authorise on it. The rule is stated
   // once, on yadgar.common.v1.UnverifiedActor, rather than restated here.
   yadgar.common.v1.UnverifiedActor unverified_actor = 3;
+
+  // The user the credential must belong to (ADR-0972 (2)), relayed by `iam`
+  // from yadgar.iam.v1.RevokeCredentialRequest.user_id. REQUIRED: an `iam-db`
+  // that implements ADR-0972 (2) refuses an empty value with INVALID_ARGUMENT.
+  //
+  // The statement matches on the PAIR: `id = ? AND user_id = ? AND revoked_at
+  // IS NULL`. If no row carries that `(credential_id, user_id)` pair at all,
+  // the answer is NOT_FOUND and nothing is written — a credential of another
+  // user reads exactly as an unknown id. A credential of this user that is
+  // already revoked answers OK and changes nothing, as today.
+  //
+  // MIXED VERSIONS. An `iam-db` built before ADR-0972 (2) ignores this field
+  // and revokes by id alone. A new `iam-db` refuses, with INVALID_ARGUMENT, an
+  // `iam` too old to send it. That happens while old and new `iam` replicas
+  // overlap during a roll, and after an image rollback of `iam` alone while
+  // `iam-db` stays new. The refusal FAILS CLOSED: the verb is admin-only, and
+  // the wrong credential is never revoked. The operator retries once every
+  // `iam` replica relays the field.
+  string user_id = 4;
 }
 message RevokeCredentialResponse {
   // Who it belonged to, so the caller can publish the invalidation event (D72)
@@ -511,6 +651,8 @@ message RevokeCredentialResponse {
 // IT DOES NOT CHANGE THE PASSWORD AND DOES NOT STOP LOGIN. The person can log
 // in again afterwards and mint a new credential; this verb contains the tokens
 // that exist now and nothing more. A leaked password is a different threat.
+// It DOES bump the user's credential epoch (ADR-0972 (4)), so a Login that
+// verified the password BEFORE this commit cannot mint a credential after it.
 //
 // `iam` PUBLISHES CREDENTIAL_REVOKED AFTER THE COMMIT WHATEVER `revoked` IS
 // (ADR-0945). A failed publish does not fail the call, and the gateway
@@ -533,6 +675,18 @@ message RevokeAllCredentialsResponse {
   // The number of credential rows THIS DELIVERY changed. See the request's
   // comment: a redelivery does not return the first delivery's count.
   uint32 revoked = 1;
+
+  // The number of the user's live enrolments THIS DELIVERY voided (ADR-0972
+  // (5)). In the same transaction, after the user-row lock, revoke-all sets
+  // `voided_at` on every enrolment of the user where `spent_at IS NULL AND
+  // voided_at IS NULL` — an outstanding bootstrap enrolment included — and
+  // counts the rows. A voided enrolment can no longer be redeemed.
+  //
+  // COUNTED, EXACTLY LIKE `revoked`: a redelivery reports only what it
+  // changed, usually 0, and never the first delivery's count. Zero is a
+  // success. An `iam-db` built before ADR-0972 (5) reports 0 because it voids
+  // nothing, so zero does not prove no enrolment was live.
+  uint32 voided_enrolments = 2;
 }
 
 // The read behind yadgar.iam.v1.ListCredentials, and the only RPC on this
@@ -548,6 +702,16 @@ message ListCredentialsRequest {
   string user_id = 1;
   int32 page_size = 2;
   string page_token = 3;
+
+  // WHO THE GATEWAY BELIEVED WAS CALLING, FOR THE AUDIT RECORD ONLY. This
+  // service cannot verify it and MUST NOT authorise on it. The rule is stated
+  // once, on yadgar.common.v1.UnverifiedActor, rather than restated here.
+  //
+  // `iam` relays yadgar.iam.v1.ListCredentialsRequest.unverified_actor here
+  // unchanged, and absent stays absent: it never fabricates one. Absent is
+  // what an `iam` built before this field sends. An `iam-db` built before it
+  // ignores the field.
+  yadgar.common.v1.UnverifiedActor unverified_actor = 4;
 }
 message ListCredentialsResponse {
   repeated Credential credentials = 1;

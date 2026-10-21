@@ -1,5 +1,7 @@
 //! `RevokeAllCredentials` (ADR-0945): every live credential one person holds,
-//! tombstoned in one transaction, and how many.
+//! tombstoned in one transaction, and how many — with the person's credential
+//! epoch bumped and their live enrolments voided in the same transaction
+//! (ADR-0972 (4), (5)).
 //!
 //! **THE STATEMENT IS NOT HERE.** It is [`revoke::all`], the one ADR-0943's
 //! revoking redemption runs, so the user-row lock that makes it race-safe
@@ -40,6 +42,12 @@ impl IamDb {
             call.fail(label(&refusal));
             return Err(refusal);
         };
+        // ADR-0972 (4) and (5), under the user-row lock `revoke::all` took: the
+        // bump refuses a Login that verified the password before this commit,
+        // and the void stops a leaked, unredeemed enrolment re-opening the
+        // account — the bootstrap enrolment included.
+        epoch::bump(&mut tx, &r.user_id).await?;
+        let voided_enrolments = revoke::void(&mut tx, &r.user_id).await?;
         tx.commit().await.map_err(db)?;
 
         // THIS DELIVERY'S COUNT AND NOTHING ELSE. `iam-db` does not honour the
@@ -54,6 +62,9 @@ impl IamDb {
             rows: revoked,
             ..Default::default()
         });
-        Ok(Response::new(RevokeAllCredentialsResponse { revoked }))
+        Ok(Response::new(RevokeAllCredentialsResponse {
+            revoked,
+            voided_enrolments,
+        }))
     }
 }

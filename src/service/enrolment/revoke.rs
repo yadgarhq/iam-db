@@ -78,16 +78,20 @@ pub(super) fn compatible(r: &CreateEnrolmentRequest) -> Result<(), Status> {
 ///   (`no_credential_can_be_created_while_a_revoking_reset_is_in_flight`).
 ///
 /// So every credential that exists when the reset becomes visible is revoked.
-/// What the lock cannot do is tell a credential minted after the reset by a
-/// `Login` that checked the OLD password before it; that residual is ADR-0943's
-/// and needs `Login` to re-check the hash inside its own write.
+/// What the lock alone cannot do is refuse a credential minted after the reset
+/// by a `Login` that checked the OLD password before it. ADR-0972 (4)'s epoch
+/// closes that residual: both callers bump it under this lock, and a `Login`'s
+/// mint is checked against the epoch it read with the hash (`epoch`).
 ///
-/// The lock order is the one every writer here already takes — user row, then
-/// the rows that hang off it — so it adds no cycle: `CreateCredential` and the
-/// demand insert lock the user row before their child table, and this takes it
-/// before `iam_credential` and `iam_password`. The enrolment row locked by the
-/// spend comes first, and no writer that holds a user lock ever waits on an
-/// enrolment row.
+/// The lock order is the one every writer here takes — user row, then the rows
+/// that hang off it — so it adds no cycle: `CreateCredential` and the demand
+/// insert lock the user row before their child table, and this takes it before
+/// `iam_credential`, `iam_enrolment` ([`void`]) and `iam_password`. A
+/// redemption takes the user row BEFORE its spend locks the enrolment row
+/// (`redeem::lock_owner`, ADR-0972), so on the redemption path this `FOR
+/// UPDATE` finds the row already held by its own transaction. Before ADR-0972
+/// the spend came first; that order became a cycle once [`void`] made a writer
+/// holding the user row wait on enrolment rows.
 ///
 /// The revoke does not reopen ADR-0655's bootstrap grant: ADR-0656's predicate
 /// counts credential rows of any liveness, so a person whose credentials were
@@ -121,4 +125,38 @@ pub(in crate::service) async fn all(
     .await
     .map_err(db)?;
     Ok(Some(done.rows_affected()))
+}
+
+/// Void every enrolment of `user_id` that is neither spent nor already voided,
+/// on `tx`, and return how many (ADR-0972 (5)).
+///
+/// A leaked, unredeemed enrolment would otherwise re-open the account after a
+/// revoking reset or a revoke-all: every credential is gone, and the enrolment
+/// still sets a password. `voided_at` and not `spent_at` (Q13), because a
+/// voided enrolment was never redeemed. Expired-but-unspent rows are voided
+/// and counted too: the contract's scope is "neither spent nor already
+/// voided", and the count must not depend on the clock.
+///
+/// **THE CALLER HOLDS THE USER ROW EXCLUSIVELY**, and that is what keeps this
+/// out of a lock cycle: every writer of an enrolment row of this person — a
+/// redemption's spend included — takes that user row first (see [`all`]).
+/// Called by a revoking redemption after its spend, so `spent_at IS NULL`
+/// already excludes the enrolment being redeemed, and by
+/// `RevokeAllCredentials`, always. An unflagged redemption never calls it
+/// (§10 C2).
+///
+/// THIS DELIVERY'S COUNT, saturated rather than truncated, as `revoked` is.
+pub(in crate::service) async fn void(
+    tx: &mut sqlx::MySqlTransaction<'_>,
+    user_id: &str,
+) -> Result<u32, Status> {
+    let done = sqlx::query(
+        "UPDATE iam_enrolment SET voided_at = CURRENT_TIMESTAMP
+          WHERE user_id = ? AND spent_at IS NULL AND voided_at IS NULL",
+    )
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(db)?;
+    Ok(u32::try_from(done.rows_affected()).unwrap_or(u32::MAX))
 }

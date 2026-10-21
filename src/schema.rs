@@ -42,7 +42,69 @@ pub fn migrations() -> Result<MigrationSet, MigrationError> {
         policy::inherited_setting_write(),
         key_identity(),
         enrolment_revokes_existing_credentials(),
+        user_credential_epoch(),
+        enrolment_voided_at(),
+        redemption_credential_epoch(),
     ])
+}
+
+fn user_credential_epoch() -> Migration {
+    Migration {
+        version: 16,
+        name: "user_credential_epoch".into(),
+        // ADR-0972 (4): a per-user counter that every password-setting
+        // redemption, `RevokeAllCredentials` and `SetPassword` bump. A Login
+        // reads it with the hash and mints only if it has not moved, so a
+        // Login that verified the old password cannot mint a credential that
+        // survives a reset or a revoke-all.
+        //
+        // DEFAULT 0, so every person who already exists starts at the epoch a
+        // new person starts at, and an `iam` too old to send an expected epoch
+        // mints unchecked exactly as before. ONE TABLE PER MIGRATION, with 17
+        // below: MariaDB auto-commits each ALTER, so a set split this way can
+        // stop only between whole migrations, which the ledger records.
+        sql: "ALTER TABLE iam_user
+                  ADD COLUMN credential_epoch BIGINT UNSIGNED NOT NULL DEFAULT 0"
+            .into(),
+    }
+}
+
+fn redemption_credential_epoch() -> Migration {
+    Migration {
+        version: 18,
+        name: "redemption_credential_epoch".into(),
+        // ADR-0972 (4): the epoch a redemption's own bump produced, recorded on
+        // its idempotency row so a REPLAY answers with it rather than with the
+        // current epoch. A replay after a revoke-all, a reset or a SetPassword
+        // then carries a stale epoch and its mint is refused; answering the
+        // current epoch let a replayed key mint straight through the
+        // revocation (security review of this change).
+        //
+        // DEFAULT 0 for rows written before this migration: no bump was
+        // recorded for them, and 0 mints only while the person's epoch is
+        // still 0, i.e. nothing has bumped it since the upgrade.
+        sql: "ALTER TABLE iam_enrolment_redemption
+                  ADD COLUMN credential_epoch BIGINT UNSIGNED NOT NULL DEFAULT 0"
+            .into(),
+    }
+}
+
+fn enrolment_voided_at() -> Migration {
+    Migration {
+        version: 17,
+        name: "enrolment_voided_at".into(),
+        // ADR-0972 (5): a revoking redemption and `RevokeAllCredentials` void
+        // the person's other live enrolments, so a leaked unredeemed one
+        // cannot re-open the account. A COLUMN OF ITS OWN, distinct from
+        // `spent_at` (Q13): a voided enrolment was never redeemed, and
+        // "spent" would claim it was.
+        //
+        // NULL DEFAULT, so every enrolment that already exists stays as live
+        // as it was.
+        sql: "ALTER TABLE iam_enrolment
+                  ADD COLUMN voided_at TIMESTAMP NULL DEFAULT NULL"
+            .into(),
+    }
 }
 
 fn enrolment_revokes_existing_credentials() -> Migration {

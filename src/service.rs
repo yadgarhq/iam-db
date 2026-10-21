@@ -100,6 +100,7 @@ use crate::pb::yadgar::telemetry::v1::Kind as ContractKind;
 mod caller;
 mod credential;
 mod enrolment;
+mod epoch;
 mod handlers;
 use caller::admitted;
 pub use caller::{CALLER_REFUSED, IAM_CALLER};
