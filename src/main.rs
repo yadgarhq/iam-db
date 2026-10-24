@@ -303,7 +303,11 @@ async fn serve_until_drained(
     };
 
     match drain_within(serving, ask_to_stop, stop, DRAIN_BUDGET).await {
-        Drain::Finished(result) => result?,
+        // NAMED, not a bare `?` (yaadgaar #313). The serving task ends on its
+        // own when the bind fails, and `Drain::Finished` now says so at once;
+        // tonic's own `Display` is "transport error", so the address and the OS
+        // reason are put in the sentence here.
+        Drain::Finished(result) => result.map_err(|e| serve::serve_failure(addr, &e))?,
         // EXIT 0 ANYWAY. The restart is the point; a drain that overran is worth
         // an error in the log, not a CrashLoopBackOff on top of it.
         Drain::Overran => tracing::error!(
@@ -358,7 +362,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     //    print the error with DEBUG, and `to_string()` would drop tonic's
     //    `source` — the only layer that says WHY a key was refused.
     let listen_tls = serve::from_env().map_err(|e| serve::refusal(&e))?;
-    let server = serve::builder(listen_tls.as_ref()).map_err(|e| serve::refusal(&e))?;
+    // ADR-1006: the four protocol limits, required like the transport keys and
+    // refused through the same sentence path, naming the variable and the
+    // `server.limits` value.
+    let limits = serve::limits_from_env().map_err(|e| e.to_string())?;
+    let server = serve::builder(listen_tls.as_ref(), &limits).map_err(|e| serve::refusal(&e))?;
 
     // THE TWO LISTENER ADDRESSES, hoisted here rather than read where each is
     // used (ledger 1257). Neither depends on anything the probe or the

@@ -98,7 +98,7 @@ metrics = "0.24"
 # in v0.2.23. It reads the common name off the verified client leaf, and the
 # caller gate on every `IamDbService` verb compares that name with
 # `iam-caller`. The step past v0.2.23 adds only a tokio patch bump.
-yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle.git", tag = "v0.2.24", features = [
+yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle.git", tag = "v0.3.0", features = [
   "serve-tls",
 ] }
 sqlx = { version = "0.9", default-features = false, features = [

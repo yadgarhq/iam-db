@@ -205,6 +205,12 @@ pub fn boot_env(root: &Path) -> Vec<(&'static str, String)> {
         // X-ADR-1 (card B-U5): the client-auth mode has no default either,
         // and is read even when TLS is off — `off` is the stated value.
         ("LISTEN_TLS_CLIENT_AUTH", "off".to_string()),
+        // ADR-1006: the four listener limits have no default in the library
+        // either (ADR-0569); the harness states the chart's shipped values.
+        ("LISTEN_MAX_CONCURRENT_STREAMS", "256".to_string()),
+        ("LISTEN_KEEPALIVE_INTERVAL_SECS", "30".to_string()),
+        ("LISTEN_KEEPALIVE_TIMEOUT_SECS", "10".to_string()),
+        ("LISTEN_MAX_HEADER_LIST_BYTES", "16384".to_string()),
     ]
 }
 
@@ -227,8 +233,19 @@ impl Booted {
     /// Start the binary with [`boot_env`]'s environment and exactly that —
     /// `PATH` aside, for `unshare`, `mount` and `sh`.
     pub fn start() -> Self {
+        Self::start_with(&[])
+    }
+
+    /// [`Self::start`] with `overrides` replacing the same-named variables of
+    /// [`boot_env`], for a case that needs one value different (a `LISTEN`
+    /// another process already holds).
+    pub fn start_with(overrides: &[(&'static str, String)]) -> Self {
         let root = fresh_root();
-        let vars = boot_env(&root);
+        let mut vars = boot_env(&root);
+        for (key, value) in overrides {
+            vars.retain(|(k, _)| k != key);
+            vars.push((key, value.clone()));
+        }
 
         // `unshare`, `mount` and `sh` are found on the caller's PATH; on some
         // hosts none of them is under /usr/bin. A rig with no PATH fails here

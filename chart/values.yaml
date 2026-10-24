@@ -102,6 +102,35 @@ tls:
   #                                      # until a hop asks for verification
   #   clientCaSecretKey: ca.crt         # the key inside clientCaSecret
 
+# THE PROTOCOL LIMITS THE gRPC LISTENER ENFORCES on every connection (ADR-1006;
+# yaadgaar #218). Chart values with stated defaults rather than constants in the
+# binary: adopters size clusters differently, so the bound lives where an
+# operator can change it. This chart had no `server:` block before; the block
+# is new and named `server.limits`, the key the binary's refusals name.
+#
+# NO DEFAULT LIVES IN THE BINARY (ADR-0569, ADR-0705). `yadgar-lifecycle`
+# reads these five and refuses to boot when one is absent, not a whole number
+# or outside its range, naming the variable and the value here. The ranges
+# below are the library's own `ServerLimits::*` consts, repeated in
+# `values.schema.json` and held by `tests/chart_server_limits.rs`.
+server:
+  # Connection age (ADR-1006, 30 min) omitted until tonic#2780 ships; yaadgaar #417.
+  limits:
+    # Concurrent HTTP/2 streams one connection may open. Range 1..10000.
+    # Rendered as LISTEN_MAX_CONCURRENT_STREAMS.
+    maxConcurrentStreams: 256
+    # How often an idle connection is PINGed. Range 1..3600.
+    # Rendered as LISTEN_KEEPALIVE_INTERVAL_SECS.
+    keepaliveIntervalSeconds: 30
+    # How long a PING may go unanswered before the connection is closed.
+    # Range 1..600, and STRICTLY BELOW keepaliveIntervalSeconds: the schema
+    # cannot say that, so `templates/render-checks.yaml` refuses it.
+    # Rendered as LISTEN_KEEPALIVE_TIMEOUT_SECS.
+    keepaliveTimeoutSeconds: 10
+    # The largest HTTP/2 header list a request may carry, in bytes. Range
+    # 1024..1048576. Rendered as LISTEN_MAX_HEADER_LIST_BYTES.
+    maxHeaderListBytes: 16384
+
 # D80: the platform is a deployment choice, so every number the binary needs is
 # a value here rather than a default only a fork can reach. These four were
 # compiled-in defaults until now, and three of them describe the REFERENCE

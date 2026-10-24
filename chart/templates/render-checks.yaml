@@ -235,6 +235,63 @@ see above).
 {{- end }}
 
 {{/*
+THE SHAPE OF `server.limits`, AND THE ONE RULE THE SCHEMA CANNOT STATE (ADR-1006;
+yaadgaar #218).
+
+`values.schema.json` bounds each of the four limits to the range `yadgar-lifecycle`
+enforces, types it `integer` and makes it `required`. Two things it cannot see:
+
+  - `server` or `server.limits` itself, deleted. This chart's `values.yaml` declares
+    the block, so an override of `server: null` DELETES it (helm deletes a null-valued
+    key a chart in the tree declares and restores no default), and a schema whose every
+    constraint sits under `server.limits` has nothing left to check. The ADR-0794 idiom
+    (`hasKey`, then `kindIs "map"`) refuses it here with a sentence naming the key,
+    before the template reads a leaf of it.
+  - A RULE BETWEEN TWO KEYS. `keepaliveTimeoutSeconds` must be strictly below
+    `keepaliveIntervalSeconds`, or the next keepalive PING goes out before the last one
+    could be judged lost. The binary refuses the same pair at boot
+    (`ServerLimitsError::KeepaliveTimeoutNotBelowInterval`); refusing it here means the
+    mistake is found at render, before a pod crash-loops on it.
+
+Not counted by `scripts/tests/test_render_checks.py`'s `EXPECTED_RENDER_CHECKS`: that
+count is the number of API-group capability checks, and these are value checks like
+the `tls.clientAuth` ones above.
+*/}}
+{{- if not (hasKey .Values "server") }}
+{{- fail (join "" (list
+      "iam-db: `server` is absent from the values. It holds `server.limits`, the four "
+      "listener limits the binary refuses to boot without (ADR-1006). Helm deletes a "
+      "null-valued key that a chart in the tree declares, and restores no default. Write "
+      "the keys you mean, or omit `server` entirely and this chart's own defaults apply.")) }}
+{{- end }}
+{{- if not (kindIs "map" .Values.server) }}
+{{- fail (printf (join "" (list
+      "iam-db: `server` must be a map holding `limits` and is %s (%s). Omit it to take this "
+      "chart's defaults."))
+      (kindOf .Values.server) (toJson .Values.server)) }}
+{{- end }}
+{{- if not (hasKey .Values.server "limits") }}
+{{- fail (join "" (list
+      "iam-db: `server.limits` is absent. The binary refuses to boot without its four "
+      "values (ADR-1006). Write the keys you mean, or omit `server` entirely and this "
+      "chart's own defaults apply.")) }}
+{{- end }}
+{{- if not (kindIs "map" .Values.server.limits) }}
+{{- fail (printf (join "" (list
+      "iam-db: `server.limits` must be a map and is %s (%s). Omit it to take this chart's "
+      "defaults."))
+      (kindOf .Values.server.limits) (toJson .Values.server.limits)) }}
+{{- end }}
+{{- if ge (int64 .Values.server.limits.keepaliveTimeoutSeconds) (int64 .Values.server.limits.keepaliveIntervalSeconds) }}
+{{- fail (printf (join "" (list
+      "iam-db: `server.limits.keepaliveTimeoutSeconds` (%v) is not below "
+      "`server.limits.keepaliveIntervalSeconds` (%v). The next keepalive PING would be sent "
+      "before the last one could be judged lost, and iam-db refuses to boot this way "
+      "(ADR-1006). Lower the timeout or raise the interval."))
+      .Values.server.limits.keepaliveTimeoutSeconds .Values.server.limits.keepaliveIntervalSeconds) }}
+{{- end }}
+
+{{/*
 THE SHAPE OF `autoscaling.enabled`, REFUSED BEFORE ANY TOGGLE READS IT.
 
 DECLARED BEFORE THE KEDA CAPABILITY CHECK BELOW, for the same reason `database.create`'s

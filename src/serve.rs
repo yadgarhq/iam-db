@@ -71,7 +71,9 @@ use tonic::transport::Server;
 // the binary flattens once, here.
 use yadgar_telemetry::diagnose::chain;
 
-pub use yadgar_lifecycle::serve_tls::{ClientAuth, ServeTlsError, ServerTls, LISTEN};
+pub use yadgar_lifecycle::serve_tls::{
+    ClientAuth, ServeTlsError, ServerLimits, ServerLimitsError, ServerTls, LISTEN,
+};
 
 /// The chart block every listener key renders from. Each refusal names
 /// `tls.<leaf>` so an operator reading a crash log knows which value to edit.
@@ -94,6 +96,17 @@ pub fn from_lookup(
     ServerTls::from_lookup(LISTEN, CHART_KEY, lookup)
 }
 
+/// The chart block the four listener limits render from (ADR-1006). Each
+/// refusal names `server.limits.<leaf>`.
+pub const LIMITS_CHART_KEY: &str = "server.limits";
+
+/// Read the listener's protocol limits from the process environment. Every key
+/// is required: the library has no default (ADR-0569); the chart's
+/// `server.limits` block supplies them.
+pub fn limits_from_env() -> Result<ServerLimits, ServerLimitsError> {
+    ServerLimits::from_env(LISTEN, LIMITS_CHART_KEY)
+}
+
 /// The server this service listens with, encrypted or not.
 ///
 /// `None` is the plaintext listener; `Some` is TLS — verifying callers as its
@@ -101,8 +114,18 @@ pub fn from_lookup(
 /// the acceptor built HERE, so a bad mount refuses at boot. The caller adds its
 /// own services to what comes back, which is what lets `tests/serve_tls.rs`
 /// stand the real thing up on a port it chose.
-pub fn builder(tls: Option<&ServerTls>) -> Result<Server, ServeTlsError> {
-    yadgar_lifecycle::serve_tls::server(tls)
+pub fn builder(tls: Option<&ServerTls>, limits: &ServerLimits) -> Result<Server, ServeTlsError> {
+    yadgar_lifecycle::serve_tls::server(tls, limits)
+}
+
+/// A serving failure as the sentence an operator reads: the address and the
+/// whole `source` chain. `tonic::transport::Error` displays as the two words
+/// "transport error"; the bind collision sits one `source()` hop down.
+pub fn serve_failure(addr: std::net::SocketAddr, e: &(dyn std::error::Error + 'static)) -> String {
+    format!(
+        "the gRPC server on LISTEN={addr} stopped with an error: {}",
+        chain(e)
+    )
 }
 
 /// A listener refusal as the sentence an operator reads, its whole `source`
