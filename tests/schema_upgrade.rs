@@ -83,3 +83,82 @@ async fn rows_written_before_the_epoch_and_void_migrations_keep_working() {
         .expect_err("the pre-upgrade replay's epoch is stale after the bump");
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
 }
+
+/// The last version the release before team access stage 2 shipped.
+const BEFORE_TEAMS: u64 = 18;
+
+/// Migrations 19 to 21 (team access stage 2) on a store that already holds a
+/// column-admin person with a live credential, a team and a member row the
+/// previous release could hold (migrations 3 and 4 created those tables).
+#[tokio::test]
+async fn a_populated_store_upgrades_to_declared_teams() {
+    let pool = empty("iam_db_upgrade_teams").await;
+    let all = schema::migrations().expect("migrations");
+    let previous = MigrationSet::new(
+        all.pending_after(0)
+            .filter(|m| m.version <= BEFORE_TEAMS)
+            .cloned()
+            .collect(),
+    )
+    .expect("the previous release's set");
+    migrate(&pool, &previous).await;
+
+    let old = IamDb::new(pool.clone());
+    let admin = person(&old, 1).await;
+    make_admin(&old, &admin).await;
+    mint(&old, &admin, 11, None).await.expect("mint");
+    // AUDIT: literals and the id `person` returned, bound.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(
+        "INSERT INTO iam_team (id, name, created_by, updated_by)
+         VALUES ('yadgar:team:administrators', 'administrators', 'test', 'test')",
+    ))
+    .execute(&pool)
+    .await
+    .expect("a team row as the previous release could hold it");
+    sqlx::query("INSERT INTO iam_team_member (team_id, user_id, added_by) VALUES (?, ?, 'test')")
+        .bind("yadgar:team:administrators")
+        .bind(&admin)
+        .execute(&pool)
+        .await
+        .expect("a member row as the previous release could hold it");
+
+    migrate(&pool, &all).await;
+    let svc = IamDb::new(pool);
+
+    let lock_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM iam_team_sync_lock")
+        .fetch_one(svc.pool())
+        .await
+        .expect("the sentinel table");
+    assert_eq!(lock_rows, 1);
+    let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM iam_team_member_pending")
+        .fetch_one(svc.pool())
+        .await
+        .expect("the pending table");
+    assert_eq!(pending, 0);
+
+    // Derivation off (absent): the column still decides, the member row shows.
+    let got = resolve(&svc, 11).await;
+    assert_eq!(got.user_id, admin);
+    assert!(got.is_admin);
+    assert_eq!(got.team_ids, vec!["yadgar:team:administrators"]);
+
+    // A SyncTeams on the upgraded store converges on the stored rows.
+    let synced = svc
+        .sync_teams_as(
+            Some(yadgar_iam_db::service::IAM_CALLER),
+            tonic::Request::new(SyncTeamsRequest {
+                scope: None,
+                teams: vec![DeclaredTeam {
+                    name: "administrators".into(),
+                    member_user_ids: vec![admin.clone()],
+                }],
+            }),
+        )
+        .await
+        .expect("a sync on the upgraded store")
+        .into_inner();
+    assert_eq!(synced.teams_inserted, 0);
+    assert_eq!(synced.members_added, 0);
+    assert_eq!(synced.members_removed, 0);
+    assert_eq!(synced.administrators_live_members, 1);
+}

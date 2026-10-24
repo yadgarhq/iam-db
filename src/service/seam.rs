@@ -283,6 +283,23 @@ impl IamDb {
         self.store_setting(r, &rid, call).await
     }
 
+    /// `sync_teams` as the named `caller`, through the gate in `caller::admitted`.
+    pub async fn sync_teams_as(
+        &self,
+        caller: Option<&str>,
+        req: Request<SyncTeamsRequest>,
+    ) -> Result<Response<SyncTeamsResponse>, Status> {
+        let call = Call::start(
+            SERVICE,
+            "SyncTeams",
+            Kind::Write,
+            tel(request_id_of(&req), ""),
+        );
+        let call = admitted(caller, call)?;
+        let r = req.into_inner();
+        self.sync_teams(r, call).await
+    }
+
     /// `get_key_identity` as the named `caller`, through the gate in `caller::admitted`.
     pub async fn get_key_identity_as(
         &self,

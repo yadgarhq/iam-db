@@ -140,18 +140,34 @@ message ResolveCredentialRequest {
   // The HASH, computed by `iam`. The plain token never reaches the store, so it
   // is never in a query log, a slow-query log, or a database backup.
   bytes token_hash = 1;
+
+  // `iam`'s setting IAM_ADMIN_FROM_TEAM, relayed on every call because this
+  // store holds no `iam` setting (ADR-0962, plans/team-access.md §4, §6).
+  // TRUE: `is_admin` is answered from membership of the live team
+  // `yadgar:team:administrators` (`iam_team.deleted_at IS NULL`); the
+  // `iam_user.is_admin` column is not read. FALSE OR ABSENT: the column
+  // decides, as before. An `iam-db` that predates this field drops it and reads
+  // the column, so a dropped field never grants admin to a user whose column
+  // is false.
+  bool admin_from_team = 2;
 }
 message ResolveCredentialResponse {
   // Empty user_id means no live credential matched. NOT an error: "no such
   // credential" and "the store is broken" are different outcomes and a caller
   // must be able to tell them apart — one is a 401, the other is a 503.
   string user_id = 1;
+  // The user's teams, LIVE TEAMS ONLY: a membership row of a team whose
+  // `iam_team.deleted_at` is set is not reported (an archived team admits
+  // nobody, plans/team-access.md §7).
   repeated string team_ids = 2;
   string credential_id = 3;
 
   // D73's flag and D74's overrides, read in the SAME transaction as the
   // credential. Two reads would be two cache lifetimes and a window in which a
   // withdrawn admin flag or a tightened limit is not yet in force.
+  //
+  // Answered from the column, or from `administrators` membership when the
+  // request sets `admin_from_team`.
   bool is_admin = 4;
   // EMPTY means this user has no override, so the gateway's configured defaults
   // apply unmodified. It does not mean zero, and it does not mean deny.
@@ -266,8 +282,10 @@ message SetPasswordResponse {}
 message CreateEnrolmentRequest {
   // WHICH FIELDS COUNT AS THE PAYLOAD, stated per RPC as
   // yadgar.common.v1.Idempotency requires rather than left to a reader:
-  // `user_id`, `secret_hash`, `expires_at`, `require_zero_credential_admin`
-  // AND `revoke_existing_credentials` — every field of this request but two. `idempotency` itself carries the
+  // `user_id`, `secret_hash`, `expires_at`, `require_zero_credential_admin`,
+  // `revoke_existing_credentials` AND `admin_from_team` — every field of this
+  // request but two. `admin_from_team` is in it because it selects which
+  // predicate the demand means. `idempotency` itself carries the
   // key the comparison is keyed on, and `unverified_actor` is EXCLUDED because
   // it is inert by construction: see yadgar.common.v1.UnverifiedActor, which
   // states that exclusion once for every RPC that carries the field. A
@@ -340,6 +358,11 @@ message CreateEnrolmentRequest {
   // conjunct that actually failed is recorded ONLY where the operator reads
   // it — this service's own log line and a closed-set `conjunct` telemetry
   // label — and never in the response.
+  //
+  // ITS MEANING CHANGES WHEN `admin_from_team` (8) IS SET: it then demands
+  // ADR-0966's declared-administrator predicate, which counts no credentials.
+  // See `admin_from_team`. The name is kept because renaming is a breaking
+  // change.
   bool require_zero_credential_admin = 6;
 
   // REVOKE EVERY CREDENTIAL THE TARGET HOLDS WHEN THIS ENROLMENT IS REDEEMED
@@ -355,17 +378,45 @@ message CreateEnrolmentRequest {
   // commit and is not touched. A REPLAY of the redemption key re-runs nothing
   // — not the password, not the revoke — and reports the original outcome.
   //
-  // MUTUALLY EXCLUSIVE WITH `require_zero_credential_admin`. Both set is
-  // refused with INVALID_ARGUMENT before any write: a target that holds zero
-  // credentials has nothing to revoke, so the pair can only be a malformed
-  // request, and the bootstrap path — the only caller that sets the demand —
-  // must never carry this instruction. The refusal names the conflict; it
-  // reveals nothing about the target because it is decided before the target
-  // is read.
+  // MUTUALLY EXCLUSIVE WITH `require_zero_credential_admin` WHILE
+  // `admin_from_team` IS FALSE OR ABSENT. Both set is then refused with
+  // INVALID_ARGUMENT before any write: a target that holds zero credentials
+  // has nothing to revoke, so the pair can only be a malformed request. The
+  // refusal names the conflict; it reveals nothing about the target because it
+  // is decided before the target is read.
+  //
+  // WITH `admin_from_team` TRUE, ADR-1010 (status OPEN, not yet ruled)
+  // proposes that the pair is ADMITTED: the bootstrap demand then reaches a
+  // declared administrator who may hold live, possibly stolen, credentials, and
+  // the bootstrap caller decides at issue time whether the redemption revokes
+  // them. ADR-0966 alone does not give the bootstrap caller this instruction.
+  // No `iam-db` admits the pair until ADR-1010 is accepted; until then the
+  // refusal above applies in both settings. If ADR-1010 is rejected, this
+  // paragraph is withdrawn and the refusal stays.
   //
   // Absent (the default) is the ordinary path, byte-identical to before: a
   // reset replaces the password and existing credentials keep resolving.
   bool revoke_existing_credentials = 7;
+
+  // `iam`'s setting IAM_ADMIN_FROM_TEAM, relayed (see
+  // ResolveCredentialRequest.admin_from_team). It changes nothing unless the
+  // bootstrap demand (6) is set. With the demand set:
+  //
+  // TRUE replaces the whole ADR-0655/ADR-0656 predicate with ADR-0966's,
+  // evaluated in one READ COMMITTED transaction with the insert: the
+  // `administrators` team row exists and is live (locked FOR UPDATE), the
+  // target has a live `iam_user` row, and the target has a member row in
+  // `administrators`. Credentials are not counted, and the `is_admin` column
+  // is not read. Refusals keep the demand's one `PERMISSION_DENIED` sentence;
+  // the closed `conjunct` label set gains `no_administrators_team`,
+  // `not_live_user` and `not_declared_member`. An unknown target and a
+  // non-member get the same code on this arm.
+  //
+  // FALSE OR ABSENT keeps today's predicate exactly (column true AND zero
+  // credentials of any liveness, ADR-0656) and today's refusal of the demand
+  // beside `revoke_existing_credentials`. An `iam-db` that predates this field
+  // drops it and applies today's predicate, which is the narrower answer.
+  bool admin_from_team = 8;
 }
 message CreateEnrolmentResponse {
   string enrolment_id = 1;
@@ -452,11 +503,14 @@ message RedeemEnrolmentRequest {
   // PRECEDES THE LOOKUP of the presented secret, or the refusal itself reports
   // whether that secret exists.
   //
-  // TWO RESPONSE FIELDS ARE NOT THE ORIGINAL OUTCOME ON A REPLAY (ADR-0972).
-  // `credential_epoch` is the user's CURRENT epoch, read inside the replay's
-  // transaction, because the first delivery's value may be stale.
+  // ONE RESPONSE FIELD IS NOT THE ORIGINAL OUTCOME ON A REPLAY:
   // `voided_enrolments` is 0, because it counts what this delivery changed and
-  // a replay changes nothing. See each field.
+  // a replay changes nothing (ADR-0972).
+  // `credential_epoch` IS the original value: the epoch recorded when the
+  // redemption FIRST committed, read from the ledger row (ADR-0976), and NOT
+  // the user's current epoch. Answering the current epoch would let a replayed
+  // key mint through a later revoke-all, revoking reset or password set. Rows
+  // from before migration 18 answer 0. See each field.
   //
   // THE CREDENTIAL IS NOT COVERED BY THIS KEY. See that same field for why it
   // cannot be.
@@ -519,10 +573,15 @@ message RedeemEnrolmentResponse {
   // own credential, so that credential is minted under the new epoch and a
   // concurrent second reset or revoke-all refuses it.
   //
-  // A REPLAY RETURNS THE USER'S CURRENT EPOCH, read inside the replay's
-  // transaction, and NOT the first delivery's value. A first delivery's value
-  // is stale once anything bumped since, and a retry minting against it
-  // would be refused on every attempt.
+  // A REPLAY RETURNS THE EPOCH RECORDED AT FIRST DELIVERY (ADR-0976), read
+  // from the idempotency ledger row, and NOT the user's current epoch. With no
+  // bump since the first delivery, that value is still current and a retry
+  // after a lost response mints. After any later bump (RevokeAllCredentials, a
+  // revoking reset, SetPassword, another redemption), the recorded value is
+  // stale, so the retry's mint is refused with FAILED_PRECONDITION. That is
+  // intended: a replayed key must not yield a credential the later
+  // revocation was meant to end. Rows written before the epoch was recorded
+  // answer 0.
   //
   // Set only when outcome is REDEEM_OUTCOME_REDEEMED; 0 otherwise. An
   // `iam-db` built before ADR-0972 (4) sends 0, which is safe for the reason
@@ -731,13 +790,38 @@ message CreateUserRequest {
   bytes external_id_blind_index = 6;
 
   // D73's admin flag, set at creation because the first admin has to exist
-  // before anyone can log in to promote one.
+  // before anyone can log in to promote one. DEPRECATED with team-derived admin
+  // (ADR-0962); see yadgar.iam.v1.CreateUserRequest.is_admin.
   bool is_admin = 7;
 
   // WHO THE GATEWAY BELIEVED WAS CALLING, FOR THE AUDIT RECORD ONLY. This
   // service cannot verify it and MUST NOT authorise on it. The rule is stated
   // once, on yadgar.common.v1.UnverifiedActor, rather than restated here.
   yadgar.common.v1.UnverifiedActor unverified_actor = 8;
+
+  // THE PRE-MINTED FIRST ADMINISTRATOR (F2, ADR-0963 (5)). Empty: mint an id,
+  // as before. Non-empty IS the bootstrap create-user demand; there is no
+  // separate flag. Evaluated in one READ COMMITTED transaction, in order, each
+  // refusal writing nothing (plans/team-access.md §6):
+  //
+  // 1. Format: "yadgar:user:" + lowercase canonical uuidv7, else
+  //    `INVALID_ARGUMENT`.
+  // 2. The live `yadgar:team:administrators` row, locked FOR UPDATE, else
+  //    `PERMISSION_DENIED` (step `no_administrators_team`).
+  // 3. No member of `administrators` with a live `iam_user` row, else
+  //    `PERMISSION_DENIED` (step `administrator_exists`).
+  // 4. No `iam_user` row with this id, soft-deleted or not, else
+  //    `ALREADY_EXISTS` ("that user id is taken"), distinct from the
+  //    name-collision message.
+  // 5. A pending `administrators` member row with this id, else
+  //    `PERMISSION_DENIED` (step `not_declared`).
+  // 6. Insert the user with `is_admin` false, insert its `administrators`
+  //    member row, and delete every pending `administrators` row.
+  //
+  // Every `PERMISSION_DENIED` carries ONE sentence ("the bootstrap create-user
+  // predicate refused"); the step goes only to this service's warn line and
+  // the closed-set counter label (ADR-0657).
+  string user_id = 9;
 }
 message CreateUserResponse {
   yadgar.common.v1.Meta meta = 1;
@@ -997,6 +1081,10 @@ message SetInheritedSettingResponse {
   yadgar.common.v1.InheritedSetting setting = 1;
 }
 
+// DEPRECATED (ADR-0963 (7)): `iam-db` answers `AddTeamMember` and
+// `RemoveTeamMember` `FAILED_PRECONDITION` ("teams are declared in GitOps").
+// `SyncTeams` is the one writer of team membership. Removal from the contract
+// is a later breaking release.
 message AddTeamMemberRequest {
   yadgar.common.v1.Idempotency idempotency = 1;
   string team_id = 2;
@@ -1020,6 +1108,59 @@ message RemoveTeamMemberRequest {
   yadgar.common.v1.UnverifiedActor unverified_actor = 4;
 }
 message RemoveTeamMemberResponse {}
+
+// The store half of yadgar.iam.v1.SyncTeams, relayed field for field. A
+// separate type only because the two packages do not share messages.
+message DeclaredTeam {
+  // id is "yadgar:team:" + name.
+  string name = 1;
+  // "yadgar:user:<uuidv7>".
+  repeated string member_user_ids = 2;
+}
+// ONE TRANSACTION, READ COMMITTED (ADR-0513), serialised against other syncs
+// by a sentinel lock and against the F2 `CreateUser` by the `administrators`
+// row lock, taken before it counts live members or replaces the pending set.
+// ADMITS `iam` ONLY, by its leaf (`iam-caller`), as `project-db` admits
+// `project`.
+//
+// REFUSALS, each writing nothing, as listed on yadgar.iam.v1.SyncTeamsRequest:
+// `INVALID_ARGUMENT` for a malformed or twice-declared team name, a member id
+// that is not "yadgar:user:" + a lowercase canonical uuidv7, or a member
+// declared twice in one team (the WHOLE sync is refused; a well-formed id with
+// no `iam_user` row is skipped into `unknown_member_user_ids` instead);
+// `FAILED_PRECONDITION` for the lockout guard or a declared name already held
+// by a team under another id (`uq_iam_team_name`).
+message SyncTeamsRequest {
+  // The seeder's scope, as `iam` received it and relayed it unchanged.
+  yadgar.common.v1.Scope scope = 1;
+  repeated DeclaredTeam teams = 2;
+}
+// Counts as on yadgar.iam.v1.SyncTeamsResponse. PENDING ROWS: a declared
+// `administrators` member with no `iam_user` row is stored as pending ONLY
+// while `administrators` has zero live members; the pending set is replaced
+// on every sync and emptied once a live member exists. Nothing reads a pending
+// row at attest time.
+message SyncTeamsResponse {
+  uint32 teams_inserted = 1;
+  uint32 teams_archived = 2;
+  uint32 teams_reactivated = 3;
+  uint32 members_added = 4;
+  uint32 members_removed = 5;
+  repeated string unknown_member_user_ids = 6;
+  repeated string pending_administrator_user_ids = 7;
+  uint32 administrators_live_members = 8;
+  // EVERY USER WHOSE LIVE TEAM SET THIS SYNC CHANGED, computed inside the sync
+  // transaction: each member added or removed, and each member of a team
+  // archived or reactivated. Sorted, no duplicates; empty on a no-op sync.
+  // `iam` publishes `yadgar.iam.user.teams-changed` for exactly these ids
+  // after commit, which is how a removed member's cached `team_ids` and
+  // `is_admin` are evicted (plans/team-access.md §7). The gateway evicts by
+  // exact user id and has no wildcard, so without this list `iam` could not
+  // name a removed member: the store is the only party that saw the old set.
+  // Not relayed to the seeder (yadgar.iam.v1.SyncTeamsResponse has no such
+  // field): the seeder needs counts, not user ids.
+  repeated string changed_user_ids = 9;
+}
 
 // HOW THE FINGERPRINT PRESENTED RELATES TO THE MARKER THIS STORE HOLDS
 // (ADR-0764). One vocabulary for both arms below, because both ask one
@@ -1465,4 +1606,9 @@ service IamDbService {
   rpc SetInheritedSetting(SetInheritedSettingRequest) returns (SetInheritedSettingResponse);
   rpc GetKeyIdentity(GetKeyIdentityRequest) returns (GetKeyIdentityResponse);
   rpc SetKeyIdentity(SetKeyIdentityRequest) returns (SetKeyIdentityResponse);
+  // The lockout guard (ADR-0963 (6)): a sync that would leave `administrators`
+  // with zero live members when it has at least one is refused
+  // `FAILED_PRECONDITION`, nothing written. Omitting `administrators` archives
+  // it, which the same count refuses.
+  rpc SyncTeams(SyncTeamsRequest) returns (SyncTeamsResponse);
 }

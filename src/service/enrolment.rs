@@ -24,6 +24,7 @@
 
 use super::*;
 
+mod declared;
 mod demand;
 mod ledger;
 mod redeem;
@@ -43,6 +44,8 @@ use redeem::{lock_owner, redeemed, spend, unspent};
 /// which is public for the test's benefit and for no caller's.
 pub use demand::INSERT as DEMAND_INSERT;
 
+pub use declared::BOOTSTRAP_REENROLMENT;
+
 impl IamDb {
     pub(super) async fn mint_enrolment(
         &self,
@@ -59,32 +62,7 @@ impl IamDb {
             &seg(&r.user_id),
         );
 
-        // `idempotency` IS DISCARDED HERE, AND THIS RPC'S OWN CONTRACT SAYS IT
-        // MUST NOT BE. `yadgar.iamdb.v1.CreateEnrolmentRequest` enumerates the
-        // payload the key is compared on — `user_id`, `secret_hash`,
-        // `expires_at` AND `require_zero_credential_admin`, the last of which
-        // JOINED that enumeration at contract v1.12.0 because this handler now
-        // REFUSES on it (ADR-0655, amended by ADR-0656), so the
-        // `unverified_actor` exclusion's inert-by-construction rationale does not
-        // reach it — and states that ADR-0519's refusal of a replayed key is
-        // enforced HERE rather than in `iam`, because `iam` holds no store to
-        // recognise a key it has seen. `iam` mints a fresh secret on every
-        // attempt, so a redelivery arrives with a DIFFERING `secret_hash` and
-        // this handler mints a SECOND enrolment where the contract requires
-        // INVALID_ARGUMENT. See the module header for why the ledger that closes
-        // this cannot land in this repository alone.
-        //
-        // THE SENSOR. See [`ENROLMENT_IDEMPOTENCY_DISCARDED`]'s doc comment for
-        // what firing does and does not prove — in short, it detects the estate
-        // ENTERING the exposed state, once, and never a double-mint.
-        if r.idempotency.as_ref().is_some_and(|k| !k.key.is_empty()) {
-            tracing::warn!(
-                user_id = %r.user_id,
-                "CreateEnrolment received a non-empty idempotency key, and this \
-                 handler discards it"
-            );
-            metrics::counter!(ENROLMENT_IDEMPOTENCY_DISCARDED).increment(1);
-        }
+        idempotency_sensor(&r);
 
         // Explicit, because the alternative is worse than a rejection. The
         // column is NOT NULL, so FROM_UNIXTIME(NULL) makes the engine refuse
@@ -94,6 +72,15 @@ impl IamDb {
         let expires_at = r
             .expires_at
             .ok_or_else(|| Status::invalid_argument("an enrolment must carry an expiry"))?;
+
+        // TEAM-DERIVED ADMIN ON, AND THE DEMAND SET: ADR-0966's declared-
+        // administrator predicate in place of ADR-0656's, and the revoke
+        // instruction admitted beside it (ADR-1014 point 2). Taken BEFORE
+        // `revoke::compatible`, so the derivation-off path below — the refusal
+        // of the pair included — is byte-identical to what it was.
+        if r.require_zero_credential_admin && r.admin_from_team {
+            return declared::issue(&self.pool, &r, expires_at.seconds, rid, call).await;
+        }
 
         if let Err(refusal) = revoke::compatible(&r) {
             call.fail("INVALID_ARGUMENT");
@@ -263,6 +250,37 @@ impl IamDb {
     }
 }
 
+/// `CreateEnrolment`'s idempotency key, counted and discarded. Lifted out of
+/// `mint_enrolment` whole, for the function-size ceiling.
+fn idempotency_sensor(r: &CreateEnrolmentRequest) {
+    // `idempotency` IS DISCARDED HERE, AND THIS RPC'S OWN CONTRACT SAYS IT
+    // MUST NOT BE. `yadgar.iamdb.v1.CreateEnrolmentRequest` enumerates the
+    // payload the key is compared on — `user_id`, `secret_hash`,
+    // `expires_at` AND `require_zero_credential_admin`, the last of which
+    // JOINED that enumeration at contract v1.12.0 because this handler now
+    // REFUSES on it (ADR-0655, amended by ADR-0656), so the
+    // `unverified_actor` exclusion's inert-by-construction rationale does not
+    // reach it — and states that ADR-0519's refusal of a replayed key is
+    // enforced HERE rather than in `iam`, because `iam` holds no store to
+    // recognise a key it has seen. `iam` mints a fresh secret on every
+    // attempt, so a redelivery arrives with a DIFFERING `secret_hash` and
+    // this handler mints a SECOND enrolment where the contract requires
+    // INVALID_ARGUMENT. See the module header for why the ledger that closes
+    // this cannot land in this repository alone.
+    //
+    // THE SENSOR. See [`ENROLMENT_IDEMPOTENCY_DISCARDED`]'s doc comment for
+    // what firing does and does not prove — in short, it detects the estate
+    // ENTERING the exposed state, once, and never a double-mint.
+    if r.idempotency.as_ref().is_some_and(|k| !k.key.is_empty()) {
+        tracing::warn!(
+            user_id = %r.user_id,
+            "CreateEnrolment received a non-empty idempotency key, and this \
+             handler discards it"
+        );
+        metrics::counter!(ENROLMENT_IDEMPOTENCY_DISCARDED).increment(1);
+    }
+}
+
 /// The ORDINARY arm, which is the statement this handler has always run.
 ///
 /// FROM_UNIXTIME for the reason CreateCredential already carries: the contract
@@ -291,7 +309,8 @@ const ORDINARY: &str = "INSERT INTO iam_enrolment (id, user_id, secret_hash, exp
 /// and then runs the ordinary statement — a deployed store that reads the field
 /// and ignores it is the false green the whole design exists to refuse.
 ///
-/// **THE REVOKE INSTRUCTION ONLY EVER RIDES THE ORDINARY ARM.** The caller has
+/// **THE REVOKE INSTRUCTION ONLY EVER RIDES THE ORDINARY ARM**, on this, the
+/// derivation-off path (`declared` writes its own, ADR-1014). The caller has
 /// already refused the demand and the instruction together, so `(true, true)`
 /// cannot reach here; it maps to the demand arm rather than to a statement that
 /// would write the instruction, so even a caller that skipped that refusal could
