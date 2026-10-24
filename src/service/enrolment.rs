@@ -50,6 +50,7 @@ impl IamDb {
     pub(super) async fn mint_enrolment(
         &self,
         r: CreateEnrolmentRequest,
+        deadline: Deadline,
         rid: &str,
         call: Call,
     ) -> Result<Response<CreateEnrolmentResponse>, Status> {
@@ -79,7 +80,7 @@ impl IamDb {
         // `revoke::compatible`, so the derivation-off path below — the refusal
         // of the pair included — is byte-identical to what it was.
         if r.require_zero_credential_admin && r.admin_from_team {
-            return declared::issue(&self.pool, &r, expires_at.seconds, rid, call).await;
+            return declared::issue(&self.pool, &r, deadline, expires_at.seconds, rid, call).await;
         }
 
         if let Err(refusal) = revoke::compatible(&r) {
@@ -104,12 +105,13 @@ impl IamDb {
             r.require_zero_credential_admin,
             r.revoke_existing_credentials,
         );
+        let mut conn = self.acquire(deadline).await?;
         let done = sqlx::query(sql)
             .bind(&id)
             .bind(&r.secret_hash)
             .bind(expires_at.seconds)
             .bind(&r.user_id)
-            .execute(&self.pool)
+            .execute(&mut *conn)
             .await
             .map_err(|e| match &e {
                 sqlx::Error::Database(d) if d.is_unique_violation() => {
@@ -123,7 +125,7 @@ impl IamDb {
         // unique index is never consulted and the arm above never fires. The two
         // refusals do not compete.
         if done.rows_affected() == 0 {
-            live_user(&self.pool, &r.user_id).await?;
+            live_user(&mut *conn, &r.user_id).await?;
 
             // THE ZERO IS NAMED IN THE DEMAND ARM'S ORDER: liveness first, which
             // is the NOT_FOUND this handler has always answered, then the
@@ -132,7 +134,7 @@ impl IamDb {
             // state no statement can reach — and inventing a PERMISSION_DENIED
             // for it would change the absent-field path this plan holds fixed.
             if r.require_zero_credential_admin {
-                let refusal = demand::refuse(&self.pool, &r.user_id).await;
+                let refusal = demand::refuse(&mut conn, &r.user_id).await;
                 call.fail(label(&refusal));
                 return Err(refusal);
             }
@@ -154,6 +156,7 @@ impl IamDb {
     pub(super) async fn redeem(
         &self,
         mut r: RedeemEnrolmentRequest,
+        deadline: Deadline,
         call: Call,
     ) -> Result<Response<RedeemEnrolmentResponse>, Status> {
         // ONE TRANSACTION, AND IT IS THE WHOLE POINT OF THIS RPC. Spending the
@@ -164,7 +167,7 @@ impl IamDb {
         // password was never set. Everything below runs on `tx` — a statement
         // that reaches for `&self.pool` instead has silently left the
         // transaction and undone this.
-        let mut conn = self.pool.acquire().await.map_err(db)?;
+        let mut conn = self.acquire(deadline).await?;
 
         // READ COMMITTED, FOR THIS TRANSACTION ONLY, and it is a correctness
         // requirement rather than a tuning knob. Two properties of the engine's
@@ -188,13 +191,11 @@ impl IamDb {
         //
         // Correctness does not rest on repeatable reads here: it rests on the
         // row lock the spend takes. `SET TRANSACTION` without SESSION or GLOBAL
-        // applies to the NEXT transaction and then reverts, so this leaves no
-        // trace on a pooled connection the next caller will get.
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
-            .execute(&mut *conn)
-            .await
-            .map_err(db)?;
-        let mut tx = sqlx::Acquire::begin(&mut *conn).await.map_err(db)?;
+        // applies to the NEXT transaction only. A drop between it and `BEGIN` —
+        // tonic's, at the caller's deadline — would hand that level to the next
+        // borrower, so `conn::Conn` closes a connection dropped in that window
+        // rather than pooling it.
+        let mut tx = conn.begin(Isolation::ReadCommitted).await?;
 
         // THE IDEMPOTENCY CHECK COMES FIRST, before anything looks at the
         // presented secret. The contract is explicit that the comparison

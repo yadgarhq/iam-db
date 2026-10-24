@@ -225,6 +225,7 @@ impl IamDb {
     pub(super) async fn key_identity(
         &self,
         r: GetKeyIdentityRequest,
+        deadline: Deadline,
         call: Call,
     ) -> Result<Response<GetKeyIdentityResponse>, Status> {
         if let Err(refusal) = presented(&r.key_fingerprint, r.derivation_version) {
@@ -234,7 +235,8 @@ impl IamDb {
 
         // NO TRANSACTION AND NO LOCK. One statement reads one row, and there is
         // nothing to serialise against: this arm writes nothing on any answer.
-        let outcome = match marker(&self.pool, Lock::No).await {
+        let mut conn = self.acquire(deadline).await?;
+        let outcome = match marker(&mut *conn, Lock::No).await {
             Ok(Some(stored)) => stored.compared_with(&r.key_fingerprint, r.derivation_version),
             // ABSENT, AND IT MEANS ONLY THAT NO MARKER IS STORED. What the
             // CALLER may conclude from it is bounded by `store_key_identity`'s
@@ -301,9 +303,10 @@ impl IamDb {
     pub(super) async fn store_key_identity(
         &self,
         r: SetKeyIdentityRequest,
+        deadline: Deadline,
         call: Call,
     ) -> Result<Response<SetKeyIdentityResponse>, Status> {
-        match self.record_key_identity(&r).await {
+        match self.record_key_identity(&r, deadline).await {
             Ok(outcome) => {
                 call.finish(Outcome {
                     status: "OK",
@@ -324,6 +327,7 @@ impl IamDb {
     async fn record_key_identity(
         &self,
         r: &SetKeyIdentityRequest,
+        deadline: Deadline,
     ) -> Result<KeyIdentityOutcome, Status> {
         presented(&r.key_fingerprint, r.derivation_version)?;
         let key = r
@@ -332,7 +336,8 @@ impl IamDb {
             .map(|i| i.key.clone())
             .unwrap_or_default();
 
-        let mut tx = self.pool.begin().await.map_err(db)?;
+        let mut conn = self.acquire(deadline).await?;
+        let mut tx = conn.begin(Isolation::Default).await?;
 
         // **THE REFUSAL RIDES IN THE WRITE**, which is `SetPassword`'s shape and
         // ledger 695's rule: a separate emptiness check followed by an INSERT is

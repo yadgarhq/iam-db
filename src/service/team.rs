@@ -10,7 +10,8 @@
 //! derivation-on enrolment arm (`enrolment::declared`). All three take the
 //! SAME lock, the `administrators` row `FOR UPDATE`, before they read its
 //! members, and all three pin READ COMMITTED for that transaction only
-//! (ADR-0513), so a read after the lock wait sees the winner's rows.
+//! (ADR-0513, through `conn::Conn::begin`), so a read after the lock wait sees
+//! the winner's rows.
 
 use super::*;
 
@@ -46,22 +47,6 @@ pub(in crate::service) fn canonical_user_id(id: &str) -> bool {
         _ => b.is_ascii_digit() || (b'a'..=b'f').contains(b),
     });
     shape && bytes[14] == b'7' && matches!(bytes[19], b'8' | b'9' | b'a' | b'b')
-}
-
-/// A connection whose NEXT transaction runs at READ COMMITTED.
-///
-/// `SET TRANSACTION` without SESSION or GLOBAL applies to the next transaction
-/// and then reverts, so nothing leaks to the next borrower of this pooled
-/// connection — the form `redeem` already uses.
-pub(in crate::service) async fn read_committed(
-    pool: &MySqlPool,
-) -> Result<sqlx::pool::PoolConnection<sqlx::MySql>, Status> {
-    let mut conn = pool.acquire().await.map_err(db)?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
-        .execute(&mut *conn)
-        .await
-        .map_err(db)?;
-    Ok(conn)
 }
 
 /// Lock the `administrators` row `FOR UPDATE`, and say whether it is live.

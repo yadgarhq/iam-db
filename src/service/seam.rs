@@ -26,8 +26,9 @@ impl IamDb {
             tel(request_id_of(&req), ""),
         );
         let call = admitted(caller, call)?;
+        let deadline = Deadline::of(&req);
         let r = req.into_inner();
-        self.resolve(r, call).await
+        conn::store_work(self.resolve(r, deadline, call)).await
     }
 
     /// `get_password_hash` as the named `caller`, through the gate in `caller::admitted`.
@@ -43,8 +44,9 @@ impl IamDb {
             tel(request_id_of(&req), ""),
         );
         let call = admitted(caller, call)?;
+        let deadline = Deadline::of(&req);
         let r = req.into_inner();
-        self.password_hash(r, call).await
+        conn::store_work(self.password_hash(r, deadline, call)).await
     }
 
     /// `set_password` as the named `caller`, through the gate in `caller::admitted`.
@@ -60,8 +62,9 @@ impl IamDb {
             tel(request_id_of(&req), &req.get_ref().user_id),
         );
         let call = admitted(caller, call)?;
+        let deadline = Deadline::of(&req);
         let r = req.into_inner();
-        self.store_password(r, call).await
+        conn::store_work(self.store_password(r, deadline, call)).await
     }
 
     /// `create_credential` as the named `caller`, through the gate in `caller::admitted`.
@@ -78,8 +81,9 @@ impl IamDb {
         );
         let call = admitted(caller, call)?;
         let rid = request_id_of(&req);
+        let deadline = Deadline::of(&req);
         let r = req.into_inner();
-        self.mint_credential(r, &rid, call).await
+        conn::store_work(self.mint_credential(r, deadline, &rid, call)).await
     }
 
     /// `revoke_credential` as the named `caller`, through the gate in `caller::admitted`.
@@ -96,8 +100,9 @@ impl IamDb {
         );
         let call = admitted(caller, call)?;
         let rid = request_id_of(&req);
+        let deadline = Deadline::of(&req);
         let r = req.into_inner();
-        self.revoke(r, &rid, call).await
+        conn::store_work(self.revoke(r, deadline, &rid, call)).await
     }
 
     /// `revoke_all_credentials` as the named `caller`, through the gate in `caller::admitted`.
@@ -114,8 +119,9 @@ impl IamDb {
         );
         let call = admitted(caller, call)?;
         let rid = request_id_of(&req);
+        let deadline = Deadline::of(&req);
         let r = req.into_inner();
-        self.revoke_all(r, &rid, call).await
+        conn::store_work(self.revoke_all(r, deadline, &rid, call)).await
     }
 
     /// `create_user` as the named `caller`, through the gate in `caller::admitted`.
@@ -132,8 +138,9 @@ impl IamDb {
         );
         let call = admitted(caller, call)?;
         let rid = request_id_of(&req);
+        let deadline = Deadline::of(&req);
         let r = req.into_inner();
-        self.insert_user(r, &rid, call).await
+        conn::store_work(self.insert_user(r, deadline, &rid, call)).await
     }
 
     /// `add_team_member` as the named `caller`, through the gate in `caller::admitted`.
@@ -151,7 +158,7 @@ impl IamDb {
         let call = admitted(caller, call)?;
         let rid = request_id_of(&req);
         let r = req.into_inner();
-        self.add_member(r, &rid, call).await
+        conn::store_work(self.add_member(r, &rid, call)).await
     }
 
     /// `remove_team_member` as the named `caller`, through the gate in `caller::admitted`.
@@ -169,7 +176,7 @@ impl IamDb {
         let call = admitted(caller, call)?;
         let rid = request_id_of(&req);
         let r = req.into_inner();
-        self.remove_member(r, &rid, call).await
+        conn::store_work(self.remove_member(r, &rid, call)).await
     }
 
     /// `create_enrolment` as the named `caller`, through the gate in `caller::admitted`.
@@ -186,8 +193,9 @@ impl IamDb {
         );
         let call = admitted(caller, call)?;
         let rid = request_id_of(&req);
+        let deadline = Deadline::of(&req);
         let r = req.into_inner();
-        self.mint_enrolment(r, &rid, call).await
+        conn::store_work(self.mint_enrolment(r, deadline, &rid, call)).await
     }
 
     /// `redeem_enrolment` as the named `caller`, through the gate in `caller::admitted`.
@@ -203,8 +211,9 @@ impl IamDb {
             tel(request_id_of(&req), ""),
         );
         let call = admitted(caller, call)?;
+        let deadline = Deadline::of(&req);
         let r = req.into_inner();
-        self.redeem(r, call).await
+        conn::store_work(self.redeem(r, deadline, call)).await
     }
 
     /// `list_credentials` as the named `caller`, through the gate in `caller::admitted`.
@@ -220,8 +229,9 @@ impl IamDb {
             tel(request_id_of(&req), &req.get_ref().user_id),
         );
         let call = admitted(caller, call)?;
+        let deadline = Deadline::of(&req);
         let r = req.into_inner();
-        self.credential_page(r, call).await
+        conn::store_work(self.credential_page(r, deadline, call)).await
     }
 
     /// `set_user_admin` as the named `caller`, through the gate in `caller::admitted`.
@@ -238,8 +248,9 @@ impl IamDb {
         );
         let call = admitted(caller, call)?;
         let rid = request_id_of(&req);
+        let deadline = Deadline::of(&req);
         let r = req.into_inner();
-        self.set_admin(r, &rid, call).await
+        conn::store_work(self.set_admin(r, deadline, &rid, call)).await
     }
 
     /// `set_rate_limit_override` as the named `caller`, through the gate in `caller::admitted`.
@@ -256,8 +267,9 @@ impl IamDb {
         );
         let call = admitted(caller, call)?;
         let rid = request_id_of(&req);
+        let deadline = Deadline::of(&req);
         let r = req.into_inner();
-        self.set_rate_limit(r, &rid, call).await
+        conn::store_work(self.set_rate_limit(r, deadline, &rid, call)).await
     }
 
     /// `set_inherited_setting` as the named `caller`, through the gate in `caller::admitted`.
@@ -279,8 +291,9 @@ impl IamDb {
         );
         let call = admitted(caller, call)?;
         let rid = request_id_of(&req);
+        let deadline = Deadline::of(&req);
         let r = req.into_inner();
-        self.store_setting(r, &rid, call).await
+        conn::store_work(self.store_setting(r, deadline, &rid, call)).await
     }
 
     /// `sync_teams` as the named `caller`, through the gate in `caller::admitted`.
@@ -296,8 +309,9 @@ impl IamDb {
             tel(request_id_of(&req), ""),
         );
         let call = admitted(caller, call)?;
+        let deadline = Deadline::of(&req);
         let r = req.into_inner();
-        self.sync_teams(r, call).await
+        conn::store_work(self.sync_teams(r, deadline, call)).await
     }
 
     /// `get_key_identity` as the named `caller`, through the gate in `caller::admitted`.
@@ -313,8 +327,9 @@ impl IamDb {
             tel(request_id_of(&req), ""),
         );
         let call = admitted(caller, call)?;
+        let deadline = Deadline::of(&req);
         let r = req.into_inner();
-        self.key_identity(r, call).await
+        conn::store_work(self.key_identity(r, deadline, call)).await
     }
 
     /// `set_key_identity` as the named `caller`, through the gate in `caller::admitted`.
@@ -330,7 +345,8 @@ impl IamDb {
             tel(request_id_of(&req), ""),
         );
         let call = admitted(caller, call)?;
+        let deadline = Deadline::of(&req);
         let r = req.into_inner();
-        self.store_key_identity(r, call).await
+        conn::store_work(self.store_key_identity(r, deadline, call)).await
     }
 }

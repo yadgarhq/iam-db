@@ -27,7 +27,7 @@
 //! an administrator who holds a LIVE credential is made visible on its own
 //! warn line and on [`BOOTSTRAP_REENROLMENT`], labelled `revoke`.
 
-use crate::service::team::{lock_administrators, read_committed, ADMINISTRATORS};
+use crate::service::team::{lock_administrators, ADMINISTRATORS};
 use crate::service::*;
 
 use super::demand::REFUSAL;
@@ -62,12 +62,13 @@ impl Conjunct {
 pub(super) async fn issue(
     pool: &MySqlPool,
     r: &CreateEnrolmentRequest,
+    deadline: Deadline,
     expires_at: i64,
     rid: &str,
     call: Call,
 ) -> Result<Response<CreateEnrolmentResponse>, Status> {
     let id = format!("yadgar:enrolment:{}", uuid::Uuid::now_v7());
-    if let Err(refusal) = mint(pool, r, &id, expires_at, rid).await {
+    if let Err(refusal) = mint(pool, r, deadline, &id, expires_at, rid).await {
         call.fail(label(&refusal));
         return Err(refusal);
     }
@@ -83,12 +84,13 @@ pub(super) async fn issue(
 async fn mint(
     pool: &MySqlPool,
     r: &CreateEnrolmentRequest,
+    deadline: Deadline,
     id: &str,
     expires_at: i64,
     rid: &str,
 ) -> Result<(), Status> {
-    let mut conn = read_committed(pool).await?;
-    let mut tx = sqlx::Acquire::begin(&mut *conn).await.map_err(db)?;
+    let mut conn = conn::acquire(pool, deadline).await?;
+    let mut tx = conn.begin(Isolation::ReadCommitted).await?;
 
     let live_credentials = match predicate(&mut tx, &r.user_id).await? {
         Ok(n) => n,

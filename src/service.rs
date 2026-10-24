@@ -74,6 +74,7 @@
 
 use sqlx::{MySqlPool, Row};
 use tonic::{Request, Response, Status};
+use yadgar_dial::Deadline;
 use yadgar_lifecycle::serve_tls::caller_common_name;
 use yadgar_telemetry::grpc::status_name;
 use yadgar_telemetry::observe::{Call, Outcome};
@@ -99,6 +100,8 @@ use crate::pb::yadgar::telemetry::v1::Kind as ContractKind;
 // children is also what lets them see this module's `pool`, `db`, `label` and
 // the liveness predicates without anything widening.
 mod caller;
+mod conn;
+use conn::Isolation;
 mod credential;
 mod enrolment;
 mod epoch;
@@ -187,7 +190,12 @@ impl IamDb {
         Self { pool }
     }
 
-    /// The pool, for the contract test to seed rows the API has no RPC for.
+    /// The pool itself, BYPASSING `service::conn`: no deadline bound and no
+    /// close-on-cancel. Public, and nothing restricts who calls it. Today only
+    /// the integration tests under `tests/` call it: to seed rows the API has no
+    /// RPC for, to read rows back, and to hold the only connection so an RPC
+    /// can only wait. No handler in `service` uses it; a handler acquires
+    /// through `conn::acquire`.
     ///
     /// `SyncTeams` writes teams now; a test whose subject is something else
     /// still seeds a team or a membership row directly, rather than through a

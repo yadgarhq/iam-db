@@ -34,6 +34,7 @@ impl IamDb {
     pub(in crate::service) async fn mint_credential(
         &self,
         r: CreateCredentialRequest,
+        deadline: Deadline,
         rid: &str,
         call: Call,
     ) -> Result<Response<CreateCredentialResponse>, Status> {
@@ -97,7 +98,8 @@ impl IamDb {
         if let Some(epoch) = expected {
             insert = insert.bind(epoch);
         }
-        let done = insert.execute(&self.pool).await.map_err(db)?;
+        let mut conn = self.acquire(deadline).await?;
+        let done = insert.execute(&mut *conn).await.map_err(db)?;
 
         // Zero MATCHED rows is no live person, and `live_user` is here only to
         // say so as NOT_FOUND. `SetPassword` carries the full argument.
@@ -118,7 +120,7 @@ impl IamDb {
         // race fix. `CreateEnrolment` and `AddTeamMember` carry the same branch
         // and point here.
         if done.rows_affected() == 0 {
-            live_user(&self.pool, &r.user_id).await?;
+            live_user(&mut *conn, &r.user_id).await?;
 
             // A live person and no row: the epoch moved. TERMINAL — see [`stale`].
             if expected.is_some() {
