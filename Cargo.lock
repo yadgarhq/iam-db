@@ -2835,8 +2835,9 @@ dependencies = [
 [[package]]
 name = "yadgar-store"
 version = "0.1.0"
-source = "git+https://github.com/yadgarhq/store.git?tag=v0.4.0#596a2233e6dfdc6e63fd3a757655595e34789c59"
+source = "git+https://github.com/yadgarhq/store.git?tag=v0.5.0#a8e8f6aab8646d65830c0f8011d5e854436a6a21"
 dependencies = [
+ "sha2 0.10.9",
  "sqlx",
  "thiserror",
  "tokio",

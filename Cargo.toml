@@ -26,7 +26,7 @@ description = "The identity module's -db twin: the only writer of its store, ser
 # this crate's headroom check used to hard-code. `boot::pool_config` below now
 # reads all four from the environment with no fallback, the same shape every
 # other knob here already takes.
-yadgar-store = { git = "https://github.com/yadgarhq/store.git", tag = "v0.4.0" }
+yadgar-store = { git = "https://github.com/yadgarhq/store.git", tag = "v0.5.0" }
 # In tonic 0.14 prost codegen moved out to tonic-prost; there is no "prost"
 # feature on tonic itself.
 #

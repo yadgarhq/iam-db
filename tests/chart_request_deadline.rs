@@ -2,16 +2,23 @@
 //! CALLER's own dial request deadline, and this is where that pin stops
 //! being a comment (card C-DB2, M-audit-C).
 //!
+//! **ADR-1006 RETARGETED THE BOUND (2026-10-24).** The timeout chain shrinks
+//! inward: each hop's timeout is strictly below its caller's. The caller's
+//! request timeout is now a chart value in the CALLER's chart (ADR-0925 Q-C1,
+//! ADR-1006 default 14s), which this chart cannot read. What it can read is the lowest
+//! value the caller's dial client accepts, `yadgar_dial::min_request_timeout()`
+//! (14s). A bound below that floor is below every caller's deadline, so the
+//! schema maximum is 13 and the shipped value 12.
+//!
 //! **WHY THE POOL'S ACQUIRE WAIT MUST STAY SHORTER THAN THE CALLER'S WHOLE
 //! REQUEST.** This binary never dials out — it is a `-db` twin, served over
 //! by `iam`, not a caller of anything — so the budget `acquireTimeoutSeconds`
 //! has to stay under is `iam`'s own dial deadline for the `iam` -> `iam-db`
-//! hop, not a deadline this process sets for itself. `yadgar_dial`'s
-//! `REQUEST_TIMEOUT` (30s, read back here as [`default_request_timeout`]) is
-//! that budget. `chart/values.schema.json` bounds `acquireTimeoutSeconds` at
-//! 29 — one second under — and `chart/values.yaml` ships 25, a further
-//! margin, so a stalled acquire can always be the first thing to report on
-//! THAT hop.
+//! hop, not a deadline this process sets for itself. The lowest value that
+//! budget can take, `yadgar_dial`'s [`min_request_timeout`] (14s), is the
+//! bound. `chart/values.schema.json` bounds `acquireTimeoutSeconds` at 13 —
+//! one second under — and `chart/values.yaml` ships 12, a further margin, so
+//! a stalled acquire can always be the first thing to report on THAT hop.
 //!
 //! **THIS IS ONE HOP OF A LONGER CHAIN, AND OTHER HOPS BOUND THEMSELVES THE
 //! SAME WAY, INDEPENDENTLY.** `gateway`'s own `AUTH_DEADLINE` (10s) and
@@ -21,9 +28,9 @@
 //! They are the same PATTERN (an inner step stays shorter than the budget it
 //! runs inside), not the same chain: on a request that reaches `iam-db`
 //! through `gateway` and `iam`, `AUTH_DEADLINE` or `RESOLVE_DEADLINE` fires
-//! first, well before this pool's 25s acquire wait is ever reached, and
+//! first, well before this pool's 12s acquire wait is ever reached, and
 //! `acquireTimeoutSeconds` only becomes the binding deadline for a caller
-//! that dials `iam-db` directly within `iam`'s own 30s budget.
+//! that dials `iam-db` directly within `iam`'s own request budget.
 //!
 //! **THIS TEST REDS WHEN EITHER NUMBER MOVES AWAY FROM THE OTHER**, not when
 //! somebody edits `yadgar-dial`'s own `main`: a schema bound in THIS
@@ -36,11 +43,11 @@
 //! files rather than restated as a second literal that could silently drift
 //! from the first — reading the real files is the whole point — but each is
 //! then checked against a literal, and the relation (`shipped <= maximum <
-//! dial's default`) is asserted last.
+//! dial's floor`) is asserted last.
 
 use std::path::PathBuf;
 
-use yadgar_dial::default_request_timeout;
+use yadgar_dial::min_request_timeout;
 
 const CHART_KEY: &str = "acquireTimeoutSeconds";
 
@@ -108,14 +115,14 @@ fn shipped_acquire_timeout_seconds() -> u64 {
 }
 
 #[test]
-fn the_acquire_timeout_schema_bound_stays_below_the_dial_request_timeout() {
+fn the_acquire_timeout_schema_bound_stays_below_the_lowest_dial_request_timeout() {
     let maximum = schema_acquire_timeout_maximum();
-    let dial_timeout = default_request_timeout().as_secs();
+    let dial_timeout = min_request_timeout().as_secs();
 
     assert!(
         maximum < dial_timeout,
         "chart/values.schema.json's database.acquireTimeoutSeconds.maximum ({maximum}) is no \
-         longer below yadgar_dial::default_request_timeout() ({dial_timeout}s): a pool acquire \
+         longer below yadgar_dial::min_request_timeout() ({dial_timeout}s): a pool acquire \
          could then run as long as a caller's whole request, which can never be the deadline \
          that fires first. Lower the schema's maximum, or raise it only alongside a raised dial \
          timeout, deliberately."
@@ -142,20 +149,20 @@ fn the_literals_this_file_pins_have_not_silently_drifted() {
     // that read it back out of the files.
     assert_eq!(
         schema_acquire_timeout_maximum(),
-        29,
+        13,
         "chart/values.schema.json's database.acquireTimeoutSeconds.maximum moved; re-derive the \
-         margin against yadgar_dial::default_request_timeout() and update this literal with it"
+         margin against yadgar_dial::min_request_timeout() and update this literal with it"
     );
     assert_eq!(
         shipped_acquire_timeout_seconds(),
-        25,
+        12,
         "chart/values.yaml's shipped database.acquireTimeoutSeconds moved; update this literal \
          with it"
     );
     assert_eq!(
-        default_request_timeout().as_secs(),
-        30,
-        "yadgar_dial's default_request_timeout() moved; this module pins yadgar-dial by tag \
+        min_request_timeout().as_secs(),
+        14,
+        "yadgar_dial's min_request_timeout() moved; this module pins yadgar-dial by tag \
          (ADR-0526), so re-derive database.acquireTimeoutSeconds's schema maximum against the \
          new value and update both together"
     );
