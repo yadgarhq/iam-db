@@ -113,6 +113,7 @@ async fn a_live_credential_resolves_to_its_user() {
             Some(IAM_CALLER),
             Request::new(ResolveCredentialRequest {
                 token_hash: vec![9u8; 32],
+                ..Default::default()
             }),
         )
         .await
@@ -135,6 +136,7 @@ async fn an_unknown_token_is_an_empty_answer_and_not_an_error() {
             Some(IAM_CALLER),
             Request::new(ResolveCredentialRequest {
                 token_hash: vec![7u8; 32],
+                ..Default::default()
             }),
         )
         .await
@@ -165,6 +167,7 @@ async fn a_revoked_credential_stops_resolving() {
             Some(IAM_CALLER),
             Request::new(ResolveCredentialRequest {
                 token_hash: vec![8u8; 32],
+                ..Default::default()
             }),
         )
         .await
@@ -237,22 +240,14 @@ async fn team_membership_comes_back_with_the_identity() {
     .await
     .expect("seed team");
 
-    svc.add_team_member_as(
-        Some(IAM_CALLER),
-        Request::new(AddTeamMemberRequest {
-            team_id: "yadgar:team:t1".into(),
-            user_id: user_id.clone(),
-            ..Default::default()
-        }),
-    )
-    .await
-    .expect("add member");
+    join(&svc, "yadgar:team:t1", &user_id).await;
 
     let got = svc
         .resolve_credential_as(
             Some(IAM_CALLER),
             Request::new(ResolveCredentialRequest {
                 token_hash: vec![5u8; 32],
+                ..Default::default()
             }),
         )
         .await
@@ -262,179 +257,16 @@ async fn team_membership_comes_back_with_the_identity() {
     assert_eq!(got.team_ids, vec!["yadgar:team:t1".to_string()]);
 }
 
-#[tokio::test]
-async fn adding_the_same_member_twice_is_a_no_op() {
-    let svc = fresh("iam_db_test_member_twice").await;
-    let (user_id, _cred) = seed(&svc, &[6u8; 32], &[4u8; 32]).await;
-
-    sqlx::query(
-        "INSERT INTO iam_team (id, name, created_by, updated_by) VALUES (?, ?, 'system', 'system')",
-    )
-    .bind("yadgar:team:t2")
-    .bind("platform")
-    .execute(svc.pool())
-    .await
-    .expect("seed team");
-
-    for _ in 0..2 {
-        svc.add_team_member_as(
-            Some(IAM_CALLER),
-            Request::new(AddTeamMemberRequest {
-                team_id: "yadgar:team:t2".into(),
-                user_id: user_id.clone(),
-                ..Default::default()
-            }),
-        )
+/// Seed one membership row directly. `AddTeamMember` is retired (ADR-0963 (7))
+/// and `SyncTeams` (tests/team_access.rs) owns the whole team set, so a test
+/// whose subject is something else seeds the row the way it seeds a team.
+async fn join(svc: &IamDb, team_id: &str, user_id: &str) {
+    sqlx::query("INSERT INTO iam_team_member (team_id, user_id, added_by) VALUES (?, ?, 'test')")
+        .bind(team_id)
+        .bind(user_id)
+        .execute(svc.pool())
         .await
-        .expect("adding twice must not error");
-    }
-
-    let got = svc
-        .resolve_credential_as(
-            Some(IAM_CALLER),
-            Request::new(ResolveCredentialRequest {
-                token_hash: vec![4u8; 32],
-            }),
-        )
-        .await
-        .expect("resolve")
-        .into_inner();
-
-    assert_eq!(got.team_ids.len(), 1, "membership must not duplicate");
-}
-
-#[tokio::test]
-async fn removing_a_member_removes_the_team_from_the_identity() {
-    let svc = fresh("iam_db_test_member_remove").await;
-    let (user_id, _cred) = seed(&svc, &[10u8; 32], &[3u8; 32]).await;
-
-    sqlx::query(
-        "INSERT INTO iam_team (id, name, created_by, updated_by) VALUES (?, ?, 'system', 'system')",
-    )
-    .bind("yadgar:team:t3")
-    .bind("platform")
-    .execute(svc.pool())
-    .await
-    .expect("seed team");
-
-    svc.add_team_member_as(
-        Some(IAM_CALLER),
-        Request::new(AddTeamMemberRequest {
-            team_id: "yadgar:team:t3".into(),
-            user_id: user_id.clone(),
-            ..Default::default()
-        }),
-    )
-    .await
-    .expect("add");
-
-    svc.remove_team_member_as(
-        Some(IAM_CALLER),
-        Request::new(RemoveTeamMemberRequest {
-            team_id: "yadgar:team:t3".into(),
-            user_id: user_id.clone(),
-            ..Default::default()
-        }),
-    )
-    .await
-    .expect("remove");
-
-    let got = svc
-        .resolve_credential_as(
-            Some(IAM_CALLER),
-            Request::new(ResolveCredentialRequest {
-                token_hash: vec![3u8; 32],
-            }),
-        )
-        .await
-        .expect("resolve")
-        .into_inner();
-
-    assert!(
-        got.team_ids.is_empty(),
-        "a removed member must lose the team's visibility"
-    );
-}
-
-/// Seed one team row, which the foreign key requires and no RPC mints (D72).
-async fn team(svc: &IamDb, id: &str) {
-    sqlx::query(
-        "INSERT INTO iam_team (id, name, created_by, updated_by) VALUES (?, ?, 'system', 'system')",
-    )
-    .bind(id)
-    .bind("platform")
-    .execute(svc.pool())
-    .await
-    .expect("seed team");
-}
-
-#[tokio::test]
-async fn adding_a_member_to_a_team_that_does_not_exist_is_refused() {
-    // MUTATION THIS CATCHES: `INSERT IGNORE`. IGNORE downgrades a FOREIGN KEY
-    // violation to a WARNING, so an unknown team inserted nothing, raised
-    // nothing, and this RPC answered OK. An operator was told the membership
-    // landed; no read will ever return it, and no error was recorded anywhere.
-    //
-    // Every other team test seeds the team first, which is why thirteen of them
-    // stayed green over a write that silently discarded its row.
-    let svc = fresh("iam_db_test_member_unknown_team").await;
-    let (user_id, _cred) = seed(&svc, &[57u8; 32], &[57u8; 32]).await;
-
-    let err = svc
-        .add_team_member_as(
-            Some(IAM_CALLER),
-            Request::new(AddTeamMemberRequest {
-                team_id: "yadgar:team:never-existed".into(),
-                user_id: user_id.clone(),
-                ..Default::default()
-            }),
-        )
-        .await
-        .expect_err("a membership in a team that does not exist must not report success");
-    assert_eq!(err.code(), tonic::Code::NotFound);
-
-    assert_eq!(
-        count(
-            &svc,
-            "SELECT COUNT(*) FROM iam_team_member WHERE user_id = ?",
-            &user_id,
-        )
-        .await,
-        0,
-        "the refusal must not have written a row either"
-    );
-}
-
-#[tokio::test]
-async fn adding_a_member_who_does_not_exist_is_refused() {
-    // The other half of the same swallowed constraint: `INSERT IGNORE` dropped
-    // the user foreign key exactly as it dropped the team one.
-    let svc = fresh("iam_db_test_member_unknown_user").await;
-    team(&svc, "yadgar:team:t5").await;
-
-    let err = svc
-        .add_team_member_as(
-            Some(IAM_CALLER),
-            Request::new(AddTeamMemberRequest {
-                team_id: "yadgar:team:t5".into(),
-                user_id: "yadgar:user:never-existed".into(),
-                ..Default::default()
-            }),
-        )
-        .await
-        .expect_err("a membership for a person who does not exist must not report success");
-    assert_eq!(err.code(), tonic::Code::NotFound);
-
-    assert_eq!(
-        count(
-            &svc,
-            "SELECT COUNT(*) FROM iam_team_member WHERE team_id = ?",
-            "yadgar:team:t5",
-        )
-        .await,
-        0,
-        "the refusal must not have written a row either"
-    );
+        .expect("seed membership");
 }
 
 #[tokio::test]
@@ -564,6 +396,7 @@ async fn an_expired_credential_stops_resolving() {
             Some(IAM_CALLER),
             Request::new(ResolveCredentialRequest {
                 token_hash: vec![14u8; 32],
+                ..Default::default()
             }),
         )
         .await
@@ -624,6 +457,7 @@ async fn a_credential_with_a_future_expiry_still_resolves() {
             Some(IAM_CALLER),
             Request::new(ResolveCredentialRequest {
                 token_hash: vec![16u8; 32],
+                ..Default::default()
             }),
         )
         .await
@@ -666,6 +500,7 @@ async fn a_soft_deleted_users_credential_stops_resolving() {
             Some(IAM_CALLER),
             Request::new(ResolveCredentialRequest {
                 token_hash: vec![20u8; 32],
+                ..Default::default()
             }),
         )
         .await
@@ -680,6 +515,7 @@ async fn a_soft_deleted_users_credential_stops_resolving() {
             Some(IAM_CALLER),
             Request::new(ResolveCredentialRequest {
                 token_hash: vec![20u8; 32],
+                ..Default::default()
             }),
         )
         .await
@@ -817,16 +653,7 @@ async fn a_resolve_returns_only_that_users_teams() {
     }
 
     for (team, user) in [("yadgar:team:mine", &mine), ("yadgar:team:theirs", &theirs)] {
-        svc.add_team_member_as(
-            Some(IAM_CALLER),
-            Request::new(AddTeamMemberRequest {
-                team_id: team.into(),
-                user_id: user.clone(),
-                ..Default::default()
-            }),
-        )
-        .await
-        .expect("add member");
+        join(&svc, team, user).await;
     }
 
     let got = svc
@@ -834,6 +661,7 @@ async fn a_resolve_returns_only_that_users_teams() {
             Some(IAM_CALLER),
             Request::new(ResolveCredentialRequest {
                 token_hash: vec![23u8; 32],
+                ..Default::default()
             }),
         )
         .await
@@ -2249,9 +2077,11 @@ async fn administrative_writes_refuse_a_person_who_is_not_live() {
     // column under `user_id IN (SELECT id FROM iam_user WHERE deleted_at IS
     // NULL)`, so the guard on one writer and not the other is exactly what
     // `fits_password_column` already refuses to allow on this pair.
+    //
+    // AddTeamMember HAS SINCE LEFT THIS TEST: it is retired (ADR-0963 (7)) and
+    // refuses every call, and `SyncTeams` writes membership from GitOps.
     let svc = fresh("iam_db_test_live_writes").await;
     let (user_id, _cred) = seed(&svc, &[55u8; 32], &[55u8; 32]).await;
-    team(&svc, "yadgar:team:t6").await;
     soft_delete(&svc, &user_id).await;
 
     let err = svc
@@ -2266,19 +2096,6 @@ async fn administrative_writes_refuse_a_person_who_is_not_live() {
         )
         .await
         .expect_err("a credential for a removed person is one that authenticates nobody");
-    assert_eq!(err.code(), tonic::Code::NotFound);
-
-    let err = svc
-        .add_team_member_as(
-            Some(IAM_CALLER),
-            Request::new(AddTeamMemberRequest {
-                team_id: "yadgar:team:t6".into(),
-                user_id: user_id.clone(),
-                ..Default::default()
-            }),
-        )
-        .await
-        .expect_err("a team granted to a removed person is one no read returns");
     assert_eq!(err.code(), tonic::Code::NotFound);
 
     let err = svc
@@ -2555,82 +2372,6 @@ async fn a_soft_delete_landing_mid_call_still_refuses_an_enrolment() {
         .await,
         0,
         "the refusal must not have minted an enrolment either"
-    );
-}
-
-#[tokio::test]
-async fn a_soft_delete_landing_mid_call_still_refuses_a_membership() {
-    // AddTeamMember's USER predicate — one of the two it carries.
-    let svc = fresh("iam_db_test_race_member_user").await;
-    // `seed_team` rather than `team`, because `iam_team.name` is UNIQUE and the
-    // team-side test seeds one of its own.
-    seed_team(&svc, "yadgar:team:race").await;
-    let user = enrolee(&svc, 84, b"encrypted-member").await;
-
-    let err = while_a_soft_delete_lands(
-        &svc,
-        Withdraw::User,
-        &user,
-        svc.add_team_member_as(
-            Some(IAM_CALLER),
-            Request::new(AddTeamMemberRequest {
-                team_id: "yadgar:team:race".into(),
-                user_id: user.clone(),
-                ..Default::default()
-            }),
-        ),
-    )
-    .await
-    .expect_err("a membership granted mid-delete is one ResolveCredential never returns");
-    assert_eq!(err.code(), tonic::Code::NotFound);
-    assert_eq!(
-        count(
-            &svc,
-            "SELECT COUNT(*) FROM iam_team_member WHERE user_id = ?",
-            &user,
-        )
-        .await,
-        0,
-        "the refusal must not have granted the membership either"
-    );
-}
-
-#[tokio::test]
-async fn a_team_soft_delete_landing_mid_call_still_refuses_a_membership() {
-    // AddTeamMember's TEAM predicate, one of the two places on this boundary
-    // where a team's liveness races a write — `SetInheritedSetting`'s team arm
-    // is the other, tested below. `Withdraw::Team` is the only writer of
-    // `iam_team.deleted_at` anywhere, so both are latent until a team-deleting
-    // RPC exists, and both are fixed anyway.
-    let svc = fresh("iam_db_test_race_member_team").await;
-    seed_team(&svc, "yadgar:team:racedoomed").await;
-    let user = enrolee(&svc, 85, b"encrypted-joiner").await;
-
-    let err = while_a_soft_delete_lands(
-        &svc,
-        Withdraw::Team,
-        "yadgar:team:racedoomed",
-        svc.add_team_member_as(
-            Some(IAM_CALLER),
-            Request::new(AddTeamMemberRequest {
-                team_id: "yadgar:team:racedoomed".into(),
-                user_id: user.clone(),
-                ..Default::default()
-            }),
-        ),
-    )
-    .await
-    .expect_err("a membership in a team that left mid-call is a grant into nothing");
-    assert_eq!(err.code(), tonic::Code::NotFound);
-    assert_eq!(
-        count(
-            &svc,
-            "SELECT COUNT(*) FROM iam_team_member WHERE user_id = ?",
-            &user,
-        )
-        .await,
-        0,
-        "the refusal must not have granted the membership either"
     );
 }
 
@@ -2973,6 +2714,7 @@ async fn the_admin_flag_travels_with_the_identity() {
             Some(IAM_CALLER),
             Request::new(ResolveCredentialRequest {
                 token_hash: vec![50u8; 32],
+                ..Default::default()
             }),
         )
         .await
@@ -2996,6 +2738,7 @@ async fn the_admin_flag_travels_with_the_identity() {
             Some(IAM_CALLER),
             Request::new(ResolveCredentialRequest {
                 token_hash: vec![50u8; 32],
+                ..Default::default()
             }),
         )
         .await
@@ -3038,6 +2781,7 @@ async fn clearing_a_rate_limit_override_deletes_it_rather_than_storing_zero() {
             Some(IAM_CALLER),
             Request::new(ResolveCredentialRequest {
                 token_hash: vec![51u8; 32],
+                ..Default::default()
             }),
         )
         .await
@@ -3070,6 +2814,7 @@ async fn clearing_a_rate_limit_override_deletes_it_rather_than_storing_zero() {
             Some(IAM_CALLER),
             Request::new(ResolveCredentialRequest {
                 token_hash: vec![51u8; 32],
+                ..Default::default()
             }),
         )
         .await
@@ -3131,6 +2876,7 @@ async fn re_setting_a_rate_limit_override_replaces_both_columns() {
             Some(IAM_CALLER),
             Request::new(ResolveCredentialRequest {
                 token_hash: vec![52u8; 32],
+                ..Default::default()
             }),
         )
         .await
@@ -3241,6 +2987,7 @@ async fn the_shipped_default_is_readable_with_the_lock_engaged() {
             Some(IAM_CALLER),
             Request::new(ResolveCredentialRequest {
                 token_hash: vec![60u8; 32],
+                ..Default::default()
             }),
         )
         .await
@@ -3292,6 +3039,7 @@ async fn every_team_override_comes_back_including_teams_the_caller_is_not_in() {
             Some(IAM_CALLER),
             Request::new(ResolveCredentialRequest {
                 token_hash: vec![61u8; 32],
+                ..Default::default()
             }),
         )
         .await
@@ -3344,16 +3092,7 @@ async fn team_ids_and_team_override_answer_different_questions_in_one_resolve() 
         ("yadgar:team:b", &me),
         ("yadgar:team:c", &other),
     ] {
-        svc.add_team_member_as(
-            Some(IAM_CALLER),
-            Request::new(AddTeamMemberRequest {
-                team_id: team.into(),
-                user_id: user.clone(),
-                ..Default::default()
-            }),
-        )
-        .await
-        .expect("add member");
+        join(&svc, team, user).await;
     }
     // A: the caller's team, with an override. B: the caller's team, without one.
     // C: NOT the caller's team, with an override. Different values, so a swap
@@ -3378,6 +3117,7 @@ async fn team_ids_and_team_override_answer_different_questions_in_one_resolve() 
             Some(IAM_CALLER),
             Request::new(ResolveCredentialRequest {
                 token_hash: vec![71u8; 32],
+                ..Default::default()
             }),
         )
         .await
@@ -3433,6 +3173,7 @@ async fn an_absent_organisation_row_is_unspecified_and_never_off() {
             Some(IAM_CALLER),
             Request::new(ResolveCredentialRequest {
                 token_hash: vec![62u8; 32],
+                ..Default::default()
             }),
         )
         .await
@@ -3479,6 +3220,7 @@ async fn an_unlocked_organisation_comes_back_verbatim() {
             Some(IAM_CALLER),
             Request::new(ResolveCredentialRequest {
                 token_hash: vec![63u8; 32],
+                ..Default::default()
             }),
         )
         .await
@@ -4077,6 +3819,7 @@ async fn the_write_is_visible_to_the_read_the_credential_path_makes() {
             Some(IAM_CALLER),
             Request::new(ResolveCredentialRequest {
                 token_hash: vec![70u8; 32],
+                ..Default::default()
             }),
         )
         .await
@@ -5115,7 +4858,7 @@ async fn add_team_member_records_the_actor_and_names_the_team_and_the_person() {
             }),
         )
         .await
-        .expect("add member");
+        .expect_err("retired, and the attempt is still recorded");
         rendered(&buf)
     };
 
@@ -5135,8 +4878,8 @@ async fn add_team_member_without_a_usable_actor_records_it_as_unattributed() {
     let (person, _) = seed(&svc, &[63u8; 32], &[64u8; 32]).await;
     seed_team(&svc, "yadgar:team:a").await;
 
-    // The second round repeats the first, which the composite key makes a no-op
-    // answered OK — so both rounds reach the record.
+    // Both rounds are refused (ADR-0963 (7)), and the record is written before
+    // the refusal — so both rounds reach it.
     for (i, unverified_actor) in [None, Some(UnverifiedActor::default())]
         .into_iter()
         .enumerate()
@@ -5153,7 +4896,7 @@ async fn add_team_member_without_a_usable_actor_records_it_as_unattributed() {
                 }),
             )
             .await
-            .expect("an actor decides nothing, including whether this succeeds");
+            .expect_err("retired, and the attempt is still recorded");
             rendered(&buf)
         };
         assert_unattributed(&log, "AddTeamMember", i);
@@ -5165,16 +4908,7 @@ async fn remove_team_member_records_the_actor_and_names_the_team_and_the_person(
     let svc = fresh("iam_db_test_actor_remove_member").await;
     let (person, _) = seed(&svc, &[65u8; 32], &[66u8; 32]).await;
     seed_team(&svc, "yadgar:team:a").await;
-    svc.add_team_member_as(
-        Some(IAM_CALLER),
-        Request::new(AddTeamMemberRequest {
-            team_id: "yadgar:team:a".into(),
-            user_id: person.clone(),
-            ..Default::default()
-        }),
-    )
-    .await
-    .expect("add member");
+    join(&svc, "yadgar:team:a", &person).await;
 
     let log = {
         let (_guard, buf) = capturing();
@@ -5188,7 +4922,7 @@ async fn remove_team_member_records_the_actor_and_names_the_team_and_the_person(
             }),
         )
         .await
-        .expect("remove member");
+        .expect_err("retired, and the attempt is still recorded");
         rendered(&buf)
     };
 
@@ -5207,19 +4941,10 @@ async fn remove_team_member_without_a_usable_actor_records_it_as_unattributed() 
     let svc = fresh("iam_db_test_actor_remove_member_none").await;
     let (person, _) = seed(&svc, &[67u8; 32], &[68u8; 32]).await;
     seed_team(&svc, "yadgar:team:a").await;
-    svc.add_team_member_as(
-        Some(IAM_CALLER),
-        Request::new(AddTeamMemberRequest {
-            team_id: "yadgar:team:a".into(),
-            user_id: person.clone(),
-            ..Default::default()
-        }),
-    )
-    .await
-    .expect("add member");
+    join(&svc, "yadgar:team:a", &person).await;
 
-    // The second round removes a membership already gone, answered OK with
-    // `rows: 0` — so both rounds reach the record.
+    // Both rounds are refused (ADR-0963 (7)), and the record is written before
+    // the refusal — so both rounds reach it.
     for (i, unverified_actor) in [None, Some(UnverifiedActor::default())]
         .into_iter()
         .enumerate()
@@ -5236,7 +4961,7 @@ async fn remove_team_member_without_a_usable_actor_records_it_as_unattributed() 
                 }),
             )
             .await
-            .expect("an actor decides nothing, including whether this succeeds");
+            .expect_err("retired, and the attempt is still recorded");
             rendered(&buf)
         };
         assert_unattributed(&log, "RemoveTeamMember", i);
@@ -5385,6 +5110,15 @@ async fn every_actor_record_carries_the_request_id_of_its_call() {
             };
             assert_request_id(&log, $rpc, concat!("rid-", $rpc));
         }};
+        // A retired verb (ADR-0963 (7)): refused, and the attempt still recorded.
+        ($rpc:literal, $call:expr, refused) => {{
+            let log = {
+                let (_guard, buf) = capturing();
+                $call.await.expect_err($rpc);
+                rendered(&buf)
+            };
+            assert_request_id(&log, $rpc, concat!("rid-", $rpc));
+        }};
     }
 
     check!(
@@ -5491,7 +5225,8 @@ async fn every_actor_record_carries_the_request_id_of_its_call() {
                 },
                 "rid-AddTeamMember",
             )
-        )
+        ),
+        refused
     );
     check!(
         "RemoveTeamMember",
@@ -5506,7 +5241,8 @@ async fn every_actor_record_carries_the_request_id_of_its_call() {
                 },
                 "rid-RemoveTeamMember",
             )
-        )
+        ),
+        refused
     );
     check!(
         "RevokeAllCredentials",
@@ -6306,6 +6042,7 @@ async fn resolves_to(svc: &IamDb, token: u8) -> String {
         Some(IAM_CALLER),
         Request::new(ResolveCredentialRequest {
             token_hash: vec![token; 32],
+            ..Default::default()
         }),
     )
     .await
