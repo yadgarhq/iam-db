@@ -31,8 +31,9 @@
 //!   reaches.
 //! - **SIX deliver D9's replay property BY SHAPE, without reading the key.**
 //!   `SetPassword` and `SetRateLimitOverride` upsert, `SetUserAdmin` assigns,
-//!   `RevokeCredential` tombstones under `revoked_at IS NULL`, `AddTeamMember`
-//!   inserts onto a composite primary key, `RemoveTeamMember` deletes. A repeat
+//!   `RevokeCredential` tombstones under `revoked_at IS NULL`, and
+//!   `AddTeamMember` and `RemoveTeamMember` now refuse every call (ADR-0963
+//!   (7)), which no repeat can change. A repeat
 //!   reaches the same state and hands back the same answer, which is what D9's
 //!   core rule asks of a replay; each handler argues its own case where it
 //!   stands. What none of the six can do is D9's AMENDED half — refuse a repeated
@@ -104,13 +105,15 @@ mod epoch;
 mod handlers;
 use caller::admitted;
 pub use caller::{CALLER_REFUSED, IAM_CALLER};
-pub use enrolment::DEMAND_INSERT;
+pub use enrolment::{BOOTSTRAP_REENROLMENT, DEMAND_INSERT};
 mod identity;
+pub use identity::BOOTSTRAP_CREATE_REFUSED;
 mod key_identity;
 mod password;
 mod policy;
 mod seam;
 mod setting;
+mod team;
 
 /// This service's name, on every telemetry record and on the rotation
 /// watcher's gauges. ONE spelling, because a dashboard selects on it.
@@ -164,7 +167,9 @@ pub const ENROLMENT_IDEMPOTENCY_DISCARDED: &str =
 /// in, which is exactly the set this grant can still take over. So the operator's
 /// only distinguishing signal is this series and the warn beside it.
 ///
-/// `conjunct` is `not_admin` or `held_credential` and nothing else. The set is
+/// `conjunct` is `not_admin` or `held_credential` with derivation off, and
+/// `no_administrators_team`, `not_live_user` or `not_declared_member` on the
+/// declared arm (`enrolment::declared`, ADR-1012), and nothing else. The set is
 /// CLOSED and chosen by this store from its own re-read: an open label mints a
 /// Prometheus series from caller-influenced data, which D67 forbids.
 ///
@@ -184,9 +189,9 @@ impl IamDb {
 
     /// The pool, for the contract test to seed rows the API has no RPC for.
     ///
-    /// Team creation has no RPC yet — teams arrive administratively and nothing
-    /// mints them in the first cut (D72) — so the test inserts one directly
-    /// rather than the service growing an endpoint that exists only for tests.
+    /// `SyncTeams` writes teams now; a test whose subject is something else
+    /// still seeds a team or a membership row directly, rather than through a
+    /// whole-set declaration it is not about.
     pub fn pool(&self) -> &MySqlPool {
         &self.pool
     }

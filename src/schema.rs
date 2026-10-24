@@ -21,6 +21,8 @@ use yadgar_store::migrate::{Migration, MigrationError, MigrationSet};
 /// than what one is made of. A child module rather than a second public one:
 /// `migrations` below is the only caller either half has.
 mod policy;
+/// Migrations 19 to 21, for declared teams (plans/team-access.md §6).
+mod team;
 
 pub fn migrations() -> Result<MigrationSet, MigrationError> {
     // One function per migration, because the set outgrew a single literal and
@@ -45,6 +47,9 @@ pub fn migrations() -> Result<MigrationSet, MigrationError> {
         user_credential_epoch(),
         enrolment_voided_at(),
         redemption_credential_epoch(),
+        team::team_member_pending(),
+        team::team_sync_lock(),
+        team::seed_team_sync_lock(),
     ])
 }
 
