@@ -231,6 +231,7 @@ pub async fn resolve(svc: &IamDb, token: u8) -> ResolveCredentialResponse {
         Some(IAM_CALLER),
         Request::new(ResolveCredentialRequest {
             token_hash: vec![token; 32],
+            ..Default::default()
         }),
     )
     .await
