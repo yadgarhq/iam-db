@@ -267,6 +267,19 @@ spec:
               {{- else }}
               value: "off"
               {{- end }}
+            # ADR-1006: the four listener limits, ALWAYS RENDERED, because the
+            # binary reads each with no fallback and refuses to boot without it
+            # (ADR-0569). `values.schema.json` bounds each to the library's own
+            # range and makes the block `required`; `templates/render-checks.yaml`
+            # refuses a keepalive timeout that is not below its interval.
+            - name: LISTEN_MAX_CONCURRENT_STREAMS
+              value: {{ .Values.server.limits.maxConcurrentStreams | int64 | quote }}
+            - name: LISTEN_KEEPALIVE_INTERVAL_SECS
+              value: {{ .Values.server.limits.keepaliveIntervalSeconds | int64 | quote }}
+            - name: LISTEN_KEEPALIVE_TIMEOUT_SECS
+              value: {{ .Values.server.limits.keepaliveTimeoutSeconds | int64 | quote }}
+            - name: LISTEN_MAX_HEADER_LIST_BYTES
+              value: {{ .Values.server.limits.maxHeaderListBytes | int64 | quote }}
             {{- if and .Values.tls.enabled .Values.tls.clientCaSecret }}
             # THE AUTHORITY iam-db CHECKS A CALLER'S CERTIFICATE AGAINST under
             # `optional` or `required` (card B-U5). RENDERED ONLY WHEN TLS IS

@@ -50,6 +50,22 @@ use tokio_stream::wrappers::TcpListenerStream;
 
 use yadgar_iam_db::serve;
 
+/// The chart's shipped `server.limits` (ADR-1006), read through the same
+/// `serve` seam `main` uses so a typo in a key name fails here too.
+fn limits() -> serve::ServerLimits {
+    serve::ServerLimits::from_lookup(serve::LISTEN, serve::LIMITS_CHART_KEY, |key| {
+        match key {
+            "LISTEN_MAX_CONCURRENT_STREAMS" => Some("256"),
+            "LISTEN_KEEPALIVE_INTERVAL_SECS" => Some("30"),
+            "LISTEN_KEEPALIVE_TIMEOUT_SECS" => Some("10"),
+            "LISTEN_MAX_HEADER_LIST_BYTES" => Some("16384"),
+            _ => None,
+        }
+        .map(str::to_string)
+    })
+    .expect("the chart's shipped limits are inside the library's ranges")
+}
+
 /// Send SIGTERM to this test process.
 ///
 /// **Through `kill(1)` rather than `libc::raise`, because this package FORBIDS
@@ -113,7 +129,7 @@ async fn a_sigterm_drains_the_server_instead_of_killing_the_process() {
     // `Routes::default()` answers every method with `Unimplemented`. What is
     // under test is the LIFECYCLE of the server, not any handler in it, and a
     // router that needs no pool keeps the rig honest about that.
-    let mut builder = serve::builder(None).expect("a cleartext listener");
+    let mut builder = serve::builder(None, &limits()).expect("a cleartext listener");
     let router = builder.add_routes(tonic::service::Routes::default());
     let serving = tokio::spawn(async move {
         router

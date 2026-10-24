@@ -31,6 +31,47 @@
       "additionalProperties": false,
       "required": ["enabled", "clientAuth"]
     },
+    "server": {
+      "properties": {
+        "limits": {
+          "properties": {
+            "maxConcurrentStreams": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10000,
+              "description": "The most concurrent HTTP/2 streams one connection may open. Rendered as LISTEN_MAX_CONCURRENT_STREAMS and read with no fallback (ADR-1006, ADR-0569). Range 1..10000 is the yadgar-lifecycle `ServerLimits` range; tests/chart_server_limits.rs pins it. Default in values.yaml per ADR-1006."
+            },
+            "keepaliveIntervalSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3600,
+              "description": "How often an idle connection is PINGed. Rendered as LISTEN_KEEPALIVE_INTERVAL_SECS and read with no fallback (ADR-1006, ADR-0569). Range 1..3600 is the yadgar-lifecycle `ServerLimits` range; tests/chart_server_limits.rs pins it. Default in values.yaml per ADR-1006."
+            },
+            "keepaliveTimeoutSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 600,
+              "description": "How long a PING may go unanswered before the connection is closed. It must also be BELOW keepaliveIntervalSeconds; a schema cannot express a cross-key rule, so `templates/render-checks.yaml` refuses it. Rendered as LISTEN_KEEPALIVE_TIMEOUT_SECS and read with no fallback (ADR-1006, ADR-0569). Range 1..600 is the yadgar-lifecycle `ServerLimits` range; tests/chart_server_limits.rs pins it. Default in values.yaml per ADR-1006."
+            },
+            "maxHeaderListBytes": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 1048576,
+              "description": "The largest HTTP/2 header list, in bytes, a request may carry. Rendered as LISTEN_MAX_HEADER_LIST_BYTES and read with no fallback (ADR-1006, ADR-0569). Range 1024..1048576 is the yadgar-lifecycle `ServerLimits` range; tests/chart_server_limits.rs pins it. Default in values.yaml per ADR-1006."
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "maxConcurrentStreams",
+            "keepaliveIntervalSeconds",
+            "keepaliveTimeoutSeconds",
+            "maxHeaderListBytes"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": ["limits"]
+    },
     "database": {
       "properties": {
         "host": {},
