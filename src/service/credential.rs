@@ -20,6 +20,7 @@ impl IamDb {
     pub(super) async fn resolve(
         &self,
         r: ResolveCredentialRequest,
+        deadline: Deadline,
         call: Call,
     ) -> Result<Response<ResolveCredentialResponse>, Status> {
         // Liveness is decided IN THE QUERY, not in Rust afterwards.
@@ -38,7 +39,8 @@ impl IamDb {
         // withdrawn admin flag or a tightened limit is already gone from the
         // store and not yet in force in the answer — cached, at the caller, for
         // a whole cache lifetime.
-        let mut tx = self.pool.begin().await.map_err(db)?;
+        let mut conn = self.acquire(deadline).await?;
+        let mut tx = conn.begin(Isolation::Default).await?;
 
         let row = sqlx::query(
             // `expires_at` IN THIS STATEMENT (ADR-0972 (3)), so the expiry `iam`
@@ -131,6 +133,7 @@ impl IamDb {
     pub(super) async fn revoke(
         &self,
         r: RevokeCredentialRequest,
+        deadline: Deadline,
         rid: &str,
         call: Call,
     ) -> Result<Response<RevokeCredentialResponse>, Status> {
@@ -156,6 +159,7 @@ impl IamDb {
         //
         // MATCHED ON THE PAIR (ADR-0972 (2)), so an administrator naming one
         // person cannot revoke another person's credential by its id.
+        let mut conn = self.acquire(deadline).await?;
         let row = sqlx::query(
             "UPDATE iam_credential
                 SET revoked_at = CURRENT_TIMESTAMP
@@ -163,7 +167,7 @@ impl IamDb {
         )
         .bind(&r.credential_id)
         .bind(&r.user_id)
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .map_err(db)?;
 
@@ -177,7 +181,7 @@ impl IamDb {
                 sqlx::query_scalar("SELECT id FROM iam_credential WHERE id = ? AND user_id = ?")
                     .bind(&r.credential_id)
                     .bind(&r.user_id)
-                    .fetch_optional(&self.pool)
+                    .fetch_optional(&mut *conn)
                     .await
                     .map_err(db)?;
             if owned.is_none() {
@@ -200,6 +204,7 @@ impl IamDb {
     pub(super) async fn credential_page(
         &self,
         r: ListCredentialsRequest,
+        deadline: Deadline,
         call: Call,
     ) -> Result<Response<ListCredentialsResponse>, Status> {
         let page_size = match r.page_size {
@@ -217,6 +222,7 @@ impl IamDb {
         // timestamp back — so no Rust type a TIMESTAMP column decodes into
         // exists here. The CAST pins the result to a BIGINT rather than the
         // DECIMAL a fractional-second argument would produce.
+        let mut conn = self.acquire(deadline).await?;
         let rows = sqlx::query(
             // The JOIN is the liveness check every other read on this boundary
             // carries. A soft-deleted person's credentials already stop
@@ -238,7 +244,7 @@ impl IamDb {
         .bind(&r.user_id)
         .bind(&r.page_token)
         .bind(page_size)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await
         .map_err(db)?;
 

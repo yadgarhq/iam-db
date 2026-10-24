@@ -47,6 +47,7 @@ impl IamDb {
     pub(in crate::service) async fn sync_teams(
         &self,
         r: SyncTeamsRequest,
+        deadline: Deadline,
         call: Call,
     ) -> Result<Response<SyncTeamsResponse>, Status> {
         let declared = match validate(&r.teams) {
@@ -57,8 +58,8 @@ impl IamDb {
             }
         };
 
-        let mut conn = read_committed(&self.pool).await?;
-        let mut tx = sqlx::Acquire::begin(&mut *conn).await.map_err(db)?;
+        let mut conn = self.acquire(deadline).await?;
+        let mut tx = conn.begin(Isolation::ReadCommitted).await?;
         sqlx::query("SELECT id FROM iam_team_sync_lock WHERE id = 1 FOR UPDATE")
             .fetch_one(&mut *tx)
             .await

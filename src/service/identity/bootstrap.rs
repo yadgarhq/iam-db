@@ -24,8 +24,8 @@
 //! warn line and to [`BOOTSTRAP_CREATE_REFUSED`]'s closed label set, where the
 //! operator reads it and a holder of the bootstrap token does not.
 
+use crate::service::team::ADMINISTRATORS;
 use crate::service::team::{canonical_user_id, live_administrators, lock_administrators};
-use crate::service::team::{read_committed, ADMINISTRATORS};
 use crate::service::*;
 
 /// A bootstrap `CreateUser` was refused by the predicate, labelled `step`
@@ -61,6 +61,7 @@ impl IamDb {
     pub(super) async fn insert_declared_user(
         &self,
         r: CreateUserRequest,
+        deadline: Deadline,
         rid: &str,
         call: Call,
     ) -> Result<Response<CreateUserResponse>, Status> {
@@ -79,8 +80,8 @@ impl IamDb {
             ));
         }
 
-        let mut conn = read_committed(&self.pool).await?;
-        let mut tx = sqlx::Acquire::begin(&mut *conn).await.map_err(db)?;
+        let mut conn = self.acquire(deadline).await?;
+        let mut tx = conn.begin(Isolation::ReadCommitted).await?;
 
         if let Err(refusal) = predicate(&mut tx, &r.user_id).await? {
             drop(tx);

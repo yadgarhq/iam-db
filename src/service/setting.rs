@@ -22,6 +22,7 @@ impl IamDb {
     pub(super) async fn store_setting(
         &self,
         r: SetInheritedSettingRequest,
+        deadline: Deadline,
         rid: &str,
         call: Call,
     ) -> Result<Response<SetInheritedSettingResponse>, Status> {
@@ -72,16 +73,13 @@ impl IamDb {
         // `a_team_soft_delete_landing_after_the_idempotency_read_still_refuses_an_inherited_setting_override`.
         //
         // `SET TRANSACTION` WITHOUT `SESSION` OR `GLOBAL` applies to the NEXT
-        // transaction and then reverts, so a pooled connection carries nothing to
-        // its next borrower. That is what forces `acquire()` then
-        // `Acquire::begin` rather than `pool.begin()`: the statement and the
-        // transaction it configures must be the same connection.
-        let mut conn = self.pool.acquire().await.map_err(db)?;
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
-            .execute(&mut *conn)
-            .await
-            .map_err(db)?;
-        let mut tx = sqlx::Acquire::begin(&mut *conn).await.map_err(db)?;
+        // transaction only, so the statement and the transaction it configures
+        // must share one connection: `conn::Conn::begin` runs both. It also
+        // closes a connection dropped between the two (tonic's drop at the
+        // caller's deadline), so no pooled connection carries the level to its
+        // next borrower.
+        let mut conn = self.acquire(deadline).await?;
+        let mut tx = conn.begin(Isolation::ReadCommitted).await?;
 
         // D9's LEDGER, and the amended half of D9 is what it is for. The key
         // replayed returns the setting; the key carrying a DIFFERENT request is

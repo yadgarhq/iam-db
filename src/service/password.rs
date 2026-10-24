@@ -12,12 +12,14 @@ impl IamDb {
     pub(super) async fn password_hash(
         &self,
         r: GetPasswordHashRequest,
+        deadline: Deadline,
         call: Call,
     ) -> Result<Response<GetPasswordHashResponse>, Status> {
         // THE EPOCH IN THE SAME STATEMENT AS THE HASH (ADR-0972 (4)), so the
         // two are one snapshot: `iam` mints the Login's credential against
         // this epoch, and a reset or revoke-all that lands after this read
         // makes that mint refuse.
+        let mut conn = self.acquire(deadline).await?;
         let row = sqlx::query(
             "SELECT u.id AS user_id, p.argon2id_hash, u.credential_epoch
                FROM iam_user u
@@ -26,7 +28,7 @@ impl IamDb {
                 AND u.deleted_at IS NULL",
         )
         .bind(&r.username_blind_index)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(db)?;
 
@@ -53,6 +55,7 @@ impl IamDb {
     pub(super) async fn store_password(
         &self,
         r: SetPasswordRequest,
+        deadline: Deadline,
         call: Call,
     ) -> Result<Response<SetPasswordResponse>, Status> {
         // The same guard RedeemEnrolment applies, on the same column. Both write
@@ -117,14 +120,14 @@ impl IamDb {
         // the clause is what stops the answer depending on how that server is
         // configured.
         //
-        // THE HASH IS BOUND TWICE INSTEAD OF `VALUES()`. `VALUES()` names the
-        // row of an `INSERT ... VALUES`, and what it means inside an
-        // `INSERT ... SELECT` is not a question to settle by experiment on the
-        // statement that stores a password. Two binds of one parameter say it
-        // outright.
+        // THE HASH IS BOUND TWICE INSTEAD OF `VALUES()`. `VALUES()` names the row of an
+        // `INSERT ... VALUES`, and what it means inside an `INSERT ... SELECT` is not a
+        // question to settle by experiment on the statement that stores a password. Two
+        // binds of one parameter say it outright.
         // ADR-0972 (4): the epoch bump, FIRST and in one transaction with the
         // write — see `epoch::bump_live` for why first. Its zero is NOT_FOUND.
-        let mut tx = self.pool.begin().await.map_err(db)?;
+        let mut conn = self.acquire(deadline).await?;
+        let mut tx = conn.begin(Isolation::Default).await?;
         if epoch::bump_live(&mut tx, &r.user_id).await? == 0 {
             live_user(&mut *tx, &r.user_id).await?;
         }

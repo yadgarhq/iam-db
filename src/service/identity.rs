@@ -18,6 +18,7 @@ impl IamDb {
     pub(super) async fn insert_user(
         &self,
         r: CreateUserRequest,
+        deadline: Deadline,
         rid: &str,
         call: Call,
     ) -> Result<Response<CreateUserResponse>, Status> {
@@ -25,7 +26,7 @@ impl IamDb {
         // plans/team-access.md §6). It takes its own arm, whole; the minting
         // arm below is what every other caller has always reached.
         if !r.user_id.is_empty() {
-            return self.insert_declared_user(r, rid, call).await;
+            return self.insert_declared_user(r, deadline, rid, call).await;
         }
 
         // `idempotency` IS DISCARDED HERE, AND A RETRY IS NOT A REPLAY. The
@@ -43,6 +44,7 @@ impl IamDb {
         // answers half the question an incident asks. Generating the id cannot
         // fail, so nothing is recorded that the request did not reach.
         record_actor(rid, r.unverified_actor.as_ref(), "CreateUser", &id);
+        let mut conn = self.acquire(deadline).await?;
 
         sqlx::query(
             // is_admin is set AT CREATION rather than by a follow-up
@@ -59,7 +61,7 @@ impl IamDb {
         .bind(&r.external_id_ciphertext)
         .bind(&r.display_name_ciphertext)
         .bind(r.is_admin)
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .map_err(user_conflict)?;
 
