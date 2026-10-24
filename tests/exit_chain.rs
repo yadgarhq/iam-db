@@ -4,6 +4,12 @@
 //! canary, #70), NOT RE-DERIVED — see `tests/support/mod.rs`'s header for
 //! what differs and why.
 //!
+//! **IN-FLIGHT CANARY.** This file does not see an in-flight call finishing.
+//! The one binary test that holds a call across SIGTERM and asserts the caller
+//! gets its answer is `yadgarhq/task`'s `sigterm_lets_an_in_flight_call_finish`
+//! (task#87, merged; yaadgaar #318). It is the single canary, and it is not
+//! copied here.
+//!
 //! The library tests prove the parts — `yadgar-lifecycle` that a signal
 //! resolves `shutdown()` and that a changed file resolves `rotate::watch`,
 //! `tests/assembly.rs` that the watch set holds the right files,
