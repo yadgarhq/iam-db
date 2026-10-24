@@ -130,8 +130,8 @@ const REPLICAS_CHART_KEY: &str =
 const OPERATOR_RESERVE_KEY: &str = "DB_ENGINE_OPERATOR_RESERVE";
 const OPERATOR_RESERVE_CHART_KEY: &str = "database.engineOperatorReserve";
 
-/// Bounded above by `chart/values.schema.json`'s `maximum: 29` — below the
-/// CALLER's own dial `REQUEST_TIMEOUT` (30s; this binary never dials out, so
+/// Bounded above by `chart/values.schema.json`'s `maximum: 13` — below the
+/// lowest dial request timeout a CALLER accepts (14s, ADR-1006; this binary never dials out, so
 /// the budget it has to stay under is `iam`'s, not its own), so this pool's
 /// own acquire wait can never be the deadline a caller's whole request runs
 /// against. `tests/chart_request_deadline.rs` pins the two together.
