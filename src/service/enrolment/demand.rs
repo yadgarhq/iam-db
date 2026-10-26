@@ -133,8 +133,8 @@ impl Conjunct {
 /// unknown user is the NOT_FOUND the ordinary arm has always answered — so the
 /// only question left is the flag, and a live administrator who was refused
 /// anyway was refused on the credential conjunct.
-pub(super) async fn refuse(pool: &MySqlPool, user_id: &str) -> Status {
-    let named = match admin_flag(pool, user_id).await {
+pub(super) async fn refuse(conn: &mut sqlx::MySqlConnection, user_id: &str) -> Status {
+    let named = match admin_flag(conn, user_id).await {
         Ok(Some(true)) => Some(Conjunct::HeldCredential),
         Ok(Some(false)) => Some(Conjunct::NotAdmin),
         // THE CONJUNCT CANNOT BE NAMED, AND THE REFUSAL STILL STANDS. Either the
@@ -185,9 +185,12 @@ pub(super) async fn refuse(pool: &MySqlPool, user_id: &str) -> Status {
 /// this read. The error is returned rather than rendered through `db()` because
 /// the status this ends in is decided by the caller and is never `UNAVAILABLE`:
 /// the write already refused.
-async fn admin_flag(pool: &MySqlPool, user_id: &str) -> Result<Option<bool>, sqlx::Error> {
+async fn admin_flag(
+    conn: &mut sqlx::MySqlConnection,
+    user_id: &str,
+) -> Result<Option<bool>, sqlx::Error> {
     sqlx::query_scalar("SELECT is_admin FROM iam_user WHERE id = ? AND deleted_at IS NULL")
         .bind(user_id)
-        .fetch_optional(pool)
+        .fetch_optional(conn)
         .await
 }

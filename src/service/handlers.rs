@@ -17,7 +17,8 @@
 //!
 //! The operations, by module: `credential` resolves, mints, revokes one or all
 //! of a person's, and lists; `password` reads and writes the stored hash;
-//! `identity` creates a person and moves one in and out of a team; `policy`
+//! `identity` creates a person, and refuses the retired team verbs; `team`
+//! applies the declared team set (`SyncTeams`); `policy`
 //! sets what applies to a person; `enrolment` mints and spends; `setting`
 //! writes the inheritable ones.
 
@@ -112,9 +113,8 @@ impl IamDbService for IamDb {
         self.add_team_member_as(caller.as_deref(), req).await
     }
 
-    /// Removing a member changes what that user can see, so the caller MUST
-    /// publish the invalidation event afterwards (D72). Until it does, a cached
-    /// resolve still lists the old team and the person keeps reading its records.
+    /// Retired with `AddTeamMember` (ADR-0963 (7)): `FAILED_PRECONDITION`,
+    /// nothing written. `SyncTeams` is the one writer of membership.
     async fn remove_team_member(
         &self,
         req: Request<RemoveTeamMemberRequest>,
@@ -222,6 +222,17 @@ impl IamDbService for IamDb {
     ) -> Result<Response<SetInheritedSettingResponse>, Status> {
         let caller = caller_common_name(&req);
         self.set_inherited_setting_as(caller.as_deref(), req).await
+    }
+
+    /// The organisation's whole team declaration (plans/team-access.md §6,
+    /// ADR-0963). The one writer of team membership; the caller MUST publish
+    /// `yadgar.iam.user.teams-changed` for every user whose set changed (D72).
+    async fn sync_teams(
+        &self,
+        req: Request<SyncTeamsRequest>,
+    ) -> Result<Response<SyncTeamsResponse>, Status> {
+        let caller = caller_common_name(&req);
+        self.sync_teams_as(caller.as_deref(), req).await
     }
 
     /// Whether this store's rows were encrypted under the key set the caller

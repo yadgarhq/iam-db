@@ -26,7 +26,7 @@ description = "The identity module's -db twin: the only writer of its store, ser
 # this crate's headroom check used to hard-code. `boot::pool_config` below now
 # reads all four from the environment with no fallback, the same shape every
 # other knob here already takes.
-yadgar-store = { git = "https://github.com/yadgarhq/store.git", tag = "v0.4.0" }
+yadgar-store = { git = "https://github.com/yadgarhq/store.git", tag = "v0.6.0" }
 # In tonic 0.14 prost codegen moved out to tonic-prost; there is no "prost"
 # feature on tonic itself.
 #
@@ -98,9 +98,26 @@ metrics = "0.24"
 # in v0.2.23. It reads the common name off the verified client leaf, and the
 # caller gate on every `IamDbService` verb compares that name with
 # `iam-caller`. The step past v0.2.23 adds only a tokio patch bump.
-yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle.git", tag = "v0.2.24", features = [
+yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle.git", tag = "v0.3.0", features = [
   "serve-tls",
 ] }
+# A NORMAL DEPENDENCY NOW, no longer dev-only (ADR-1019, yaadgaar #337).
+# `yadgar_dial::Deadline` reads the caller's `grpc-timeout` off the incoming
+# request, and `service::conn` bounds every explicit pool acquire by
+# `Deadline::bound(acquire_timeout)`: the caller's remaining time less
+# `DEADLINE_MARGIN`, never more than the chart's `database.acquireTimeoutSeconds`.
+# So this -db answers DEADLINE_EXCEEDED itself before tonic drops the handler.
+# This binary still never dials out; it links dial for `Deadline` only.
+#
+# THE SHIPPED TREE GAINS ONE PACKAGE, dial itself. Measured with `cargo tree
+# -e normal`: every crate dial depends on, and tonic's `channel` feature, are
+# already in the normal tree through other in-org crates. No second crypto
+# provider enters (`cargo tree -i aws-lc-rs` matches nothing).
+# `tests/chart_request_deadline.rs` still reads `default_request_timeout()`
+# back from the same crate.
+#
+# v0.2.25 is the first tag with `Deadline`.
+yadgar-dial = { git = "https://github.com/yadgarhq/dial.git", tag = "v0.2.25" }
 sqlx = { version = "0.9", default-features = false, features = [
   "runtime-tokio",
   "tls-rustls-ring",
@@ -111,7 +128,9 @@ sqlx = { version = "0.9", default-features = false, features = [
 # `yadgar_lifecycle::shutdown` — and that crate declares the feature it needs.
 # Cargo features are additive, so the built tree is unchanged; what is removed
 # is a manifest line claiming this crate handles signals itself.
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# `time` for `service::conn`'s deadline-bounded acquire (ADR-1019). Already
+# compiled in through yadgar-dial and sqlx, so the built tree is unchanged.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -131,7 +150,7 @@ tonic-prost-build = "0.14"
 [dev-dependencies]
 # `net` and `time` for the TLS rig in tests/serve_tls.rs: it binds its own
 # listeners and waits for the port rather than sleeping a guessed interval.
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "io-util"] }
 # Certificates are MINTED PER TEST RUN rather than checked in: a fixture key in
 # the repository is a secret in the repository, and it expires on a date nobody
 # is watching.
@@ -149,16 +168,6 @@ tokio-stream = { version = "0.1", features = ["net"] }
 metrics-util = { version = "0.20", default-features = false, features = [
   "debugging",
 ] }
-# `tests/chart_request_deadline.rs` pins `database.acquireTimeoutSeconds`'s
-# schema bound below the caller's own request deadline (card C-DB2,
-# M-audit-C): this binary never dials out, so the only reason this crate
-# names `yadgar-dial` at all is to read `default_request_timeout()` back. A
-# dev-dependency only — the shipped binary gains no new crate. Pinned at
-# v0.2.20, the tag the callers move to in gateway#114 / iam#104 / task#80 /
-# project#34 (ledger 1353 keeps this dev-only reader in step with them). No
-# `[features]` table exists on this crate to pick one of, unlike
-# `yadgar-telemetry`'s `grpc` above.
-yadgar-dial = { git = "https://github.com/yadgarhq/dial.git", tag = "v0.2.20" }
 # `tests/chart_request_deadline.rs` reads `chart/values.schema.json`'s own
 # `maximum` for `database.acquireTimeoutSeconds` rather than restating the
 # bound as a literal — the schema is ADR-0837's one source for it. Already in

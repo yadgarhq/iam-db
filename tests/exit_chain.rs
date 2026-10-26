@@ -4,6 +4,12 @@
 //! canary, #70), NOT RE-DERIVED — see `tests/support/mod.rs`'s header for
 //! what differs and why.
 //!
+//! **IN-FLIGHT CANARY.** This file does not see an in-flight call finishing.
+//! The one binary test that holds a call across SIGTERM and asserts the caller
+//! gets its answer is `yadgarhq/task`'s `sigterm_lets_an_in_flight_call_finish`
+//! (task#87, merged; yaadgaar #318). It is the single canary, and it is not
+//! copied here.
+//!
 //! The library tests prove the parts — `yadgar-lifecycle` that a signal
 //! resolves `shutdown()` and that a changed file resolves `rotate::watch`,
 //! `tests/assembly.rs` that the watch set holds the right files,
@@ -43,6 +49,7 @@ mod support;
 
 use std::os::unix::process::ExitStatusExt;
 
+use std::net::TcpListener;
 use support::{describe, Booted, MARGIN, POLL, SPLAY_MAX};
 use yadgar_lifecycle::DRAIN_BUDGET;
 
@@ -124,5 +131,50 @@ fn a_rewritten_shared_document_drains_and_exits_zero() {
         Some(0),
         "a rotation is not an error; it must drain and exit 0 ({})",
         describe(Some(status))
+    );
+}
+
+/// Case (iii), yaadgaar #313: a listener that cannot bind ends the process on
+/// its OWN, non-zero, naming the address and the OS reason.
+///
+/// NO SIGTERM IS SENT. `drain_within` used to await the stop signal alone, so
+/// tonic's bind error (raised inside the spawned serving task) sat unread and
+/// the pod idled, serving nothing, until kubelet's SIGTERM. A test that sent
+/// that SIGTERM itself could not tell the two apart. Needs
+/// `yadgar-lifecycle` with `Drain::Finished` returned at once.
+#[test]
+fn a_bind_failure_exits_non_zero_on_its_own_naming_the_listen_address() {
+    let holder = TcpListener::bind("127.0.0.1:0").expect("a free port must be available to hold");
+    let listen = holder
+        .local_addr()
+        .expect("a bound listener has an address")
+        .to_string();
+
+    let mut iam_db = Booted::start_with(&[("LISTEN", listen.clone())]);
+    // Logged before the server task is spawned, so it fires whether or not the
+    // bind that follows succeeds.
+    iam_db.wait_until_listening();
+    let status = iam_db.wait_for_exit("on its own after the bind failed", MARGIN);
+    drop(holder);
+
+    assert_eq!(status.signal(), None, "{}", describe(Some(status)));
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "a failed bind must exit non-zero ({})",
+        describe(Some(status))
+    );
+    let seen = iam_db.seen().join("\n");
+    let line = seen
+        .lines()
+        .rfind(|l| l.starts_with("Error: "))
+        .unwrap_or_else(|| panic!("no `Error: ` line: {seen}"));
+    assert!(
+        line.contains(&format!("LISTEN={listen}")),
+        "the refusal must name the LISTEN address: {line}"
+    );
+    assert!(
+        line.contains("Address already in use"),
+        "the refusal must carry the OS reason, not just tonic's `transport error`: {line}"
     );
 }

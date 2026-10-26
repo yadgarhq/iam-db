@@ -8,7 +8,8 @@
 //! enrolment row, so it belongs to whoever authorised the issue, and nothing on
 //! `RedeemEnrolmentRequest` can add, clear or override it. [`all`] executes it
 //! inside the redemption transaction. [`compatible`] is the one refusal it adds:
-//! the bootstrap demand never carries it.
+//! with team-derived admin off, the bootstrap demand never carries it. With it
+//! on, `enrolment::declared` admits the pair (ADR-1014).
 //!
 //! [`all`] HAS A SECOND CALLER: `RevokeAllCredentials` (ADR-0945), which runs
 //! the same statement in a transaction of its own. One function, so the
@@ -29,15 +30,17 @@ pub(super) const INSERT: &str = "INSERT INTO iam_enrolment
               WHERE id = ? AND deleted_at IS NULL
               LOCK IN SHARE MODE";
 
-/// Refuse the bootstrap demand carrying the revoke instruction.
+/// Refuse the bootstrap demand carrying the revoke instruction, while
+/// team-derived admin is off (ADR-1014 point 3; the caller routes
+/// `admin_from_team` to `enrolment::declared` before this runs).
 ///
 /// A target that passes the demand holds zero credentials (ADR-0655 as amended
 /// by ADR-0656), so there is nothing to revoke and the pair can only be a
-/// malformed request — and the bootstrap path, the only caller that sets the
-/// demand, must never carry this instruction. Decided from the REQUEST alone,
-/// before any statement reads the target, so the refusal reveals nothing about
-/// who the target is. That is why it may name the conflict, where the demand's
-/// own refusal names nothing (ADR-0657).
+/// malformed request — and with derivation off the bootstrap path, the only
+/// caller that sets the demand, must never carry this instruction. Decided
+/// from the REQUEST alone, before any statement reads the target, so the
+/// refusal reveals nothing about who the target is. That is why it may name
+/// the conflict, where the demand's own refusal names nothing (ADR-0657).
 pub(super) fn compatible(r: &CreateEnrolmentRequest) -> Result<(), Status> {
     match r.require_zero_credential_admin && r.revoke_existing_credentials {
         true => Err(Status::invalid_argument(

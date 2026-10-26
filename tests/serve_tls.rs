@@ -62,6 +62,22 @@ use yadgar_iam_db::pb::yadgar::iamdb::v1::iam_db_service_server::IamDbServiceSer
 use yadgar_iam_db::serve::{self, ServeTlsError, ServerTls};
 use yadgar_iam_db::service::IamDb;
 
+/// The chart's shipped `server.limits` (ADR-1006), read through the same
+/// `serve` seam `main` uses so a typo in a key name fails here too.
+fn limits() -> serve::ServerLimits {
+    serve::ServerLimits::from_lookup(serve::LISTEN, serve::LIMITS_CHART_KEY, |key| {
+        match key {
+            "LISTEN_MAX_CONCURRENT_STREAMS" => Some("256"),
+            "LISTEN_KEEPALIVE_INTERVAL_SECS" => Some("30"),
+            "LISTEN_KEEPALIVE_TIMEOUT_SECS" => Some("10"),
+            "LISTEN_MAX_HEADER_LIST_BYTES" => Some("16384"),
+            _ => None,
+        }
+        .map(str::to_string)
+    })
+    .expect("the chart's shipped limits are inside the library's ranges")
+}
+
 /// The name the test certificates are issued for, and the name the rig listens
 /// on.
 const SERVED_NAME: &str = "localhost";
@@ -295,7 +311,7 @@ fn configured_with(cert: &Path, key: &Path, mode: &str, client_ca: Option<&Path>
 /// `main` prints. Asserting on those rather than on the error value keeps every
 /// message here static (the error enum names certificates and keys).
 fn refusal(tls: &ServerTls) -> Option<(&'static str, String)> {
-    match serve::builder(Some(tls)) {
+    match serve::builder(Some(tls), &limits()) {
         Ok(_) => None,
         Err(e) => {
             let kind = match &e {
@@ -420,7 +436,7 @@ async fn a_permanent_failure_on_the_first_address_is_reported_not_retried() {
 }
 
 fn spawn(listener: TcpListener, tls: Option<&ServerTls>) {
-    let mut server = serve::builder(tls).expect("a usable certificate and key");
+    let mut server = serve::builder(tls, &limits()).expect("a usable certificate and key");
     let router = server.add_routes(tonic::service::Routes::default());
     tokio::spawn(async move {
         let _ = router
@@ -828,7 +844,8 @@ async fn serve_the_service(tls: &ServerTls) -> u16 {
             .acquire_timeout(Duration::from_millis(300))
             .connect_lazy("mysql://gate:gate@127.0.0.1:1/gate")
             .expect("a lazy pool");
-        let mut server = serve::builder(Some(tls)).expect("a usable certificate and key");
+        let mut server =
+            serve::builder(Some(tls), &limits()).expect("a usable certificate and key");
         let router = server.add_service(IamDbServiceServer::new(IamDb::new(pool)));
         tokio::spawn(async move {
             let _ = router

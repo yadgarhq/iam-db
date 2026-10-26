@@ -414,7 +414,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1644,7 +1644,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2099,10 +2099,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2776,7 +2776,7 @@ dependencies = [
 [[package]]
 name = "yadgar-dial"
 version = "0.1.0"
-source = "git+https://github.com/yadgarhq/dial.git?tag=v0.2.20#9fdf58537a9ddf1feae067801abed5206e3f07ed"
+source = "git+https://github.com/yadgarhq/dial.git?tag=v0.2.25#c5824ae6af528d17f43f33eaddf093278b0782b3"
 dependencies = [
  "metrics",
  "rustls",
@@ -2817,7 +2817,7 @@ dependencies = [
 [[package]]
 name = "yadgar-lifecycle"
 version = "0.1.0"
-source = "git+https://github.com/yadgarhq/lifecycle.git?tag=v0.2.24#b810928ca113e12f5bba564153ea1c908f225f2d"
+source = "git+https://github.com/yadgarhq/lifecycle.git?tag=v0.3.0#bc9a000c170edc0c0d2da0842eb20bad13f9cfb9"
 dependencies = [
  "metrics",
  "rustls",
@@ -2835,8 +2835,9 @@ dependencies = [
 [[package]]
 name = "yadgar-store"
 version = "0.1.0"
-source = "git+https://github.com/yadgarhq/store.git?tag=v0.4.0#596a2233e6dfdc6e63fd3a757655595e34789c59"
+source = "git+https://github.com/yadgarhq/store.git?tag=v0.6.0#3d3a0120f2aeb07c11aa89388e3d7f0b76e679cb"
 dependencies = [
+ "sha2 0.10.9",
  "sqlx",
  "thiserror",
  "tokio",

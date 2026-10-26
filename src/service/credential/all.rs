@@ -19,6 +19,7 @@ impl IamDb {
     pub(in crate::service) async fn revoke_all(
         &self,
         r: RevokeAllCredentialsRequest,
+        deadline: Deadline,
         rid: &str,
         call: Call,
     ) -> Result<Response<RevokeAllCredentialsResponse>, Status> {
@@ -36,7 +37,8 @@ impl IamDb {
         // all is NOT_FOUND (the contract's own words). `revoke::all` reads the
         // user row under its lock with no such filter, and says `None` for that
         // case before its UPDATE runs, so nothing is written.
-        let mut tx = self.pool.begin().await.map_err(db)?;
+        let mut conn = self.acquire(deadline).await?;
+        let mut tx = conn.begin(Isolation::Default).await?;
         let Some(rows) = revoke::all(&mut tx, &r.user_id).await? else {
             let refusal = Status::not_found("no such user");
             call.fail(label(&refusal));

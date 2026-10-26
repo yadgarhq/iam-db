@@ -20,6 +20,7 @@ impl IamDb {
     pub(super) async fn resolve(
         &self,
         r: ResolveCredentialRequest,
+        deadline: Deadline,
         call: Call,
     ) -> Result<Response<ResolveCredentialResponse>, Status> {
         // Liveness is decided IN THE QUERY, not in Rust afterwards.
@@ -38,7 +39,8 @@ impl IamDb {
         // withdrawn admin flag or a tightened limit is already gone from the
         // store and not yet in force in the answer — cached, at the caller, for
         // a whole cache lifetime.
-        let mut tx = self.pool.begin().await.map_err(db)?;
+        let mut conn = self.acquire(deadline).await?;
+        let mut tx = conn.begin(Isolation::Default).await?;
 
         let row = sqlx::query(
             // `expires_at` IN THIS STATEMENT (ADR-0972 (3)), so the expiry `iam`
@@ -71,22 +73,14 @@ impl IamDb {
 
         let user_id: String = row.try_get("user_id").map_err(db)?;
         let credential_id: String = row.try_get("credential_id").map_err(db)?;
-        let is_admin: bool = row.try_get("is_admin").map_err(db)?;
+        let column_admin: bool = row.try_get("is_admin").map_err(db)?;
         let expires_at = row
             .try_get::<Option<i64>, _>("expires_at")
             .map_err(db)?
             .map(epoch);
 
-        let team_ids: Vec<String> =
-            sqlx::query("SELECT team_id FROM iam_team_member WHERE user_id = ?")
-                .bind(&user_id)
-                .fetch_all(&mut *tx)
-                .await
-                .map_err(db)?
-                .into_iter()
-                .map(|r| r.try_get::<String, _>("team_id"))
-                .collect::<Result<_, _>>()
-                .map_err(db)?;
+        let (team_ids, is_admin) =
+            teams_and_admin(&mut tx, &user_id, r.admin_from_team, column_admin).await?;
 
         // EMPTY means this user has no override, so the gateway's configured
         // defaults apply unmodified. It does not mean zero and it does not mean
@@ -139,6 +133,7 @@ impl IamDb {
     pub(super) async fn revoke(
         &self,
         r: RevokeCredentialRequest,
+        deadline: Deadline,
         rid: &str,
         call: Call,
     ) -> Result<Response<RevokeCredentialResponse>, Status> {
@@ -164,6 +159,7 @@ impl IamDb {
         //
         // MATCHED ON THE PAIR (ADR-0972 (2)), so an administrator naming one
         // person cannot revoke another person's credential by its id.
+        let mut conn = self.acquire(deadline).await?;
         let row = sqlx::query(
             "UPDATE iam_credential
                 SET revoked_at = CURRENT_TIMESTAMP
@@ -171,7 +167,7 @@ impl IamDb {
         )
         .bind(&r.credential_id)
         .bind(&r.user_id)
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .map_err(db)?;
 
@@ -185,7 +181,7 @@ impl IamDb {
                 sqlx::query_scalar("SELECT id FROM iam_credential WHERE id = ? AND user_id = ?")
                     .bind(&r.credential_id)
                     .bind(&r.user_id)
-                    .fetch_optional(&self.pool)
+                    .fetch_optional(&mut *conn)
                     .await
                     .map_err(db)?;
             if owned.is_none() {
@@ -208,6 +204,7 @@ impl IamDb {
     pub(super) async fn credential_page(
         &self,
         r: ListCredentialsRequest,
+        deadline: Deadline,
         call: Call,
     ) -> Result<Response<ListCredentialsResponse>, Status> {
         let page_size = match r.page_size {
@@ -225,6 +222,7 @@ impl IamDb {
         // timestamp back — so no Rust type a TIMESTAMP column decodes into
         // exists here. The CAST pins the result to a BIGINT rather than the
         // DECIMAL a fractional-second argument would produce.
+        let mut conn = self.acquire(deadline).await?;
         let rows = sqlx::query(
             // The JOIN is the liveness check every other read on this boundary
             // carries. A soft-deleted person's credentials already stop
@@ -246,7 +244,7 @@ impl IamDb {
         .bind(&r.user_id)
         .bind(&r.page_token)
         .bind(page_size)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await
         .map_err(db)?;
 
@@ -363,4 +361,39 @@ async fn owner_reads_own_record(
         org_locked,
         team_override,
     })
+}
+
+/// The user's LIVE teams, and `is_admin` as the request asks for it.
+async fn teams_and_admin(
+    tx: &mut sqlx::MySqlTransaction<'_>,
+    user_id: &str,
+    admin_from_team: bool,
+    column_admin: bool,
+) -> Result<(Vec<String>, bool), Status> {
+    // LIVE TEAMS ONLY (yaadgaar #303, plans/team-access.md §7). A member
+    // row of an archived team (`deleted_at` set by `SyncTeams`) stays in
+    // the store and is not reported: an archived team admits nobody.
+    let team_ids: Vec<String> = sqlx::query(
+        "SELECT m.team_id FROM iam_team_member m
+               JOIN iam_team t ON t.id = m.team_id
+              WHERE m.user_id = ? AND t.deleted_at IS NULL",
+    )
+    .bind(user_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db)?
+    .into_iter()
+    .map(|r| r.try_get::<String, _>("team_id"))
+    .collect::<Result<_, _>>()
+    .map_err(db)?;
+
+    // ADMIN FROM THE TEAM WHEN `iam` SAYS SO (IAM_ADMIN_FROM_TEAM, relayed
+    // as `admin_from_team`): live membership of `administrators`, read from
+    // the very `team_ids` this answer carries, so the two cannot disagree.
+    // False or absent: the column, as before (plans/team-access.md §4).
+    let is_admin = match admin_from_team {
+        true => team_ids.iter().any(|t| t == super::team::ADMINISTRATORS),
+        false => column_admin,
+    };
+    Ok((team_ids, is_admin))
 }

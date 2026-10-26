@@ -31,6 +31,47 @@
       "additionalProperties": false,
       "required": ["enabled", "clientAuth"]
     },
+    "server": {
+      "properties": {
+        "limits": {
+          "properties": {
+            "maxConcurrentStreams": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10000,
+              "description": "The most concurrent HTTP/2 streams one connection may open. Rendered as LISTEN_MAX_CONCURRENT_STREAMS and read with no fallback (ADR-1006, ADR-0569). Range 1..10000 is the yadgar-lifecycle `ServerLimits` range; tests/chart_server_limits.rs pins it. Default in values.yaml per ADR-1006."
+            },
+            "keepaliveIntervalSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3600,
+              "description": "How often an idle connection is PINGed. Rendered as LISTEN_KEEPALIVE_INTERVAL_SECS and read with no fallback (ADR-1006, ADR-0569). Range 1..3600 is the yadgar-lifecycle `ServerLimits` range; tests/chart_server_limits.rs pins it. Default in values.yaml per ADR-1006."
+            },
+            "keepaliveTimeoutSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 600,
+              "description": "How long a PING may go unanswered before the connection is closed. It must also be BELOW keepaliveIntervalSeconds; a schema cannot express a cross-key rule, so `templates/render-checks.yaml` refuses it. Rendered as LISTEN_KEEPALIVE_TIMEOUT_SECS and read with no fallback (ADR-1006, ADR-0569). Range 1..600 is the yadgar-lifecycle `ServerLimits` range; tests/chart_server_limits.rs pins it. Default in values.yaml per ADR-1006."
+            },
+            "maxHeaderListBytes": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 1048576,
+              "description": "The largest HTTP/2 header list, in bytes, a request may carry. Rendered as LISTEN_MAX_HEADER_LIST_BYTES and read with no fallback (ADR-1006, ADR-0569). Range 1024..1048576 is the yadgar-lifecycle `ServerLimits` range; tests/chart_server_limits.rs pins it. Default in values.yaml per ADR-1006."
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "maxConcurrentStreams",
+            "keepaliveIntervalSeconds",
+            "keepaliveTimeoutSeconds",
+            "maxHeaderListBytes"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": ["limits"]
+    },
     "database": {
       "properties": {
         "host": {},
@@ -51,8 +92,8 @@
         "acquireTimeoutSeconds": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 29,
-          "description": "Seconds `acquire` waits for a free connection before failing. Rendered as DB_ACQUIRE_TIMEOUT_SECONDS and read with no fallback (ADR-0837); replaces sqlx's own 30s default. Maximum 29: below the CALLER's own dial REQUEST_TIMEOUT (30s) -- this process never dials out, so the budget it has to stay under is the caller's (iam's), not its own -- so a stalled acquire can never be the deadline a caller's whole request runs against (card C-DB2; see tests/chart_request_deadline.rs). Minimum 1: zero fails every acquire that has to wait."
+          "maximum": 13,
+          "description": "Seconds `acquire` waits for a free connection before failing. Rendered as DB_ACQUIRE_TIMEOUT_SECONDS and read with no fallback (ADR-0837); replaces sqlx's own 30s default. Maximum 13 (ADR-1006): below the lowest dial request timeout a CALLER accepts (yadgar_dial::min_request_timeout, 14s, also ADR-1006's default for the caller's chart) -- this process never dials out, so the budget it has to stay under is the caller's (iam's), not its own -- so a stalled acquire can never be the deadline a caller's whole request runs against (card C-DB2; see tests/chart_request_deadline.rs). Minimum 1: zero fails every acquire that has to wait."
         },
         "idleTimeoutSeconds": {
           "type": "integer",

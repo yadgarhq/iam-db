@@ -35,7 +35,8 @@ CI_VALUES = CHART / "ci" / "values.yaml"
 
 # Knob, chart key, variable, shipped value and (if any) the schema's upper
 # bound. `acquireTimeoutSeconds` is the one with a `maximum`: card C-DB2
-# bounds it below the CALLER's own dial REQUEST_TIMEOUT (30s) — this process
+# bounds it at 13 (ADR-1006), below the lowest request timeout the CALLER's
+# dial client accepts (`yadgar_dial::min_request_timeout()`, 14s) — this process
 # never dials out, so the budget it has to stay under is the caller's
 # (`iam`'s), not its own — so a stalled acquire can never be the deadline a
 # caller's whole request runs against (see `tests/chart_request_deadline.rs`,
@@ -51,8 +52,8 @@ KNOBS = [
     pytest.param(
         "database.acquireTimeoutSeconds",
         "DB_ACQUIRE_TIMEOUT_SECONDS",
-        "25",
-        29,
+        "12",
+        13,
         id="acquireTimeoutSeconds",
     ),
     pytest.param(
@@ -146,18 +147,67 @@ def test_a_stated_value_at_the_minimum_renders(
     assert rendered_value(result.stdout, variable) == 'value: "1"'
 
 
+# A VALUES-FILE NUMBER IS A FLOAT64, not the int64 `--set` hands the template
+# (every render above). `quote` prints a float64 of a million or more in
+# exponent form: `maxLifetimeSeconds: 1000000` in a values file rendered
+# "1e+06", which the binary's integer parse refuses at boot. Every typed knob's
+# env line casts with `int64` first; the schema's `"type": "integer"` already
+# refused a fraction or a string, so the cast cannot hide one. The parent chart
+# hands this chart its values the same float64 way.
+@pytest.mark.parametrize("knob, variable, shipped, maximum", KNOBS)
+def test_a_large_value_from_a_values_file_renders_as_an_integer(
+    knob: str, variable: str, shipped: str, maximum: int | None, tmp_path: Path
+) -> None:
+    value = maximum if maximum is not None else 1_000_000
+    block, leaf = knob.split(".")
+    values_file = tmp_path / "values.yaml"
+    values_file.write_text(f"{block}:\n  {leaf}: {value}\n")
+    result = render("-f", str(values_file))
+    assert result.returncode == 0, result.stderr
+    assert rendered_value(result.stdout, variable) == f'value: "{value}"'
+
+
 def test_above_the_acquire_timeout_bound_is_refused_at_render() -> None:
-    result = render("--set", "database.acquireTimeoutSeconds=30")
+    result = render("--set", "database.acquireTimeoutSeconds=14")
     assert result.returncode != 0
     assert "acquireTimeoutSeconds" in result.stderr, result.stderr
 
 
 def test_the_acquire_timeout_bound_itself_renders() -> None:
-    result = render("--set", "database.acquireTimeoutSeconds=29")
+    result = render("--set", "database.acquireTimeoutSeconds=13")
     assert result.returncode == 0, result.stderr
-    assert rendered_value(result.stdout, "DB_ACQUIRE_TIMEOUT_SECONDS") == 'value: "29"'
+    assert rendered_value(result.stdout, "DB_ACQUIRE_TIMEOUT_SECONDS") == 'value: "13"'
 
 
 def test_a_nulled_database_block_is_still_refused_at_render() -> None:
     result = render("--set", "database=null")
     assert result.returncode != 0, "a nulled database block rendered"
+
+
+# THE DATABASE ACCOUNT'S OWN CAP (ADR-1006, yaadgaar #200). mariadb-operator
+# writes `maxUserConnections: 20` on the User it creates from
+# `MariaDB.spec.username` (measured live on kind-yadgar, 2026-10-24), and the
+# MariaDB CRD has no knob for it. `yadgar-store` refuses at boot when
+# maxConnections x REPLICAS exceeds that cap. So the shipped pool, at the most
+# replicas this chart can run, must fit 20 — or a default install crash-loops
+# once it takes the store release carrying that check. A chart-owned User CR
+# with a computed cap is the follow-up (yaadgaar #411).
+OPERATOR_WRITTEN_USER_CAP = 20
+
+
+def test_the_shipped_pool_fits_the_operator_written_user_cap() -> None:
+    import yaml
+
+    values = yaml.safe_load((CHART / "values.yaml").read_text())
+    pool = values["database"]["maxConnections"]
+    replicas = max(values["autoscaling"]["maxReplicas"], values["replicaCount"])
+    assert pool * replicas <= OPERATOR_WRITTEN_USER_CAP, (
+        f"database.maxConnections {pool} x {replicas} replicas = {pool * replicas} "
+        f"exceeds the operator-written MAX_USER_CONNECTIONS {OPERATOR_WRITTEN_USER_CAP}"
+    )
+
+
+def test_the_shipped_pool_is_three_per_replica() -> None:
+    result = render()
+    assert result.returncode == 0, result.stderr
+    assert rendered_value(result.stdout, "DB_MAX_CONNECTIONS") == 'value: "3"'

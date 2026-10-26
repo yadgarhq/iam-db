@@ -187,6 +187,74 @@ fn a_malformed_db_acquire_timeout_seconds_names_the_variable_and_the_chart_key()
     );
 }
 
+/// The four listener limits (ADR-1006) at the chart's shipped values, each with
+/// the chart value that renders it.
+const LIMITS_ENV: &[(&str, &str)] = &[
+    ("LISTEN_MAX_CONCURRENT_STREAMS", "256"),
+    ("LISTEN_KEEPALIVE_INTERVAL_SECS", "30"),
+    ("LISTEN_KEEPALIVE_TIMEOUT_SECS", "10"),
+    ("LISTEN_MAX_HEADER_LIST_BYTES", "16384"),
+];
+
+/// The environment up to and including the transport, so only the limits are
+/// in question.
+fn transport_env() -> Vec<(&'static str, &'static str)> {
+    let mut vars: Vec<(&str, &str)> = FULL_POOL_ENV.to_vec();
+    vars.push(("LISTEN_TLS_ENABLED", "0"));
+    vars.push(("LISTEN_TLS_CLIENT_AUTH", "off"));
+    vars
+}
+
+/// ADR-1006, ADR-0569: the library has NO default for any of the four limits,
+/// so each absent one refuses the boot, naming the variable and the chart
+/// value. Every key is removed in turn: a binary that defaulted one would pass
+/// the other four and fail only here.
+#[test]
+fn an_absent_server_limit_is_refused_naming_the_variable_and_the_chart_key() {
+    let chart_keys = [
+        (
+            "LISTEN_MAX_CONCURRENT_STREAMS",
+            "server.limits.maxConcurrentStreams",
+        ),
+        (
+            "LISTEN_KEEPALIVE_INTERVAL_SECS",
+            "server.limits.keepaliveIntervalSeconds",
+        ),
+        (
+            "LISTEN_KEEPALIVE_TIMEOUT_SECS",
+            "server.limits.keepaliveTimeoutSeconds",
+        ),
+        (
+            "LISTEN_MAX_HEADER_LIST_BYTES",
+            "server.limits.maxHeaderListBytes",
+        ),
+    ];
+    for (var, chart) in chart_keys {
+        let mut vars = transport_env();
+        vars.extend(LIMITS_ENV.iter().filter(|(k, _)| *k != var));
+        let stderr = refusal(&vars);
+        assert!(stderr.contains(var), "{var}: {stderr}");
+        assert!(stderr.contains(chart), "{var}: {stderr}");
+    }
+}
+
+/// A value outside the library's range, and a keepalive timeout that is not
+/// below its interval, refuse naming the variable too.
+#[test]
+fn an_out_of_range_server_limit_is_refused_naming_the_variable() {
+    for (var, value) in [
+        ("LISTEN_MAX_CONCURRENT_STREAMS", "0"),
+        ("LISTEN_MAX_HEADER_LIST_BYTES", "512"),
+        ("LISTEN_KEEPALIVE_TIMEOUT_SECS", "30"),
+    ] {
+        let mut vars = transport_env();
+        vars.extend(LIMITS_ENV.iter().filter(|(k, _)| *k != var));
+        vars.push((var, value));
+        let stderr = refusal(&vars);
+        assert!(stderr.contains(var), "{var}={value}: {stderr}");
+    }
+}
+
 /// Ledger 1257: `LISTEN` and `METRICS_LISTEN` are now parsed BEFORE the probe
 /// (see `main.rs`'s module documentation), so a bad address is reachable
 /// here with NO engine behind it — this file's own promise. Before that
@@ -197,6 +265,7 @@ fn a_bad_listen_address_is_refused_naming_the_variable_with_no_engine_needed() {
     let mut vars: Vec<(&str, &str)> = FULL_POOL_ENV.to_vec();
     vars.push(("LISTEN_TLS_ENABLED", "0"));
     vars.push(("LISTEN_TLS_CLIENT_AUTH", "off"));
+    vars.extend_from_slice(LIMITS_ENV);
     vars.push(("LISTEN", "notanaddr"));
     let stderr = refusal(&vars);
     assert!(stderr.contains("LISTEN is \"notanaddr\""), "{stderr}");

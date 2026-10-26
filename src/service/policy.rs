@@ -13,6 +13,7 @@ impl IamDb {
     pub(super) async fn set_admin(
         &self,
         r: SetUserAdminRequest,
+        deadline: Deadline,
         rid: &str,
         call: Call,
     ) -> Result<Response<SetUserAdminResponse>, Status> {
@@ -38,11 +39,12 @@ impl IamDb {
         //
         // Idempotent (D9) without a ledger because it ASSIGNS rather than
         // toggles — running it twice reaches the same state.
+        let mut conn = self.acquire(deadline).await?;
         let done =
             sqlx::query("UPDATE iam_user SET is_admin = ? WHERE id = ? AND deleted_at IS NULL")
                 .bind(r.is_admin)
                 .bind(&r.user_id)
-                .execute(&self.pool)
+                .execute(&mut *conn)
                 .await
                 .map_err(db)?;
 
@@ -62,7 +64,7 @@ impl IamDb {
         // unknown or the person is soft-deleted: this branch does not need to
         // tell the two apart, only to refuse reporting success for either.
         if done.rows_affected() == 0 {
-            live_user(&self.pool, &r.user_id).await?;
+            live_user(&mut *conn, &r.user_id).await?;
         }
 
         call.finish(Outcome {
@@ -76,6 +78,7 @@ impl IamDb {
     pub(super) async fn set_rate_limit(
         &self,
         r: SetRateLimitOverrideRequest,
+        deadline: Deadline,
         rid: &str,
         call: Call,
     ) -> Result<Response<SetRateLimitOverrideResponse>, Status> {
@@ -101,6 +104,7 @@ impl IamDb {
         // of both. The SET arm now carries the predicate in its own statement;
         // the CLEAR arm keeps the separate check on purpose. Argued below at the
         // arm it applies to rather than in one place that fits neither.
+        let mut conn = self.acquire(deadline).await?;
         let done = match &r.limit {
             // Upsert onto the composite primary key — the same structural
             // idempotence AddTeamMember gets from iam_team_member's.
@@ -128,12 +132,12 @@ impl IamDb {
                 .bind(&r.user_id)
                 .bind(limit.rate)
                 .bind(limit.burst)
-                .execute(&self.pool)
+                .execute(&mut *conn)
                 .await
                 .map_err(db)?;
 
                 if done.rows_affected() == 0 {
-                    live_user(&self.pool, &r.user_id).await?;
+                    live_user(&mut *conn, &r.user_id).await?;
                 }
                 done
             }
@@ -165,7 +169,7 @@ impl IamDb {
             // "the same shape as this handler, answered the other way". Citing
             // it here would make two different decisions look like one.
             None => {
-                live_user(&self.pool, &r.user_id).await?;
+                live_user(&mut *conn, &r.user_id).await?;
                 sqlx::query(
                     "DELETE FROM iam_rate_limit_override
                       WHERE user_id = ? AND module = ? AND kind = ?",
@@ -173,7 +177,7 @@ impl IamDb {
                 .bind(&r.user_id)
                 .bind(&r.module)
                 .bind(r.kind)
-                .execute(&self.pool)
+                .execute(&mut *conn)
                 .await
                 .map_err(db)?
             }

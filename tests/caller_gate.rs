@@ -178,6 +178,8 @@ async fn every_rpc_as(svc: &IamDb, caller: Option<&str>) -> Vec<Outcome> {
         ),
         call!("GetKeyIdentity", get_key_identity_as, GetKeyIdentityRequest),
         call!("SetKeyIdentity", set_key_identity_as, SetKeyIdentityRequest),
+        // Team access stage 2 red 8: SyncTeams admits `iam`'s leaf only.
+        call!("SyncTeams", sync_teams_as, SyncTeamsRequest),
     ]
 }
 
@@ -241,6 +243,7 @@ async fn every_rpc_via_the_trait(svc: &IamDb) -> Vec<Outcome> {
         ),
         call!("GetKeyIdentity", get_key_identity, GetKeyIdentityRequest),
         call!("SetKeyIdentity", set_key_identity, SetKeyIdentityRequest),
+        call!("SyncTeams", sync_teams, SyncTeamsRequest),
     ]
 }
 
