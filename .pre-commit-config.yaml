@@ -38,7 +38,7 @@ repos:
     # alone: it adds the `ADR-0523-LIBRARY-WATCHED` declaration this tree now
     # needs, because adopting `yadgar-lifecycle`'s `ServerTls` moved the last
     # boot read in `src/` into the library. No new hook id, so none to adopt.
-    rev: v1.39.2
+    rev: v1.42.0
     hooks:
       - id: gitleaks
       - id: prettier
