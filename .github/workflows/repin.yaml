@@ -1,0 +1,30 @@
+name: repin
+
+# The schedule for advancing this repository's in-org crate pins (ADR-0561).
+# The logic is defined once in yadgarhq/actions (D62); this file only supplies
+# the cron and the credential. It opens a pull request and never merges one
+# (ADR-0531). A repository with no in-org crate pin makes it a no-op.
+#
+# `ubuntu-latest`, never a self-hosted runner: the release App credential must
+# not sit on one (ADR-0563). The reusable workflow already sets it.
+#
+# `contents: read` is the whole cap. Every write goes through the short-lived
+# App token the reusable workflow mints, not through GITHUB_TOKEN.
+#
+# NAMED SECRETS, NOT `secrets: inherit` (zizmor `secrets-inherit`), as in ci.yaml.
+on:
+  schedule:
+    - cron: "29 5 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  repin:
+    uses: yadgarhq/actions/.github/workflows/repin.yaml@main
+    permissions:
+      contents: read
+    secrets:
+      RELEASE_APP_CLIENT_ID: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
