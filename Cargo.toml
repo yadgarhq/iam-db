@@ -26,7 +26,7 @@ description = "The identity module's -db twin: the only writer of its store, ser
 # this crate's headroom check used to hard-code. `boot::pool_config` below now
 # reads all four from the environment with no fallback, the same shape every
 # other knob here already takes.
-yadgar-store = { git = "https://github.com/yadgarhq/store.git", tag = "v0.6.0" }
+yadgar-store = { git = "https://github.com/yadgarhq/store.git", tag = "v0.6.4" }
 # In tonic 0.14 prost codegen moved out to tonic-prost; there is no "prost"
 # feature on tonic itself.
 #
@@ -55,7 +55,7 @@ prost-types = "0.14"
 # The shared instrumentation seam (D67), pinned by release tag like every in-org
 # crate. This repository sat one commit behind every other consumer until now —
 # a bare revision in five files has nothing that notices one falling behind.
-yadgar-telemetry = { git = "https://github.com/yadgarhq/telemetry.git", tag = "v0.2.0", features = ["grpc"] }
+yadgar-telemetry = { git = "https://github.com/yadgarhq/telemetry.git", tag = "v0.2.7", features = ["grpc"] }
 # The metrics facade, DIRECTLY rather than through yadgar-telemetry. D67's three
 # signals go through that seam and still do; `create_enrolment`'s idempotency
 # sensor is a fourth, belonging to this one handler — the same reasoning
@@ -98,7 +98,7 @@ metrics = "0.24"
 # in v0.2.23. It reads the common name off the verified client leaf, and the
 # caller gate on every `IamDbService` verb compares that name with
 # `iam-caller`. The step past v0.2.23 adds only a tokio patch bump.
-yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle.git", tag = "v0.3.0", features = [
+yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle.git", tag = "v0.3.2", features = [
   "serve-tls",
 ] }
 # A NORMAL DEPENDENCY NOW, no longer dev-only (ADR-1019, yaadgaar #337).
@@ -117,7 +117,7 @@ yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle.git", tag = "v
 # back from the same crate.
 #
 # v0.2.25 is the first tag with `Deadline`.
-yadgar-dial = { git = "https://github.com/yadgarhq/dial.git", tag = "v0.2.25" }
+yadgar-dial = { git = "https://github.com/yadgarhq/dial.git", tag = "v0.2.26" }
 sqlx = { version = "0.9", default-features = false, features = [
   "runtime-tokio",
   "tls-rustls-ring",

@@ -2776,7 +2776,7 @@ dependencies = [
 [[package]]
 name = "yadgar-dial"
 version = "0.1.0"
-source = "git+https://github.com/yadgarhq/dial.git?tag=v0.2.25#c5824ae6af528d17f43f33eaddf093278b0782b3"
+source = "git+https://github.com/yadgarhq/dial.git?tag=v0.2.26#c9662c02b8b2ecc10fdc2b878ac8414bb6c68bcb"
 dependencies = [
  "metrics",
  "rustls",
@@ -2817,7 +2817,7 @@ dependencies = [
 [[package]]
 name = "yadgar-lifecycle"
 version = "0.1.0"
-source = "git+https://github.com/yadgarhq/lifecycle.git?tag=v0.3.0#bc9a000c170edc0c0d2da0842eb20bad13f9cfb9"
+source = "git+https://github.com/yadgarhq/lifecycle.git?tag=v0.3.2#12e1e930d8afdead8cf3e2814ead82086eb99b5e"
 dependencies = [
  "metrics",
  "rustls",
@@ -2835,9 +2835,9 @@ dependencies = [
 [[package]]
 name = "yadgar-store"
 version = "0.1.0"
-source = "git+https://github.com/yadgarhq/store.git?tag=v0.6.0#3d3a0120f2aeb07c11aa89388e3d7f0b76e679cb"
+source = "git+https://github.com/yadgarhq/store.git?tag=v0.6.4#98071d401c818d61bf7992bc3c52ab19d170e928"
 dependencies = [
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "sqlx",
  "thiserror",
  "tokio",
@@ -2847,7 +2847,7 @@ dependencies = [
 [[package]]
 name = "yadgar-telemetry"
 version = "0.1.0"
-source = "git+https://github.com/yadgarhq/telemetry.git?tag=v0.2.0#5aa71163b59250df620ce8993414bcd69ca19dd3"
+source = "git+https://github.com/yadgarhq/telemetry.git?tag=v0.2.7#2382d610391f5fc245040aa574659c2177c2d51a"
 dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
