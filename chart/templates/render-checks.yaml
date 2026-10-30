@@ -104,6 +104,39 @@ eleven-shape table beside it is the gate on this block.
       (kindOf .Values.database.create) (toJson .Values.database.create)) }}
 {{- end }}
 {{- if .Values.database.create }}
+{{- /*
+THE HOST MUST BE A DNS-1035 LABEL OF AT MOST 52 CHARACTERS WHILE `database.create` IS
+TRUE (yaadgaar 385). `templates/mariadb.yaml` names the MariaDB object from
+`database.host`, and `templates/deployment.yaml` hands the pod the same key, so a
+values edit moves both sides and no contract check can see the mismatch. An external
+endpoint such as an RDS host name is a dotted name: it renders an object that is
+invalid as a name or, worse, a second empty engine beside the real one.
+WHY DNS-1035: mariadb-operator v26.6.0 (the version `yadgarhq/platform` vendors) names
+a Service after the CR (`internal/controller/mariadb_controller.go:639`
+`reconcileDefaultService`, key `client.ObjectKeyFromObject(mariadb)`), and a Service
+name must start with a letter.
+WHY 52: the same controller names the StatefulSet after the CR (`:418`, `:431`).
+Kubernetes (v1.36.1, the kind cluster's version) labels each of its pods
+`controller-revision-hash: <statefulset>-<hash>` (`pkg/controller/history/
+controller_history.go:100`, `:127`; `pkg/controller/statefulset/
+stateful_set_utils.go:505`), the hash is an encoded uint32 of up to 10 characters
+(`controller_history.go:145`), and a label value is at most 63: 63 - 11 = 52. The
+operator's own suffixes on this CR's shape are shorter: `-internal` (headless Service,
+`api/v1alpha1/mariadb_keys.go:203`) gives 54. `-secondary`, `-primary`, `-metrics`,
+`-maxscale`, `-pb-*`, `-recovery`, `-bootstrap-staging` and `-restore` name objects
+for replication, metrics, MaxScale, physical backup, Galera and restore, none of
+which this template enables; `-pb-scaleout` (51) would bind if it ever did.
+*/ -}}
+{{- $host := .Values.database.host }}
+{{- if not (and (kindIs "string" $host) (le (len $host) 52) (regexMatch "^[a-z]([-a-z0-9]*[a-z0-9])?$" $host)) }}
+{{- fail (printf (join "" (list
+      "iam-db: `database.create` is true, so the chart creates the MariaDB instance and names "
+      "it from `database.host`, which must then be one DNS-1035 label (lowercase letters, "
+      "digits and `-`, starting with a letter, at most 52 characters, no dots) and is %s. To use an external "
+      "database such as RDS or Cloud SQL, set `database.create: false` and keep the "
+      "endpoint in `database.host`."))
+      (toJson $host)) }}
+{{- end }}
 {{- include "iam-db.require-api" (dict
       "context" $
       "apiVersion" "k8s.mariadb.com/v1alpha1"
@@ -392,4 +425,43 @@ defaults false, for the same reason `database.create` does.
       "apiVersion" "keda.sh/v1alpha1"
       "operator" "KEDA"
       "toggle" "autoscaling.enabled") }}
+{{- end }}
+
+{{/*
+THE FIVE NUMERIC KNOBS THE SCHEMA LEAVES UNTYPED MUST BE WHOLE NUMBERS (yaadgaar 347).
+`templates/deployment.yaml` renders every numeric env var through `int64`, so that a
+number read from a values FILE (float64 1000000) prints as `1000000` and not `1e+06`.
+`int64` turns the string `abc` into 0 without a word, so the shapes it would swallow
+are refused here, by name, before it runs. `int64` also maps an over-range value
+without a word (a 20-digit string to 0, a values-file 1e20 to -9223372036854775808)
+and parses a string with a leading zero as octal (`0123` to 83, `08` to 0), so a
+string is at most 18 digits with no leading zero and a number is below 1e18. A string
+of digits stays valid (`--set-string replicaCount=2` is accepted by design, ADR-0847),
+and so does any non-negative whole number in range. `database.port` is also refused
+above 65535, the largest TCP port. This block comes last: `database` and `autoscaling` are
+confirmed maps by the blocks above, so a missing key reads as nil and is refused too.
+*/}}
+{{- range $key, $value := dict
+      "database.port" .Values.database.port
+      "database.maxConnections" .Values.database.maxConnections
+      "database.engineMaxConnections" .Values.database.engineMaxConnections
+      "replicaCount" .Values.replicaCount
+      "autoscaling.maxReplicas" .Values.autoscaling.maxReplicas }}
+{{- $whole := false }}
+{{- if kindIs "string" $value }}
+{{- $whole = regexMatch "^(0|[1-9][0-9]{0,17})$" $value }}
+{{- else if or (kindIs "float64" $value) (kindIs "int64" $value) (kindIs "int" $value) }}
+{{- $whole = and (ge (float64 $value) 0.0) (lt (float64 $value) 1.0e18) (eq (floor (float64 $value)) (float64 $value)) }}
+{{- end }}
+{{- if not $whole }}
+{{- fail (printf (join "" (list
+      "iam-db: `%s` must be a whole number of at least 0 and below 10^18, written without "
+      "a leading zero, and is %s (%s). The chart renders it into a numeric setting through "
+      "`int64`, which turns a word or an out-of-range number into another number without "
+      "a warning. Write digits only, for example `1000`."))
+      $key (kindOf $value) (toJson $value)) }}
+{{- end }}
+{{- if and (eq $key "database.port") (gt (int64 $value) 65535) }}
+{{- fail (printf "iam-db: `database.port` must be at most 65535, the largest TCP port, and is %s." (toJson $value)) }}
+{{- end }}
 {{- end }}
