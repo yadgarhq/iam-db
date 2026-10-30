@@ -43,6 +43,12 @@ display name, password, or token. It is the only crate in the fleet with an
 `argon2`, `hmac`, or `sha2` dependency, and that is deliberate: password
 comparison and blind-index computation happen nowhere else.
 
+## Installing
+
+Install iam-db from the published OCI chart: `helm install iam-db oci://ghcr.io/yadgarhq/charts/iam-db --version <version>`. The release pins that chart to the image digest.
+
+A checkout of `chart/` renders `image.tag: latest`, a moving tag. Use a checkout for development only.
+
 ## Local development
 
 ```bash
