@@ -2,6 +2,9 @@
 # rewritten by ci-release at package time (D65). The two differ deliberately: a
 # chart in git that pinned a digest would need a commit per release, and a
 # published chart that pointed at a tag would not be reproducible.
+# Install from the published OCI chart (oci://ghcr.io/yadgarhq/charts/iam-db); the
+# release pins it to the image digest. A checkout of chart/ renders `latest`, a
+# moving tag, and is for development only.
 image:
   repository: ghcr.io/yadgarhq/iam-db
   tag: latest
