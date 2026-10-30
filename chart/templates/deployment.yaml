@@ -293,7 +293,7 @@ spec:
             - name: DB_HOST
               value: {{ .Values.database.host | quote }}
             - name: DB_PORT
-              value: {{ .Values.database.port | quote }}
+              value: {{ .Values.database.port | int64 | quote }}
             - name: DB_NAME
               value: {{ .Values.database.name | quote }}
             - name: DB_USER
@@ -328,9 +328,9 @@ spec:
             # engineOperatorReserve below, so an engine with a smaller ceiling
             # than stock MariaDB's 151 needs all four to be settable.
             - name: DB_MAX_CONNECTIONS
-              value: {{ .Values.database.maxConnections | quote }}
+              value: {{ .Values.database.maxConnections | int64 | quote }}
             - name: DB_ENGINE_MAX_CONNECTIONS
-              value: {{ .Values.database.engineMaxConnections | quote }}
+              value: {{ .Values.database.engineMaxConnections | int64 | quote }}
             # HEADROOM INSIDE DB_ENGINE_MAX_CONNECTIONS (ADR-0849). `yadgar-store`
             # v0.4.0 deleted the `5` it used to compile in; no fallback here either.
             - name: DB_ENGINE_OPERATOR_RESERVE
@@ -350,14 +350,14 @@ spec:
             # The migration lock's wait (ledger 814). No default behind it in the
             # binary; values.yaml carries the bound and its arithmetic.
             - name: DB_MIGRATION_LOCK_TIMEOUT_SECONDS
-              value: {{ .Values.database.migrationLockTimeoutSeconds | quote }}
+              value: {{ .Values.database.migrationLockTimeoutSeconds | int64 | quote }}
             # THE NUMBER THE AUTOSCALER MAY REACH, not the number running now.
             # It is the multiplier in the headroom check above, so wiring
             # replicaCount while KEDA scales to autoscaling.maxReplicas would
             # check the arithmetic against a count the autoscaler exceeds. Same
             # expression as gateway's YADGAR_MAX_REPLICAS, for the same reason.
             - name: REPLICAS
-              value: {{ if .Values.autoscaling.enabled }}{{ .Values.autoscaling.maxReplicas | quote }}{{ else }}{{ .Values.replicaCount | quote }}{{ end }}
+              value: {{ if .Values.autoscaling.enabled }}{{ .Values.autoscaling.maxReplicas | int64 | quote }}{{ else }}{{ .Values.replicaCount | int64 | quote }}{{ end }}
           volumeMounts:
             # THE CONFIGURATION REPOSITORY'S CONFIGMAP (ADR-0569, ADR-0570,
             # step 2a): the knobs every service reads.
