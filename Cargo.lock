@@ -2099,7 +2099,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -2776,7 +2776,7 @@ dependencies = [
 [[package]]
 name = "yadgar-dial"
 version = "0.1.0"
-source = "git+https://github.com/yadgarhq/dial.git?tag=v0.2.26#c9662c02b8b2ecc10fdc2b878ac8414bb6c68bcb"
+source = "git+https://github.com/yadgarhq/dial.git?tag=v0.2.29#fc4c7acff19ce8c5317368fbd2f5f2c0cbd7a3ef"
 dependencies = [
  "metrics",
  "rustls",
@@ -2817,7 +2817,7 @@ dependencies = [
 [[package]]
 name = "yadgar-lifecycle"
 version = "0.1.0"
-source = "git+https://github.com/yadgarhq/lifecycle.git?tag=v0.3.2#12e1e930d8afdead8cf3e2814ead82086eb99b5e"
+source = "git+https://github.com/yadgarhq/lifecycle.git?tag=v0.3.5#a20e34ffb2a1453b23fd97cb5eaa0915c318917c"
 dependencies = [
  "metrics",
  "rustls",
@@ -2835,7 +2835,7 @@ dependencies = [
 [[package]]
 name = "yadgar-store"
 version = "0.1.0"
-source = "git+https://github.com/yadgarhq/store.git?tag=v0.7.0#1d90e9e8d38043cea16abec108be3d4ccc358cc4"
+source = "git+https://github.com/yadgarhq/store.git?tag=v0.7.1#a375fbf47dc40230aaf2585c5004250f4e7ad18f"
 dependencies = [
  "sha2 0.11.0",
  "sqlx",
@@ -2847,7 +2847,7 @@ dependencies = [
 [[package]]
 name = "yadgar-telemetry"
 version = "0.1.0"
-source = "git+https://github.com/yadgarhq/telemetry.git?tag=v0.2.7#2382d610391f5fc245040aa574659c2177c2d51a"
+source = "git+https://github.com/yadgarhq/telemetry.git?tag=v0.2.10#d894a1daa45de81133f28ad30a8d0a61ed46641a"
 dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
