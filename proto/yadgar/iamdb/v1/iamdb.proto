@@ -385,14 +385,12 @@ message CreateEnrolmentRequest {
   // refusal names the conflict; it reveals nothing about the target because it
   // is decided before the target is read.
   //
-  // WITH `admin_from_team` TRUE, ADR-1010 (status OPEN, not yet ruled)
-  // proposes that the pair is ADMITTED: the bootstrap demand then reaches a
-  // declared administrator who may hold live, possibly stolen, credentials, and
-  // the bootstrap caller decides at issue time whether the redemption revokes
-  // them. ADR-0966 alone does not give the bootstrap caller this instruction.
-  // No `iam-db` admits the pair until ADR-1010 is accepted; until then the
-  // refusal above applies in both settings. If ADR-1010 is rejected, this
-  // paragraph is withdrawn and the refusal stays.
+  // WITH `admin_from_team` TRUE, ADR-1014 (accepted; it ratifies ADR-1010) rules
+  // that the pair is ADMITTED: the bootstrap demand then reaches a declared
+  // administrator who may hold live, possibly stolen, credentials, and the
+  // bootstrap caller decides at issue time whether the redemption revokes them.
+  // ADR-0966 alone does not give the bootstrap caller this instruction. An
+  // `iam-db` admits the pair in that setting (iam-db#104).
   //
   // Absent (the default) is the ordinary path, byte-identical to before: a
   // reset replaces the password and existing credentials keep resolving.
@@ -1194,8 +1192,8 @@ enum KeyIdentityOutcome {
   KEY_IDENTITY_OUTCOME_UNSPECIFIED = 0;
 
   // A marker is stored UNDER THE DERIVATION VERSION PRESENTED, and it equals
-  // the fingerprint presented. From SetKeyIdentity it additionally means the
-  // row was already there, so that call wrote nothing.
+  // the fingerprint presented. From SetKeyIdentity or AdoptKeyIdentity it
+  // additionally means the row was already there, so that call wrote nothing.
   KEY_IDENTITY_OUTCOME_MATCH = 1;
 
   // A marker is stored UNDER THE DERIVATION VERSION PRESENTED, and it DIFFERS
@@ -1240,7 +1238,8 @@ enum KeyIdentityOutcome {
   KEY_IDENTITY_OUTCOME_ABSENT = 3;
 
   // The marker was absent and the recording call wrote it. SetKeyIdentity
-  // ONLY, and a REPLAY of that call under its original key answers RECORDED
+  // and AdoptKeyIdentity ONLY — the two arms that write — and a REPLAY of
+  // either call under its original key answers RECORDED
   // again rather than MATCH — D9's ordinary rule, that a replay returns the
   // ORIGINAL outcome, exactly as RedeemEnrolment replays REDEEMED rather than
   // reporting the secret it spent as SPENT.
@@ -1485,7 +1484,11 @@ message GetKeyIdentityResponse {
 // first boot is an EMPTY store with no marker. A POPULATED store with no
 // marker is an incident: its rows were encrypted under a key set nobody can
 // now name, and recording whichever fingerprint arrives first would assert an
-// identity about all of them on no evidence at all.
+// identity about all of them on no evidence at all. The way out is EVIDENCE,
+// and it is a different arm: AdoptKeyIdentity below records the marker over
+// such a store only after `iam` has proved, by decrypting its oldest rows,
+// that the key set it holds is the one they were encrypted under. This arm's
+// refusal is unchanged by that arm's existence.
 //
 // THIS IS THE ONLY REFUSAL ABOUT THE STORED MARKER THIS ARM PUTS ON THE STATUS
 // CHANNEL, and that is what makes FAILED_PRECONDITION unambiguous here. The
@@ -1516,8 +1519,10 @@ message GetKeyIdentityResponse {
 // this arm precisely because the skew vacated it, which is the distinctness
 // ADR-0765 asks for rather than a coincidence.
 //
-// `iam` TREATS IT AS: do not pass, do not exit, be visible to an operator —
-// the same disposition DERIVATION_SKEW gets, reached down a different channel.
+// `iam` TREATS IT AS: do not pass, do not exit — and attempt the proof
+// AdoptKeyIdentity requires. Until that arm answers RECORDED or MATCH the pod
+// stays not-passed and visible to an operator, the disposition
+// DERIVATION_SKEW gets, reached down a different channel.
 // Identical handling is not an argument for identical encoding: the two are
 // separate so that a caller can TELL them apart, not so that it must act
 // differently on them.
@@ -1588,6 +1593,148 @@ message SetKeyIdentityResponse {
   KeyIdentityOutcome outcome = 1;
 }
 
+// One key-bearing row, as the evidence AdoptKeyIdentity's proof is made from.
+//
+// THE THREE COLUMNS DERIVED FROM THE KEY SET, AND NOTHING ELSE. `User` above
+// carries `meta`, `is_admin` and two dead fields besides; none of them is
+// evidence of anything, so none of them leaves the store on this arm.
+message KeyIdentityEvidence {
+  // The row's id, `yadgar:user:` and a uuidv7, as `CreateUserRequest` stored
+  // it. AdoptKeyIdentity names the rows `iam` verified by these ids.
+  string user_id = 1;
+
+  // AES-256-GCM under `iam`'s encryption key, nonce-framed, exactly as
+  // stored. A successful decrypt is the proof that key encrypted this row:
+  // GCM's tag fails under any other key.
+  bytes external_id_ciphertext = 2;
+  bytes display_name_ciphertext = 3;
+
+  // HMAC under `iam`'s blind-index key, exactly as stored. `iam` recomputes it
+  // from the decrypted `external_id_ciphertext` and compares, which is what
+  // covers the SECOND key in the fingerprint: a pod holding the right
+  // encryption key and the wrong blind-index key decrypts every row and
+  // matches none of these.
+  bytes external_id_blind_index = 4;
+}
+
+// The read behind AdoptKeyIdentity's proof: the key-bearing columns of
+// `iam_user`, OLDEST FIRST. THE FIRST ARM ON THIS BOUNDARY THAT RETURNS
+// CIPHERTEXT IN BULK, and its only caller is `iam`'s key-identity check.
+//
+// THE ORDER IS FIXED, ASCENDING BY CREATION AND THEN BY ID, AND IT IS
+// LOAD-BEARING. An `iam` that has not passed the check stays Ready and
+// serving, so a pod holding the WRONG key set can already have created rows
+// under it. Sampled newest first, that pod would decrypt its own rows and pass
+// the proof against a store whose older rows it cannot read. Oldest first, the
+// sample starts with the rows written before any such pod existed. Nobody
+// "optimises" this to an unordered or reverse scan. The order is not only
+// `iam`'s discipline: AdoptKeyIdentity refuses evidence that is not the oldest
+// rows in exactly this order, so a sampling regression in `iam` is refused by
+// this service rather than recorded.
+//
+// SOFT-DELETED ROWS ARE INCLUDED. `deleted_at` says nothing about which key
+// encrypted a row, and SetKeyIdentity's emptiness predicate counts them too,
+// so the store this arm describes is the store that refusal saw.
+//
+// A READ, SO NO `Idempotency` (D9). NO `unverified_actor`, for the reason
+// SetKeyIdentity states: `iam` calls it from its own startup task with no
+// request in flight. It refuses nothing about the stored marker and does not
+// consult it — a store with a marker answers the same rows.
+//
+// PAGED AS ListCredentials is: `page_size` at or below zero takes the server's
+// default and a larger one is capped; `page_token` is opaque, and an empty
+// `next_page_token` is the last page. An empty store answers OK with no rows.
+// The token encodes a KEYSET POSITION, the last (created_at, id) served, and
+// never an OFFSET. How many rows `iam` reads is set by AdoptKeyIdentity's cap
+// of 64 below; this arm only serves them.
+message ListKeyIdentityEvidenceRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+}
+message ListKeyIdentityEvidenceResponse {
+  repeated KeyIdentityEvidence evidence = 1;
+  string next_page_token = 2;
+}
+
+// Record the marker over a POPULATED store that holds none, on `iam`'s proof
+// that the key set it presents is the one the store's rows were encrypted
+// under. The exception to SetKeyIdentity's refusal, and a separate arm so that
+// refusal stays literally what it says.
+//
+// THE PROOF IS `iam`'s AND THIS SERVICE NEVER MAKES IT. It holds no key (D72)
+// and never sees a plaintext. `iam` reads rows from ListKeyIdentityEvidence,
+// AES-256-GCM-decrypts both ciphertexts of each, and recomputes the blind
+// index from the decrypted `external_id`. It calls this arm ONLY when every
+// row it read passed, and EXITS on any row that failed, with MISMATCH's
+// disposition: a decrypt that fails under GCM is the wrong key, not a
+// transient. ZERO ROWS READ IS NO PROOF, and `iam` then does not call this arm
+// at all.
+//
+// THE EVIDENCE IS AT MOST 64 ROWS, AND THAT CAP IS A CONTRACT NUMBER. `iam`
+// reads EVERY row when the store holds 64 or fewer, and otherwise the 64
+// oldest, in ListKeyIdentityEvidence's order.
+//
+// WHAT THIS SERVICE CHECKS IS THE SHAPE OF THE EVIDENCE, NOT ITS TRUTH.
+// `evidence_user_ids` must be EXACTLY THE N OLDEST ROWS of `iam_user` by
+// (created_at, id), where N is the number of ids sent. Soft-deleted rows count,
+// as they do in ListKeyIdentityEvidence. That is checked IN THE INSERT'S OWN
+// PREDICATE, one statement (D5), for SetKeyIdentity's reason: a check followed
+// by a write is the same race with a longer window. It binds the claim to the
+// rows this store wrote first, so an adoption can never be recorded over an
+// empty store, on ids nobody wrote, or on rows a wrong-key pod created while it
+// served unverified. The oldest-first property therefore holds in this service
+// as well as in `iam`: an `iam` that samples in any other order is refused.
+//
+// THE EVIDENCE IS NOT PERSISTED. The marker keeps the fingerprint and the
+// version only; the ids are checked and then discarded.
+//
+// WHERE A MARKER IS ALREADY STORED, THE ANSWER IS THE COMPARISON, never a
+// refusal and never a write — the rules SetKeyIdentity states: MATCH,
+// MISMATCH or DERIVATION_SKEW, nothing written. Two replicas adopting at once
+// with the same key set therefore get one RECORDED and one MATCH. A replica
+// holding a different key set never reaches this arm, because its proof fails
+// first; if it did, the stored marker answers it MISMATCH. MISMATCH and
+// DERIVATION_SKEW answered by this arm have THE SAME DISPOSITIONS in `iam` as
+// the same members answered by SetKeyIdentity: MISMATCH ends the serve and
+// exits non-zero; DERIVATION_SKEW does not pass, does not exit, and stays
+// visible to an operator.
+//
+// THE REFUSALS. INVALID_ARGUMENT for the request: an empty `key_fingerprint`,
+// a zero `derivation_version`, an empty `evidence_user_ids`, a duplicate id in
+// `evidence_user_ids`, more than 64 ids, and D9's replay of a key under a
+// different payload. FAILED_PRECONDITION, nothing written, when no marker is
+// stored and the ids are not exactly the N oldest rows: an id names no row, or
+// the set is not the oldest. That includes every call against an empty store,
+// where SetKeyIdentity is the arm that records.
+//
+// A REFUSAL IS NOT RECORDED UNDER THE IDEMPOTENCY KEY. A retry under the same
+// key with corrected evidence is evaluated afresh, as a first call would be.
+message AdoptKeyIdentityRequest {
+  // D9's key, under SetKeyIdentityRequest's rules. THE PAYLOAD compared on a
+  // replay is `key_fingerprint` and `derivation_version`; the evidence is not
+  // part of it, because the stored marker does not keep it.
+  yadgar.common.v1.Idempotency idempotency = 1;
+
+  // The fingerprint and the version, under GetKeyIdentityRequest's rules:
+  // opaque here, never the key, empty and zero refused with INVALID_ARGUMENT.
+  bytes key_fingerprint = 2;
+  uint32 derivation_version = 3;
+
+  // The `user_id` of every row `iam` decrypted and whose blind index it
+  // matched, as ListKeyIdentityEvidence returned them: the N oldest rows, N at
+  // most 64. EMPTY IS REFUSED with INVALID_ARGUMENT: an adoption with no
+  // evidence is the assertion on no evidence at all that SetKeyIdentity's
+  // refusal exists to prevent. A duplicate id, or more than 64, is refused
+  // with INVALID_ARGUMENT too.
+  repeated string evidence_user_ids = 4;
+}
+message AdoptKeyIdentityResponse {
+  // RECORDED when this call wrote the marker; MATCH, MISMATCH or
+  // DERIVATION_SKEW when one was already stored, and then this call wrote
+  // nothing. Never ABSENT. `iam` passes on RECORDED or MATCH alone.
+  KeyIdentityOutcome outcome = 1;
+}
+
 service IamDbService {
   rpc ResolveCredential(ResolveCredentialRequest) returns (ResolveCredentialResponse);
   rpc GetPasswordHash(GetPasswordHashRequest) returns (GetPasswordHashResponse);
@@ -1606,6 +1753,8 @@ service IamDbService {
   rpc SetInheritedSetting(SetInheritedSettingRequest) returns (SetInheritedSettingResponse);
   rpc GetKeyIdentity(GetKeyIdentityRequest) returns (GetKeyIdentityResponse);
   rpc SetKeyIdentity(SetKeyIdentityRequest) returns (SetKeyIdentityResponse);
+  rpc ListKeyIdentityEvidence(ListKeyIdentityEvidenceRequest) returns (ListKeyIdentityEvidenceResponse);
+  rpc AdoptKeyIdentity(AdoptKeyIdentityRequest) returns (AdoptKeyIdentityResponse);
   // The lockout guard (ADR-0963 (6)): a sync that would leave `administrators`
   // with zero live members when it has at least one is refused
   // `FAILED_PRECONDITION`, nothing written. Omitting `administrators` archives

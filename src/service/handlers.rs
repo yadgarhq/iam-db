@@ -273,4 +273,32 @@ impl IamDbService for IamDb {
         let caller = caller_common_name(&req);
         self.set_key_identity_as(caller.as_deref(), req).await
     }
+
+    /// The key-bearing columns of `iam_user`, oldest first: the evidence
+    /// `iam` decrypts before it adopts (ADR-1089).
+    ///
+    /// **A READ, SO `Kind::Read`.** It consults no marker, so a store with one
+    /// answers the same rows. `tel`'s `user_id` stays empty for
+    /// `GetKeyIdentity`'s reason: no person is in this request.
+    async fn list_key_identity_evidence(
+        &self,
+        req: Request<ListKeyIdentityEvidenceRequest>,
+    ) -> Result<Response<ListKeyIdentityEvidenceResponse>, Status> {
+        let caller = caller_common_name(&req);
+        self.list_key_identity_evidence_as(caller.as_deref(), req)
+            .await
+    }
+
+    /// Record the marker over a populated store that holds none, on evidence
+    /// that is exactly its N oldest rows (ADR-1089).
+    ///
+    /// **`Kind::Write` ON EVERY ANSWER**, for `SetKeyIdentity`'s reason: the
+    /// `Kind` names what was asked for, the outcome what happened.
+    async fn adopt_key_identity(
+        &self,
+        req: Request<AdoptKeyIdentityRequest>,
+    ) -> Result<Response<AdoptKeyIdentityResponse>, Status> {
+        let caller = caller_common_name(&req);
+        self.adopt_key_identity_as(caller.as_deref(), req).await
+    }
 }

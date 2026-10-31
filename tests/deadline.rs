@@ -365,6 +365,29 @@ async fn set_key_identity_is_bounded_by_the_callers_deadline() {
         ));
 }
 
+#[tokio::test]
+async fn list_key_identity_evidence_is_bounded_by_the_callers_deadline() {
+    bounded!("iamdb_dl_list_key_evidence", |svc, timed| svc
+        .list_key_identity_evidence_as(
+            Some(IAM_CALLER),
+            timed(ListKeyIdentityEvidenceRequest::default())
+        ));
+}
+
+#[tokio::test]
+async fn adopt_key_identity_is_bounded_by_the_callers_deadline() {
+    bounded!("iamdb_dl_adopt_key_identity", |svc, timed| svc
+        .adopt_key_identity_as(
+            Some(IAM_CALLER),
+            timed(AdoptKeyIdentityRequest {
+                key_fingerprint: vec![1; 32],
+                derivation_version: 1,
+                evidence_user_ids: vec!["yadgar:user:x".into()],
+                ..Default::default()
+            })
+        ));
+}
+
 /// The connection id the next borrower of `svc`'s one-connection pool gets.
 async fn next_connection_id(svc: &IamDb) -> u64 {
     let mut conn = tokio::time::timeout(Duration::from_secs(5), svc.pool().acquire())

@@ -18,7 +18,10 @@
 //!     only that no marker is stored. It does NOT say the installation is
 //!     empty, and only this service can tell the two apart — see
 //!     [`IamDb::store_key_identity`]'s statement and
-//!     `recording_is_refused_when_the_store_already_holds_rows`.
+//!     `recording_is_refused_when_the_store_already_holds_rows`. THE ONE
+//!     EXCEPTION is a separate arm, `AdoptKeyIdentity` in [`adopt`], which
+//!     records over such a store only on evidence that is its N oldest rows
+//!     (ADR-1089); this arm's refusal is unchanged by it.
 //!  2. **WRITE-ONCE.** The refusal to overwrite, not the enum, is what stops a
 //!     pod holding the wrong key recording its own fingerprint and agreeing
 //!     with itself for ever — see the INSERT and
@@ -34,6 +37,8 @@
 //! reaches a value.
 
 use super::*;
+
+mod adopt;
 
 /// `iam_key_identity.key_fingerprint` is `VARBINARY(255)`, counted in BYTES.
 const MAX_KEY_FINGERPRINT: usize = 255;
@@ -125,7 +130,7 @@ fn presented(fingerprint: &[u8], version: u32) -> Result<(), Status> {
 /// for the second. Both read `Absent`.
 ///
 /// `Lock::Yes` is the re-read inside [`IamDb::store_key_identity`]'s
-/// transaction, and it is reached from BOTH arms of [`IamDb::outcome_of`]: the
+/// transaction, and it is reached from BOTH arms of [`outcome_of`]: the
 /// duplicate-key arm, where the row exists and the read takes a record lock,
 /// and the zero-matched-rows arm, where `iam_user` was non-empty and the marker
 /// may be ABSENT — there the read finds nothing and takes a next-key lock over
@@ -186,6 +191,25 @@ where
     }))
 }
 
+/// What a RECORDING arm presents: the pair, and the idempotency key it is
+/// presented under. `SetKeyIdentity` and `AdoptKeyIdentity` share everything
+/// after their INSERT, and this is the whole of what that shared half reads —
+/// which is why the evidence is not in it: D9's payload on both arms is the
+/// pair alone.
+struct Presented<'a> {
+    fingerprint: &'a [u8],
+    version: u32,
+    key: &'a str,
+}
+
+/// The idempotency key a request carries; empty when it carries none.
+fn key_of(idempotency: &Option<crate::pb::yadgar::common::v1::Idempotency>) -> String {
+    idempotency
+        .as_ref()
+        .map(|i| i.key.clone())
+        .unwrap_or_default()
+}
+
 /// D9 FIRST, THEN THE COMPARISON, and the order is the contract's.
 ///
 /// A key replayed carrying a DIFFERENT value in EITHER field is two calls
@@ -197,17 +221,11 @@ where
 ///
 /// THE EMPTY STRING IS NOT A KEY (`RedeemEnrolment`'s rule), so an unkeyed call
 /// never replays, and never collides with a marker that was written unkeyed.
-fn replayed_or_compared(
-    stored: &Marker,
-    r: &SetKeyIdentityRequest,
-    key: &str,
-) -> Result<KeyIdentityOutcome, Status> {
-    if key.is_empty() || key != stored.idempotency_key {
-        return Ok(stored.compared_with(&r.key_fingerprint, r.derivation_version));
+fn replayed_or_compared(stored: &Marker, p: &Presented) -> Result<KeyIdentityOutcome, Status> {
+    if p.key.is_empty() || p.key != stored.idempotency_key {
+        return Ok(stored.compared_with(p.fingerprint, p.version));
     }
-    match stored.derivation_version == r.derivation_version
-        && stored.key_fingerprint == r.key_fingerprint
-    {
+    match stored.derivation_version == p.version && stored.key_fingerprint == p.fingerprint {
         true => Ok(KeyIdentityOutcome::Recorded),
         false => Err(Status::invalid_argument(
             "this idempotency key was used with a different key set or derivation; a repeated key \
@@ -330,11 +348,7 @@ impl IamDb {
         deadline: Deadline,
     ) -> Result<KeyIdentityOutcome, Status> {
         presented(&r.key_fingerprint, r.derivation_version)?;
-        let key = r
-            .idempotency
-            .as_ref()
-            .map(|i| i.key.clone())
-            .unwrap_or_default();
+        let key = key_of(&r.idempotency);
 
         let mut conn = self.acquire(deadline).await?;
         let mut tx = conn.begin(Isolation::Default).await?;
@@ -388,64 +402,71 @@ impl IamDb {
         .execute(&mut *tx)
         .await;
 
-        let outcome = self.outcome_of(attempt, &mut tx, r, &key).await?;
+        let p = Presented {
+            fingerprint: &r.key_fingerprint,
+            version: r.derivation_version,
+            key: &key,
+        };
+        // A POPULATED STORE WITH NO MARKER IS AN INCIDENT, NOT A FIRST BOOT:
+        // its rows were encrypted under a key set nobody can now name, and
+        // recording whichever fingerprint arrives first would assert an
+        // identity about all of them on no evidence at all. This is the ONLY
+        // refusal about the stored marker on this arm; `AdoptKeyIdentity` is
+        // the arm that records over such a store, on evidence.
+        let outcome = outcome_of(attempt, &mut tx, &p).await?.ok_or_else(|| {
+            Status::failed_precondition(
+                "this store already holds rows and no marker; recording one now would assert a \
+                 key identity about rows it cannot be derived from",
+            )
+        })?;
 
         tx.commit().await.map_err(db)?;
         Ok(outcome)
     }
+}
 
-    /// What the INSERT above decided, and the two ways it can decide nothing.
-    ///
-    /// Lifted out whole for the reason `setting::record_claim` gives: the
-    /// duplicate-key branch is correct only together with the INSERT that
-    /// raises it, so neither half is a function on its own.
-    ///
-    /// **THE ZERO AND THE DUPLICATE ARE DIFFERENT EVENTS AND ARE NEVER
-    /// COLLAPSED.** A duplicate means the marker was already there. Zero matched
-    /// rows means the INSERT's own SELECT found `iam_user` non-empty, so nothing
-    /// was attempted. Both re-read, because a store can hold rows AND a marker —
-    /// and where a marker exists the contract wants the COMPARISON, never the
-    /// refusal: the refusal is about RECORDING alone. Answering
-    /// FAILED_PRECONDITION from the zero without re-reading would refuse a split
-    /// rollout that requires MISMATCH.
-    async fn outcome_of(
-        &self,
-        attempt: Result<sqlx::mysql::MySqlQueryResult, sqlx::Error>,
-        tx: &mut sqlx::MySqlTransaction<'_>,
-        r: &SetKeyIdentityRequest,
-        key: &str,
-    ) -> Result<KeyIdentityOutcome, Status> {
-        match attempt {
-            Ok(done) if done.rows_affected() == 1 => Ok(KeyIdentityOutcome::Recorded),
-            Ok(_) => self.against_the_stored_marker(tx, r, key).await,
-            Err(e) => match e
-                .as_database_error()
-                .is_some_and(|d| d.is_unique_violation())
-            {
-                true => self.against_the_stored_marker(tx, r, key).await,
-                false => Err(db(e)),
-            },
-        }
+/// What a recording arm's INSERT decided, and the two ways it can decide
+/// nothing. `None` is the one case each arm refuses in its own words: no row
+/// written and no marker stored.
+///
+/// Lifted out whole for the reason `setting::record_claim` gives: the
+/// duplicate-key branch is correct only together with the INSERT that raises
+/// it, so neither half is a function on its own. Both recording arms keep their
+/// INSERT as their transaction's FIRST statement for that reason.
+///
+/// **THE ZERO AND THE DUPLICATE ARE DIFFERENT EVENTS AND ARE NEVER
+/// COLLAPSED.** A duplicate means the marker was already there. Zero matched
+/// rows means the INSERT's own SELECT found its predicate false, so nothing was
+/// attempted. Both re-read, because a store can fail the predicate AND hold a
+/// marker — and where a marker exists the contract wants the COMPARISON, never
+/// the refusal: the refusal is about RECORDING alone. Answering
+/// FAILED_PRECONDITION from the zero without re-reading would refuse a split
+/// rollout that requires MISMATCH.
+async fn outcome_of(
+    attempt: Result<sqlx::mysql::MySqlQueryResult, sqlx::Error>,
+    tx: &mut sqlx::MySqlTransaction<'_>,
+    p: &Presented<'_>,
+) -> Result<Option<KeyIdentityOutcome>, Status> {
+    match attempt {
+        Ok(done) if done.rows_affected() == 1 => Ok(Some(KeyIdentityOutcome::Recorded)),
+        Ok(_) => against_the_stored_marker(tx, p).await,
+        Err(e) => match e
+            .as_database_error()
+            .is_some_and(|d| d.is_unique_violation())
+        {
+            true => against_the_stored_marker(tx, p).await,
+            false => Err(db(e)),
+        },
     }
+}
 
-    /// Compare against the marker that is there, or refuse to record over rows.
-    async fn against_the_stored_marker(
-        &self,
-        tx: &mut sqlx::MySqlTransaction<'_>,
-        r: &SetKeyIdentityRequest,
-        key: &str,
-    ) -> Result<KeyIdentityOutcome, Status> {
-        match marker(&mut **tx, Lock::Yes).await? {
-            Some(stored) => replayed_or_compared(&stored, r, key),
-            // A POPULATED STORE WITH NO MARKER IS AN INCIDENT, NOT A FIRST
-            // BOOT: its rows were encrypted under a key set nobody can now
-            // name, and recording whichever fingerprint arrives first would
-            // assert an identity about all of them on no evidence at all.
-            // This is the ONLY refusal about the stored marker on this arm.
-            None => Err(Status::failed_precondition(
-                "this store already holds rows and no marker; recording one now would assert a \
-                 key identity about rows it cannot be derived from",
-            )),
-        }
+/// Compare against the marker that is there, or say none is.
+async fn against_the_stored_marker(
+    tx: &mut sqlx::MySqlTransaction<'_>,
+    p: &Presented<'_>,
+) -> Result<Option<KeyIdentityOutcome>, Status> {
+    match marker(&mut **tx, Lock::Yes).await? {
+        Some(stored) => replayed_or_compared(&stored, p).map(Some),
+        None => Ok(None),
     }
 }
