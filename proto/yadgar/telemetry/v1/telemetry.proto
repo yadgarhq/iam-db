@@ -1,7 +1,7 @@
 // D67's wide event: one record per call, from every hop.
 //
 // NOT AN RPC SERVICE, deliberately, and there is no service definition in this
-// file. A telemetry RPC on every call would add a network hop to the path D25
+// file. A telemetry RPC on every call would add a network hop to the path D67 (after D25)
 // says must never block. Records are serialised as JSON to stdout and collected;
 // this file exists so the SHAPE is one thing across ~61 services, gated by
 // `buf breaking` like every other contract.

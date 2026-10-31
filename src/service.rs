@@ -14,21 +14,21 @@
 //!
 //! # What happens to `Idempotency`, per RPC
 //!
-//! **STATED HERE BECAUSE THE SILENCE IS ITSELF THE DEFECT.** THIRTEEN request
+//! **STATED HERE BECAUSE THE SILENCE IS ITSELF THE DEFECT.** FOURTEEN request
 //! messages on this contract carry `yadgar.common.v1.Idempotency` and this module
-//! reads `r.idempotency` on FOUR of them: the three that honour it below, and
+//! reads `r.idempotency` on FIVE of them: the four that honour it below, and
 //! `CreateEnrolment`, which reads it only to feed
 //! [`ENROLMENT_IDEMPOTENCY_DISCARDED`]. A reader who greps for that field finds
 //! nine handlers that accept a key and never mention it, and cannot tell an
-//! omission from a mechanism. The thirteen are not one answer thirteen times:
+//! omission from a mechanism. The fourteen are not one answer fourteen times:
 //!
-//! - **THREE honour the key.** `RedeemEnrolment`, on the ledger
+//! - **FOUR honour the key.** `RedeemEnrolment`, on the ledger
 //!   `iam_enrolment_redemption`; `SetInheritedSetting`, on the ledger
-//!   `iam_inherited_setting_write`; and `SetKeyIdentity`, on the
-//!   `idempotency_key` column of the singleton marker row `iam_key_identity`
-//!   (ADR-0764, ADR-0765), where the stored marker is itself the prior request.
-//!   Those three tables hold the only columns in this schema a caller's key
-//!   reaches.
+//!   `iam_inherited_setting_write`; and `SetKeyIdentity` and `AdoptKeyIdentity`,
+//!   on the `idempotency_key` column of the singleton marker row
+//!   `iam_key_identity` (ADR-0764, ADR-0765, ADR-1089), where the stored marker
+//!   is itself the prior request. Those three tables hold the only columns in
+//!   this schema a caller's key reaches.
 //! - **SIX deliver D9's replay property BY SHAPE, without reading the key.**
 //!   `SetPassword` and `SetRateLimitOverride` upsert, `SetUserAdmin` assigns,
 //!   `RevokeCredential` tombstones under `revoked_at IS NULL`, and

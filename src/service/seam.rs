@@ -349,4 +349,40 @@ impl IamDb {
         let r = req.into_inner();
         conn::store_work(self.store_key_identity(r, deadline, call)).await
     }
+
+    /// `list_key_identity_evidence` as the named `caller`, through the gate in `caller::admitted`.
+    pub async fn list_key_identity_evidence_as(
+        &self,
+        caller: Option<&str>,
+        req: Request<ListKeyIdentityEvidenceRequest>,
+    ) -> Result<Response<ListKeyIdentityEvidenceResponse>, Status> {
+        let call = Call::start(
+            SERVICE,
+            "ListKeyIdentityEvidence",
+            Kind::Read,
+            tel(request_id_of(&req), ""),
+        );
+        let call = admitted(caller, call)?;
+        let deadline = Deadline::of(&req);
+        let r = req.into_inner();
+        conn::store_work(self.key_identity_evidence(r, deadline, call)).await
+    }
+
+    /// `adopt_key_identity` as the named `caller`, through the gate in `caller::admitted`.
+    pub async fn adopt_key_identity_as(
+        &self,
+        caller: Option<&str>,
+        req: Request<AdoptKeyIdentityRequest>,
+    ) -> Result<Response<AdoptKeyIdentityResponse>, Status> {
+        let call = Call::start(
+            SERVICE,
+            "AdoptKeyIdentity",
+            Kind::Write,
+            tel(request_id_of(&req), ""),
+        );
+        let call = admitted(caller, call)?;
+        let deadline = Deadline::of(&req);
+        let r = req.into_inner();
+        conn::store_work(self.adopt_marker(r, deadline, call)).await
+    }
 }
