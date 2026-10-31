@@ -128,6 +128,14 @@ async fn an_upgraded_store_has_exactly_the_schema_a_fresh_one_has() {
 
     let upgraded = empty("iam_db_upgrade_parity_old").await;
     migrate(&upgraded, &MigrationSet::new(V0_1()).expect("v0.1.0's set")).await;
+    // v0.1.0's SQL is byte-different from today's, and the store records a
+    // digest of what ran (yaadgaar #249). A store that applied it before
+    // checksums existed has NULL there, which the next boot trusts and
+    // backfills. Model that store; the old digest would refuse boot.
+    sqlx::query("UPDATE yadgar_schema_migrations SET checksum = NULL")
+        .execute(&upgraded)
+        .await
+        .expect("model a pre-checksum ledger");
     migrate(&upgraded, &all).await;
 
     assert_eq!(
