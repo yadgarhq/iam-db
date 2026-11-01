@@ -2,7 +2,7 @@
 name = "yadgar-iam-db"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.90"
+rust-version = "1.99.1"
 license = "Apache-2.0"
 description = "The identity module's -db twin: the only writer of its store, serving IamDbService over gRPC."
 
