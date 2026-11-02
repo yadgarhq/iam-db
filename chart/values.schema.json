@@ -87,7 +87,8 @@
         "engineOperatorReserve": {
           "type": "integer",
           "minimum": 1,
-          "description": "Headroom inside engineMaxConnections reserved for an operator, a backup job or a monitoring agent (ADR-0849). Rendered as DB_ENGINE_OPERATOR_RESERVE and read with no fallback: `yadgar-store` v0.4.0 deleted the `5` it used to compile in. Minimum 1: zero leaves a non-admin operator no way into a full engine (`store` refuses it too)."
+          "maximum": 100000,
+          "description": "Headroom inside engineMaxConnections reserved for an operator, a backup job or a monitoring agent (ADR-0849). Rendered as DB_ENGINE_OPERATOR_RESERVE and read with no fallback: `yadgar-store` v0.4.0 deleted the `5` it used to compile in. Minimum 1: zero leaves a non-admin operator no way into a full engine (`store` refuses it too). Maximum 100000: MariaDB's own ceiling for max_connections, and the reserve sits inside it."
         },
         "acquireTimeoutSeconds": {
           "type": "integer",
@@ -98,12 +99,14 @@
         "idleTimeoutSeconds": {
           "type": "integer",
           "minimum": 1,
-          "description": "Seconds an idle connection is kept before the pool closes it. Rendered as DB_IDLE_TIMEOUT_SECONDS and read with no fallback (ADR-0837); replaces sqlx's own 600s default. Minimum 1: zero closes connections as fast as the pool opens them."
+          "maximum": 31536000,
+          "description": "Seconds an idle connection is kept before the pool closes it. Rendered as DB_IDLE_TIMEOUT_SECONDS and read with no fallback (ADR-0837); replaces sqlx's own 600s default. Minimum 1: zero closes connections as fast as the pool opens them. Maximum 31536000 (one year): the largest wait_timeout MariaDB accepts, so a longer pool setting has no effect."
         },
         "maxLifetimeSeconds": {
           "type": "integer",
           "minimum": 1,
-          "description": "Seconds at which a connection is retired however busy it is. Rendered as DB_MAX_LIFETIME_SECONDS and read with no fallback (ADR-0837); replaces sqlx's own 1800s default. Minimum 1: zero retires every connection the instant it opens."
+          "maximum": 31536000,
+          "description": "Seconds at which a connection is retired however busy it is. Rendered as DB_MAX_LIFETIME_SECONDS and read with no fallback (ADR-0837); replaces sqlx's own 1800s default. Minimum 1: zero retires every connection the instant it opens. Maximum 31536000: a one-year cap that keeps the value in a sane range."
         },
         "migrationLockTimeoutSeconds": {
           "type": "integer",

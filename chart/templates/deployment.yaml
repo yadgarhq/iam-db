@@ -18,7 +18,7 @@ spec:
   # Rendering nothing hands the field to the HPA, which is what `minReplicas`
   # exists to floor. `replicaCount` still applies to every deployment that has
   # not enabled autoscaling, which is the chart's own default (D80).
-  replicas: {{ .Values.replicaCount }}
+  replicas: {{ .Values.replicaCount | int64 }}
   {{- end }}
   {{- with .Values.rollingUpdate }}
   # THE ROLL'S SHAPE, WRITTEN OUT BECAUSE THE DEFAULT IS COUNT-DEPENDENT

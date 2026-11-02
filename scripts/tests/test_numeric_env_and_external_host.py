@@ -60,7 +60,11 @@ KNOBS = [
     (("server", "limits", "maxHeaderListBytes"), "LISTEN_MAX_HEADER_LIST_BYTES"),
 ]
 # The render check's own domain cap, where the knob has one the schema cannot carry.
-RENDER_CAP = {("database", "port"): 65535}
+RENDER_CAP = {
+    ("database", "port"): 65535,
+    ("replicaCount",): 2147483647,
+    ("autoscaling", "maxReplicas"): 2147483647,
+}
 UNTYPED = [
     ("database", "port"),
     ("database", "maxConnections"),
@@ -267,3 +271,103 @@ def test_the_shipped_values_pair_create_false_with_a_label():
     assert values["create"] is False
     assert re.fullmatch(r"[a-z]([-a-z0-9]*[a-z0-9])?", values["host"])
     assert len(values["host"]) <= 52
+
+
+# --- 482 ---------------------------------------------------------------------
+# UNQUOTED numeric renders print a values-file float64 as `1e+06` (the apiserver
+# refuses a float for an int32 field), the replica knobs had no upper bound, port 0
+# passed.
+
+INT32_MAX = 2147483647  # the int32 field Kubernetes stores a replica count in
+REPLICA_KNOBS = [
+    (("replicaCount",), "Deployment", ("spec", "replicas")),
+    (("autoscaling", "minReplicas"), "ScaledObject", ("spec", "minReplicaCount")),
+    (("autoscaling", "maxReplicas"), "ScaledObject", ("spec", "maxReplicaCount")),
+    (("database", "instance", "replicas"), "MariaDB", ("spec", "replicas")),
+]
+API = (*KEDA, *MARIADB)
+
+
+def replica_overlay(path: tuple[str, ...], value) -> dict:
+    body = nest(path, value)
+    if path[0] == "autoscaling":
+        body["autoscaling"]["enabled"] = True
+    if path[0] == "database":
+        body["database"]["create"] = True
+    return body
+
+
+def rendered_field(stdout: str, kind: str, field: tuple[str, ...]):
+    documents = [d for d in yaml.safe_load_all(stdout) if d and d.get("kind") == kind]
+    assert len(documents) == 1, f"{kind}: expected one document, found {len(documents)}"
+    node = documents[0]
+    for key in field:
+        node = node[key]
+    return node
+
+
+REPLICA_IDS = [".".join(p) for p, _, _ in REPLICA_KNOBS]
+
+
+@pytest.mark.parametrize("value", [1000000, INT32_MAX])
+@pytest.mark.parametrize(("path", "kind", "field"), REPLICA_KNOBS, ids=REPLICA_IDS)
+def test_a_replica_count_from_a_values_file_renders_as_an_integer(tmp_path, path, kind, field, value):
+    """`replicas: {{ .Values.replicaCount }}` printed a float64 as `1e+06`."""
+    result = render(write(tmp_path, replica_overlay(path, value)), *API)
+    assert result.returncode == 0, result.stderr
+    got = rendered_field(result.stdout, kind, field)
+    assert got == value and isinstance(got, int), f"{'.'.join(path)}={value} rendered {got!r}"
+
+
+@pytest.mark.parametrize("source", ["file", "--set-string"])
+@pytest.mark.parametrize(("path", "kind", "field"), REPLICA_KNOBS, ids=REPLICA_IDS)
+def test_a_replica_count_above_int32_is_refused_and_int32_max_renders(tmp_path, path, kind, field, source):
+    """MAX + 1 refused naming the key, MAX accepted (the int32 apiserver field)."""
+    for value, ok in ((INT32_MAX + 1, False), (INT32_MAX, True)):
+        if source == "file":
+            result = render(write(tmp_path, replica_overlay(path, value)), *API)
+        else:
+            args = ["template", NAME, str(CHART), "-f", str(CI_VALUES), "--set-string",
+                    f"{'.'.join(path)}={value}", *API]
+            if path[0] == "autoscaling":
+                args += ["--set", "autoscaling.enabled=true"]
+            if path[0] == "database":
+                args += ["--set", "database.create=true"]
+            result = helm(*args)
+        if ok:
+            assert result.returncode == 0, result.stderr
+        else:
+            assert result.returncode != 0, f"{'.'.join(path)}={value} rendered"
+            assert ".".join(path) in result.stderr and str(INT32_MAX) in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize("bad", ["abc", 1.5, -1, True, [1], 1e20])
+@pytest.mark.parametrize("path", [("autoscaling", "minReplicas"), ("database", "instance", "replicas")],
+                         ids=["autoscaling.minReplicas", "database.instance.replicas"])
+def test_a_non_whole_number_in_the_other_replica_knobs_is_refused_by_name(tmp_path, path, bad):
+    """`int64` turns "abc" into 0 silently; these two knobs had no check at all."""
+    result = render(write(tmp_path, replica_overlay(path, bad)), *API)
+    assert result.returncode != 0, f"{'.'.join(path)}={bad!r} rendered: no refusal"
+    assert ".".join(path) in result.stderr, result.stderr
+
+
+def test_the_mariadb_replica_check_is_silent_when_no_instance_is_rendered(tmp_path):
+    """`database.create: false` renders no MariaDB CR, so its replicas is not read."""
+    overlay = write(tmp_path, {"database": {"create": False, "instance": {"replicas": "abc"}}})
+    assert render(overlay, *API).returncode == 0
+
+
+@pytest.mark.parametrize("source", ["file", "--set-string"])
+def test_port_zero_is_refused_and_one_renders(tmp_path, source):
+    path = ("database", "port")
+    for value, ok in ((0, False), (1, True)):
+        if source == "file":
+            result = render(write(tmp_path, overlay_for(path, value)))
+        else:
+            result = helm(*set_args(path, "--set-string", str(value)))
+        if ok:
+            assert result.returncode == 0, result.stderr
+            assert env_value(result.stdout, "DB_PORT") == f'"{value}"'
+        else:
+            assert result.returncode != 0, "port 0 rendered"
+            assert "database.port" in result.stderr and "at least 1" in result.stderr, result.stderr

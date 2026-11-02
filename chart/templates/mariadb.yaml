@@ -90,7 +90,7 @@ spec:
     key: password
     generate: true
 
-  replicas: {{ .Values.database.instance.replicas }}
+  replicas: {{ .Values.database.instance.replicas | int64 }}
 
   storage:
     size: {{ .Values.database.instance.storage.size | quote }}
