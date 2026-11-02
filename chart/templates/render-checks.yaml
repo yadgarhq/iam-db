@@ -438,15 +438,25 @@ and parses a string with a leading zero as octal (`0123` to 83, `08` to 0), so a
 string is at most 18 digits with no leading zero and a number is below 1e18. A string
 of digits stays valid (`--set-string replicaCount=2` is accepted by design, ADR-0847),
 and so does any non-negative whole number in range. `database.port` is also refused
-above 65535, the largest TCP port. This block comes last: `database` and `autoscaling` are
+above 65535, the largest TCP port, and below 1: port 0 listens on nothing. The four replica
+counts (`replicaCount`, `autoscaling.minReplicas`, `autoscaling.maxReplicas` and, while
+`database.create` is true, `database.instance.replicas`) are also refused above 2147483647,
+the int32 field Kubernetes stores a replica count in (yaadgaar 482); `templates/deployment.yaml`,
+`scaledobject.yaml` and `mariadb.yaml` render them through `int64`, so a values-file 1000000
+prints `1000000` and not `1e+06`. This block comes last: `database` and `autoscaling` are
 confirmed maps by the blocks above, so a missing key reads as nil and is refused too.
 */}}
-{{- range $key, $value := dict
+{{- $checks := dict
       "database.port" .Values.database.port
       "database.maxConnections" .Values.database.maxConnections
       "database.engineMaxConnections" .Values.database.engineMaxConnections
       "replicaCount" .Values.replicaCount
+      "autoscaling.minReplicas" .Values.autoscaling.minReplicas
       "autoscaling.maxReplicas" .Values.autoscaling.maxReplicas }}
+{{- if and .Values.database.create (kindIs "map" .Values.database.instance) }}
+{{- $_ := set $checks "database.instance.replicas" .Values.database.instance.replicas }}
+{{- end }}
+{{- range $key, $value := $checks }}
 {{- $whole := false }}
 {{- if kindIs "string" $value }}
 {{- $whole = regexMatch "^(0|[1-9][0-9]{0,17})$" $value }}
@@ -463,5 +473,11 @@ confirmed maps by the blocks above, so a missing key reads as nil and is refused
 {{- end }}
 {{- if and (eq $key "database.port") (gt (int64 $value) 65535) }}
 {{- fail (printf "iam-db: `database.port` must be at most 65535, the largest TCP port, and is %s." (toJson $value)) }}
+{{- end }}
+{{- if and (eq $key "database.port") (lt (int64 $value) 1) }}
+{{- fail (printf "iam-db: `database.port` must be at least 1, because port 0 listens on nothing, and is %s." (toJson $value)) }}
+{{- end }}
+{{- if and (ne $key "database.port") (ne $key "database.maxConnections") (ne $key "database.engineMaxConnections") (gt (int64 $value) 2147483647) }}
+{{- fail (printf "iam-db: `%s` must be at most 2147483647, the largest value of the int32 field Kubernetes stores a replica count in, and is %s." $key (toJson $value)) }}
 {{- end }}
 {{- end }}
