@@ -41,6 +41,12 @@ def render(*arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def refuses_missing(output: str, key: str) -> bool:
+    """Helm 3 words a required-key refusal `<key> is required`, Helm 4 words it
+    `missing property '<key>'`. Accept either, and demand the key name in it."""
+    return f"{key} is required" in output or f"missing property '{key}'" in output
+
+
 def rendered_value(manifest: str, variable: str) -> str:
     lines = manifest.splitlines()
     for i, line in enumerate(lines):
@@ -129,11 +135,37 @@ def test_a_keepalive_timeout_one_below_the_interval_renders() -> None:
     assert rendered_value(result.stdout, "LISTEN_KEEPALIVE_TIMEOUT_SECS") == 'value: "29"'
 
 
-@pytest.mark.parametrize("block", ["server", "server.limits"])
-def test_a_nulled_block_is_refused_at_render_naming_the_key(block: str) -> None:
+@pytest.mark.parametrize("block, named", [("server", "server"), ("server.limits", "limits")])
+def test_a_nulled_block_is_refused_at_render_naming_the_key(block: str, named: str) -> None:
     result = render("--set", f"{block}=null")
     assert result.returncode != 0
-    assert "limits" in result.stderr, result.stderr
+    assert refuses_missing(result.stderr, named), result.stderr
+
+
+def test_an_omitted_server_block_is_refused_by_the_schema_not_only_the_render_check() -> None:
+    """ADR-1006, yaadgaar #327 ruling 3: the root `required: [server]` refuses a values
+    set with no `server` at the schema, so `helm lint --strict` fails too. (Helm deletes
+    a null-valued key, which is how a values set ends up without one.)"""
+    result = render("--set", "server=null")
+    assert result.returncode != 0
+    assert refuses_missing(result.stderr, "server"), result.stderr
+    binary = shutil.which("helm")
+    assert binary
+    lint = subprocess.run(
+        [binary, "lint", "--strict", str(CHART), "-f", str(CI_VALUES), "--set", "server=null"],
+        capture_output=True,
+        text=True,
+    )
+    assert lint.returncode != 0, lint.stdout
+    assert refuses_missing(lint.stdout + lint.stderr, "server"), lint.stdout + lint.stderr
+
+
+def test_the_shipped_defaults_still_render_with_the_server_block_required() -> None:
+    """Fail-closed guard: requiring `server` must not stop the chart rendering its own
+    defaults. `chart/values.yaml` ships the block, so a values set that says nothing about
+    `server` renders."""
+    result = render()
+    assert result.returncode == 0, result.stderr
 
 
 def test_an_unknown_limit_is_refused_at_render() -> None:
