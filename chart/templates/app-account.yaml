@@ -1,0 +1,58 @@
+{{/*
+THE APP ACCOUNT, A User AND A Grant THE CHART OWNS (yaadgaar #411, ADR-1141 rules 1 and 6),
+behind `database.create` AND `database.createAppAccount`.
+
+mariadb-operator 26.6.0 creates the account named by `database.user` itself, from
+`MariaDB.spec.username`, with `maxUserConnections: 20` and no knob to change it
+(`mariadb_controller.go:919-962`). This is a second account whose cap the chart
+computes (`templates/_app_account.tpl`) from the pool and replica knobs.
+
+THE SAME SHAPE AS THE OPERATOR'S OWN PAIR, so the two accounts differ only in name,
+password and cap: host `%`, ALL PRIVILEGES on `<database>.*`, no grant option.
+`cleanupPolicy` and `inheritMetadata` are copied by the operator from the MariaDB
+spec, and `templates/mariadb.yaml` sets neither, so neither is set here.
+
+THE PASSWORD SECRET IS NOT RENDERED. `templates/app-password-hook.yaml` creates it
+in-cluster, once (ADR-1141 rule 3), before this User is applied.
+
+THE POD DOES NOT USE THIS ACCOUNT YET (ADR-1141 rule 7). `DB_USER` is still
+`database.user`; the cutover is a separate change.
+*/}}
+{{- if and .Values.database.create .Values.database.createAppAccount }}
+apiVersion: k8s.mariadb.com/v1alpha1
+kind: User
+metadata:
+  name: {{ printf "%s-app" .Values.database.host | quote }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  name: {{ .Values.database.appUser | quote }}
+  mariaDbRef:
+    name: {{ .Values.database.host | quote }}
+  passwordSecretKeyRef:
+    name: {{ .Values.database.appPasswordSecret | quote }}
+    key: password
+  host: "%"
+  maxUserConnections: {{ include "iam-db.appMaxUserConnections" . }}
+---
+apiVersion: k8s.mariadb.com/v1alpha1
+kind: Grant
+metadata:
+  name: {{ printf "%s-app-all" .Values.database.host | quote }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  mariaDbRef:
+    name: {{ .Values.database.host | quote }}
+  privileges:
+    - ALL PRIVILEGES
+  database: {{ .Values.database.name | quote }}
+  table: "*"
+  username: {{ .Values.database.appUser | quote }}
+  host: "%"
+  grantOption: false
+{{- end }}

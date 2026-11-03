@@ -117,6 +117,15 @@
           "description": "Seconds a replica waits for another one's migration before failing its boot. Rendered as DB_MIGRATION_LOCK_TIMEOUT_SECONDS and read with no fallback. Minimum 1: GET_LOCK with 0 never waits and with a negative wait never takes the lock. Maximum 590: see chart/values.yaml."
         },
         "create": {},
+        "createAppAccount": {},
+        "appUser": {},
+        "appPasswordSecret": {},
+        "appPasswordJob": {
+          "properties": {
+            "image": {}
+          },
+          "additionalProperties": false
+        },
         "mariadbOperator": {
           "properties": {
             "apiVersion": {}

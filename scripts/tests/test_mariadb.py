@@ -72,7 +72,9 @@ EXPECTED_DEFAULT_KINDS = {
     "ServiceAccount": 1,
 }
 
-# The same set plus the instance, once `database.create` is true.
+# The same set plus the instance, once `database.create` is true. The app account
+# (yaadgaar #411) sits behind `database.createAppAccount` too, which defaults
+# false, so this count does not move; `test_app_account.py` covers it.
 EXPECTED_OBJECTS_WITH_THE_INSTANCE = EXPECTED_DEFAULT_OBJECTS + 1
 
 MARIADB_API_VERSION = "k8s.mariadb.com/v1alpha1"

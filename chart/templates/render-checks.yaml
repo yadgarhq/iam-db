@@ -497,3 +497,110 @@ While autoscaling is off the knob is not read, and `replicaCount: 0` stays legal
       (toJson .Values.autoscaling.minReplicas)) }}
 {{- end }}
 {{- end }}
+{{- /*
+THE APP ACCOUNT (yaadgaar #411, ADR-1141 rules 1, 2, 5 and 6), behind `database.create`,
+the toggle that renders it. Placed after the whole-number check above, so the knobs the
+cap is computed from are confirmed whole numbers.
+
+  - `appUser` and `appPasswordSecret` must be non-empty strings. `kindIs "string"` comes
+    before any `eq`, because `eq` between a string and a number is a raise, not a refusal.
+  - `appUser` must match `^[a-z][a-z0-9_]{0,31}$`, a MariaDB user name with no quote.
+  - `appUser` must differ from `user`, and `appPasswordSecret` from `passwordSecret`:
+    two accounts on one password, or one account under two caps, is what ADR-1141 rules
+    out.
+  - `appPasswordSecret` must be a DNS-1123 subdomain: it is a Secret name, and it is
+    written into the hook Job's script, so only a name's characters may reach it.
+  - `appPasswordJob.image` must be pinned by digest: that Job mints a credential.
+  - The computed `maxUserConnections` must fit `engineMaxConnections - engineOperatorReserve`,
+    the same headroom `yadgar-store` checks the pool against at boot.
+
+BEHIND BOTH TOGGLES. `database.createAppAccount` defaults false even where `database.create`
+is on, because the parent chart sets `create: true` and keeps literal registries of every
+object it renders: its `pre_pin_parent` gate could never pass a pin that added objects at
+its settings. The parent turns `createAppAccount` on in the PR that updates those literals.
+The toggle's own shape is guarded first, behind `create`, by ADR-0797/ADR-0850's two-part
+test: `"false"` would otherwise read as ON.
+
+Not counted by `scripts/tests/test_render_checks.py`'s `EXPECTED_RENDER_CHECKS`: these are
+value checks, like the `server.limits` ones above.
+*/}}
+{{- if .Values.database.create }}
+{{- if not (hasKey .Values.database "createAppAccount") }}
+{{- fail (join "" (list
+      "iam-db: `database.createAppAccount` is absent. This chart's `values.yaml` declares it "
+      "false, so it is missing only when a values file wrote `createAppAccount:` with NO VALUE "
+      "— helm deletes a null-valued key a chart declares and restores no default. Write "
+      "`database.createAppAccount: false` to leave the app account uncreated, or `true`.")) }}
+{{- end }}
+{{- if not (kindIs "bool" .Values.database.createAppAccount) }}
+{{- fail (printf (join "" (list
+      "iam-db: `database.createAppAccount` must be true or false and is %s (%s). The "
+      "templates gate on bare truthiness, so \"false\" would CREATE the app account. "
+      "Write the bare word `true` or `false`."))
+      (kindOf .Values.database.createAppAccount) (toJson .Values.database.createAppAccount)) }}
+{{- end }}
+{{- end }}
+{{- if and .Values.database.create .Values.database.createAppAccount }}
+{{- $db := .Values.database }}
+{{- range $key := list "appUser" "appPasswordSecret" }}
+{{- $value := get $db $key }}
+{{- if not (and (kindIs "string" $value) $value) }}
+{{- fail (printf (join "" (list
+      "iam-db: `database.%s` must be a non-empty string while `database.create` is true, "
+      "and is %s (%s). The chart renders the app account's User and its password Secret "
+      "from it (ADR-1141)."))
+      $key (kindOf $value) (toJson $value)) }}
+{{- end }}
+{{- end }}
+{{- /* Nested: `helm lint` logs a `fail` and keeps going, and `eq` on a non-string raises. */}}
+{{- if and (kindIs "string" $db.appUser) (kindIs "string" $db.appPasswordSecret) }}
+{{- if not (regexMatch "^[a-z][a-z0-9_]{0,31}$" $db.appUser) }}
+{{- fail (printf (join "" (list
+      "iam-db: `database.appUser` must be a MariaDB user name of 1 to 32 characters: a "
+      "lowercase letter, then lowercase letters, digits or `_`. It is %s. No quote or other "
+      "character may reach the account the operator creates from it."))
+      (toJson $db.appUser)) }}
+{{- end }}
+{{- if eq $db.appUser (toString $db.user) }}
+{{- fail (printf (join "" (list
+      "iam-db: `database.appUser` (%s) must differ from `database.user`. `database.user` is "
+      "the account mariadb-operator creates with its own cap of 20; the app account is a "
+      "second one with a computed cap (ADR-1141 rule 1)."))
+      (toJson $db.appUser)) }}
+{{- end }}
+{{- if eq $db.appPasswordSecret (toString $db.passwordSecret) }}
+{{- fail (printf (join "" (list
+      "iam-db: `database.appPasswordSecret` (%s) must differ from `database.passwordSecret`. "
+      "Sharing it would give two accounts one password (ADR-1141 rule 2)."))
+      (toJson $db.appPasswordSecret)) }}
+{{- end }}
+{{- if not (and (le (len $db.appPasswordSecret) 253) (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $db.appPasswordSecret)) }}
+{{- fail (printf (join "" (list
+      "iam-db: `database.appPasswordSecret` must be a DNS-1123 subdomain (lowercase letters, "
+      "digits, `-` and `.`, at most 253 characters), and is %s. It names a Secret."))
+      (toJson $db.appPasswordSecret)) }}
+{{- end }}
+{{- end }}
+{{- $image := "" }}
+{{- if kindIs "map" $db.appPasswordJob }}
+{{- $image = $db.appPasswordJob.image }}
+{{- end }}
+{{- if not (and (kindIs "string" $image) (regexMatch "^[^@[:space:]]+@sha256:[0-9a-f]{64}$" $image)) }}
+{{- fail (printf (join "" (list
+      "iam-db: `database.appPasswordJob.image` must be pinned by digest "
+      "(`<repository>@sha256:<64 hex>`), and is %s. The hook Job it names mints the app "
+      "account's password, and a tag is a moving pointer."))
+      (toJson $image)) }}
+{{- end }}
+{{- $cap := include "iam-db.appMaxUserConnections" . | int64 }}
+{{- $headroom := sub (int64 $db.engineMaxConnections) (int64 $db.engineOperatorReserve) }}
+{{- if gt $cap $headroom }}
+{{- fail (printf (join "" (list
+      "iam-db: the app account's maxUserConnections, %d = (max(autoscaling.maxReplicas, "
+      "replicaCount) + rollingUpdate.maxSurge) x database.maxConnections + 1, is above "
+      "`database.engineMaxConnections` - `database.engineOperatorReserve` = %d. The engine "
+      "could not serve every connection the account may open. Lower the pool or the "
+      "replica knobs, or raise the engine's ceiling (ADR-1141 rule 6)."))
+      $cap $headroom) }}
+{{- end }}
+{{- end }}
