@@ -481,3 +481,19 @@ confirmed maps by the blocks above, so a missing key reads as nil and is refused
 {{- fail (printf "iam-db: `%s` must be at most 2147483647, the largest value of the int32 field Kubernetes stores a replica count in, and is %s." $key (toJson $value)) }}
 {{- end }}
 {{- end }}
+{{- /*
+AUTOSCALING FLOOR, D55 (yaadgaar 482, ruled 2026-11-03). `autoscaling.minReplicas` feeds KEDA's
+`minReplicaCount`, and D55 makes at least two pods a correctness property, not a tuning choice.
+Refused below 2 while `autoscaling.enabled` is true. Placed after the whole-number check above, so
+`int64` reads a confirmed whole number; `autoscaling.enabled` is a confirmed bool by the shape blocks.
+While autoscaling is off the knob is not read, and `replicaCount: 0` stays legal (scale to zero).
+*/}}
+{{- if .Values.autoscaling.enabled }}
+{{- if lt (int64 .Values.autoscaling.minReplicas) 2 }}
+{{- fail (printf (join "" (list
+      "iam-db: `autoscaling.minReplicas` must be at least 2 while `autoscaling.enabled` is true, and is %s. "
+      "It renders as the ScaledObject's `minReplicaCount`, and below 2 the service can run on one pod or "
+      "none, which D55 forbids. Write 2 or more, or set `autoscaling.enabled: false`."))
+      (toJson .Values.autoscaling.minReplicas)) }}
+{{- end }}
+{{- end }}

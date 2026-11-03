@@ -371,3 +371,33 @@ def test_port_zero_is_refused_and_one_renders(tmp_path, source):
         else:
             assert result.returncode != 0, "port 0 rendered"
             assert "database.port" in result.stderr and "at least 1" in result.stderr, result.stderr
+
+
+# --- 482 item 2: autoscaling.minReplicas >= 2 while autoscaling is on (D55) --------
+# RULED 2026-11-03: D55 makes two pods a correctness property, so KEDA `minReplicaCount`
+# below 2 is refused at render. `replicaCount: 0` stays legal while autoscaling is off.
+
+
+def min_overlay(value) -> dict:
+    return {"autoscaling": {"enabled": True, "minReplicas": value}}
+
+
+@pytest.mark.parametrize("value", [0, 1, "0", "1"], ids=repr)
+def test_autoscaling_on_with_min_replicas_below_two_is_refused_by_name(tmp_path, value):
+    result = render(write(tmp_path, min_overlay(value)), *API)
+    assert result.returncode != 0, f"minReplicas={value!r} rendered: no refusal"
+    assert "autoscaling.minReplicas" in result.stderr and "at least 2" in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize("value", [2, 3, "2"], ids=repr)
+def test_autoscaling_on_with_min_replicas_two_or_more_renders(tmp_path, value):
+    result = render(write(tmp_path, min_overlay(value)), *API)
+    assert result.returncode == 0, result.stderr
+    assert rendered_field(result.stdout, "ScaledObject", ("spec", "minReplicaCount")) == int(value)
+
+
+def test_the_min_replicas_floor_is_not_read_while_autoscaling_is_off(tmp_path):
+    body = {"autoscaling": {"enabled": False, "minReplicas": 0}, "replicaCount": 0}
+    result = render(write(tmp_path, body), *API)
+    assert result.returncode == 0, result.stderr
+    assert rendered_field(result.stdout, "Deployment", ("spec", "replicas")) == 0
