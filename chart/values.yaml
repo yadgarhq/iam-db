@@ -234,9 +234,11 @@ database:
   # 2026-10-24; the MariaDB CRD has no knob for it). 3 x 6 (`autoscaling.maxReplicas`)
   # = 18 fits; the old 8 x 6 = 48 did not, and `store` now refuses that at boot
   # (`PoolError::WouldExceedUserCap`). Raising this or the replica ceiling needs
-  # the account's limit raised first — a chart-owned User CR is the follow-up.
-  # NOT YET SAFE MID-ROLL: a roll at the KEDA ceiling with `maxSurge: 1` runs
-  # 7 pods x 3 = 21, over 20 (tracked in yaadgaar #411).
+  # the account's limit raised first. The chart-owned app account below
+  # (`appUser`, yaadgaar #411) computes its cap from these knobs, but the pod
+  # does not connect as it until the cutover (ADR-1141 rule 7), so until then
+  # the operator's 20 still binds. NOT YET SAFE MID-ROLL on that account: a
+  # roll at the KEDA ceiling with `maxSurge: 1` runs 7 pods x 3 = 21, over 20.
   maxConnections: 3
   engineMaxConnections: 151
 
@@ -336,6 +338,44 @@ database:
   # is the gate that keeps the two one.
   mariadbOperator:
     apiVersion: k8s.mariadb.com/v1alpha1
+
+  # ── THE APP ACCOUNT THIS CHART OWNS (yaadgaar #411, ADR-1141) ──────────────
+  #
+  # Rendered only while `create` above AND `createAppAccount` are both true. OFF
+  # BY DEFAULT, even where `create` is on: the parent chart sets `create: true`
+  # and keeps literal registries of every object it renders, so it turns this on
+  # in the PR that updates them, after this chart's pin lands.
+  createAppAccount: false
+  #
+  # What it renders: a MariaDB `User` and `Grant`
+  # for `appUser`, and a PreSync hook Job that creates `appPasswordSecret`
+  # once, when it is absent, and never reads, rotates or overwrites it.
+  #
+  # THE POD DOES NOT USE IT YET. `DB_USER` and the mounted Secret stay `user`
+  # and `passwordSecret` until a separate cutover (ADR-1141 rule 7).
+  #
+  # The User's `maxUserConnections` is COMPUTED, never written here:
+  # (max(autoscaling.maxReplicas, replicaCount) + rollingUpdate.maxSurge)
+  #   x maxConnections + 1
+  # The max is taken whatever `autoscaling.enabled` says, so the cap covers the
+  # KEDA ceiling before autoscaling is on. A percentage `maxSurge` is rounded
+  # up against that replica count, as Kubernetes rounds it; an absent one is
+  # Kubernetes' own 25%. `templates/render-checks.yaml` refuses a result above
+  # `engineMaxConnections - engineOperatorReserve`.
+  #
+  # MUST DIFFER FROM `user` and `passwordSecret`; a render check refuses
+  # either equality, and an empty value.
+  appUser: iam_app
+  appPasswordSecret: iam-db-app-password
+  appPasswordJob:
+    # curl and a shell, not kubectl: a `kubectl` image is distroless and
+    # cannot run the create-if-absent script, and the API is REST. The same
+    # image, at the same manifest-list digest, as `yadgarhq/platform`'s
+    # `bootstrap.image`. PINNED BY DIGEST: this Job mints a credential. The
+    # Job runs it as UID/GID 100 and needs `sh`, `curl`, `head`, `base64`,
+    # `tr` and `wc`. A value so a mirrored registry can move it.
+    # curlimages/curl:8.16.0
+    image: curlimages/curl@sha256:463eaf6072688fe96ac64fa623fe73e1dbe25d8ad6c34404a669ad3ce1f104b6
 
   # THE ENGINE-SIDE KNOBS. Each is rendered into the MariaDB object, and
   # `test_mariadb.py` asserts that each one reaches it — a knob offered here that the

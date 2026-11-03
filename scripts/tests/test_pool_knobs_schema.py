@@ -188,10 +188,9 @@ def test_a_nulled_database_block_is_still_refused_at_render() -> None:
 # writes `maxUserConnections: 20` on the User it creates from
 # `MariaDB.spec.username` (measured live on kind-yadgar, 2026-10-24), and the
 # MariaDB CRD has no knob for it. `yadgar-store` refuses at boot when
-# maxConnections x REPLICAS exceeds that cap. So the shipped pool, at the most
-# replicas this chart can run, must fit 20 — or a default install crash-loops
-# once it takes the store release carrying that check. A chart-owned User CR
-# with a computed cap is the follow-up (yaadgaar #411).
+# maxConnections x REPLICAS exceeds that cap. The pod connects as that account
+# until the cutover to the app account below (ADR-1141 rule 7), so the shipped
+# pool, at the most replicas this chart can run, must still fit 20.
 OPERATOR_WRITTEN_USER_CAP = 20
 
 
@@ -205,6 +204,39 @@ def test_the_shipped_pool_fits_the_operator_written_user_cap() -> None:
         f"database.maxConnections {pool} x {replicas} replicas = {pool * replicas} "
         f"exceeds the operator-written MAX_USER_CONNECTIONS {OPERATOR_WRITTEN_USER_CAP}"
     )
+
+
+# THE APP ACCOUNT'S CAP (ADR-1141, yaadgaar #411). The chart owns the app
+# account's User and computes its `maxUserConnections` as
+# (max(autoscaling.maxReplicas, replicaCount) + rollingUpdate.maxSurge) x
+# database.maxConnections + 1. At the shipped values that is (6 + 1) x 3 + 1.
+# `test_app_account.py` varies each input; this pins the shipped number.
+SHIPPED_APP_USER_CAP = 22
+
+
+def test_the_shipped_app_user_cap_is_computed_from_the_pool() -> None:
+    import yaml
+
+    result = render(
+        "--set",
+        "database.create=true",
+        "--set",
+        "database.createAppAccount=true",
+        "--api-versions",
+        "k8s.mariadb.com/v1alpha1",
+    )
+    assert result.returncode == 0, result.stderr
+    (user,) = [
+        d
+        for d in yaml.safe_load_all(result.stdout)
+        if isinstance(d, dict) and d.get("kind") == "User"
+    ]
+    values = yaml.safe_load((CHART / "values.yaml").read_text())
+    replicas = max(values["autoscaling"]["maxReplicas"], values["replicaCount"])
+    surge = values["rollingUpdate"]["maxSurge"]
+    pool = values["database"]["maxConnections"]
+    assert (replicas + surge) * pool + 1 == SHIPPED_APP_USER_CAP
+    assert user["spec"]["maxUserConnections"] == SHIPPED_APP_USER_CAP
 
 
 def test_the_shipped_pool_is_three_per_replica() -> None:
