@@ -953,3 +953,138 @@ async fn an_off_listener_hands_the_gate_no_name_and_the_gate_refuses() {
         Ok(Some(PERMISSION_DENIED.to_string()))
     );
 }
+
+// ---------------------------------------------------------------------------
+// THE GATE ON EVERY RPC, NOT ONE (yaadgaar #190, ledger 1729).
+//
+// The cases above prove the transport half on `GetKeyIdentity` only. A trait
+// method in `handlers.rs` that hands its `_as` twin anything but the name it
+// read off the request — `Some(IAM_CALLER)`, say — passes them, and passes
+// `tests/caller_gate.rs` too, because that suite drives the twins and never
+// the trait methods. So the case below asks every RPC the contract declares.
+// ---------------------------------------------------------------------------
+
+/// The vendored contract this binary is generated from (`build.rs`).
+const IAMDB_PROTO: &str = include_str!("../proto/yadgar/iamdb/v1/iamdb.proto");
+
+/// Every RPC `IamDbService` declares, read from the vendored contract, so an
+/// RPC added there is asked here with no edit to this file.
+///
+/// Refuses a streaming RPC rather than skipping it: the single empty frame
+/// below is a unary request, and a case that silently left a verb out would be
+/// the gap this one closes.
+fn iamdb_rpcs() -> Vec<String> {
+    let body = IAMDB_PROTO
+        .split_once("service IamDbService {")
+        .expect("the contract declares `service IamDbService`")
+        .1;
+    let body = &body[..body.find("\n}").expect("the service block closes")];
+    let rpcs: Vec<String> = body
+        .lines()
+        .map(str::trim)
+        .filter_map(|l| l.strip_prefix("rpc "))
+        .map(|l| {
+            assert!(
+                !l.contains("stream "),
+                "a streaming RPC needs its own case here: {l}"
+            );
+            l.split('(').next().unwrap().trim().to_string()
+        })
+        .collect();
+    // 20 when this was written. A parse that lost the block finds fewer, and a
+    // loop over nothing asserts nothing.
+    assert!(
+        rpcs.len() >= 20 && rpcs.iter().any(|r| r == "GetKeyIdentity"),
+        "the RPC list read from the contract looks wrong: {rpcs:?}"
+    );
+    rpcs
+}
+
+/// Call `rpc` with one empty frame and return the status the server answered
+/// in its HEADERS. A refusal by the gate is a trailers-only response, so it is
+/// there; `None` means the call was not refused before the body.
+async fn rpc_status(
+    port: u16,
+    tls: ClientTlsConfig,
+    rpc: &str,
+) -> Result<Option<tonic::Status>, String> {
+    let mut channel = Endpoint::from_shared(format!("https://{SERVED_NAME}:{port}"))
+        .unwrap()
+        .connect_timeout(Duration::from_secs(5))
+        .tls_config(tls)
+        .map_err(|e| format!("{e}"))?
+        .connect_lazy();
+
+    let frame = http_body_util::Full::new(tonic::codegen::Bytes::from_static(&[0, 0, 0, 0, 0]));
+    let req = http::Request::builder()
+        .version(http::Version::HTTP_2)
+        .method("POST")
+        .uri(format!(
+            "https://{SERVED_NAME}/yadgar.iamdb.v1.IamDbService/{rpc}"
+        ))
+        .header("content-type", "application/grpc")
+        .header("te", "trailers")
+        .body(tonic::body::Body::new(frame))
+        .unwrap();
+
+    std::future::poll_fn(|cx| channel.poll_ready(cx))
+        .await
+        .map_err(|e| format!("{e}"))?;
+    match tokio::time::timeout(Duration::from_secs(10), channel.call(req)).await {
+        Err(_) => Err("the request timed out".to_string()),
+        Ok(Err(e)) => Err(format!("{e}")),
+        Ok(Ok(resp)) => Ok(tonic::Status::from_header_map(resp.headers())),
+    }
+}
+
+/// Whether `status` is the caller gate's refusal. Matched on the MESSAGE, not
+/// on `PERMISSION_DENIED` alone: `CreateEnrolment`'s bootstrap-demand path
+/// answers that code too (see `CALLER_REFUSED`'s doc), so the code by itself
+/// cannot say the gate refused.
+fn is_the_gate(status: &tonic::Status) -> bool {
+    status.code() == tonic::Code::PermissionDenied
+        && status.message().contains("iam-db admits only iam")
+}
+
+/// A listener verifying callers against `client`'s authority, serving the
+/// real service.
+async fn serve_verifying(client: &ClientPki, p: &Pki) -> (u16, TempPem, TempPem, TempPem) {
+    let cert = TempPem::with(&p.cert_pem);
+    let key = TempPem::with(&p.key_pem);
+    let ca = TempPem::with(&client.ca_pem);
+    let tls = configured_with(cert.path(), key.path(), "required", Some(ca.path()));
+    (serve_the_service(&tls).await, cert, key, ca)
+}
+
+/// A leaf the configured authority signed, naming ANOTHER module, is refused
+/// by the gate on EVERY RPC — and the refusal names that leaf, so the name
+/// reached the gate from the handshake. The `iam` leaf is refused by the gate
+/// on none of them: the positive control, without which a server refusing
+/// everything would pass. An admitted call then fails on the closed store, or
+/// on its own validation, with anything but the gate's refusal.
+#[tokio::test]
+async fn every_rpc_refuses_a_leaf_naming_another_module_and_admits_iam_s() {
+    let p = pki(SERVED_NAME);
+    let other = client_pki_named("task-caller");
+    let iam = client_pki_named(yadgar_iam_db::service::IAM_CALLER);
+    let (other_port, _o1, _o2, _o3) = serve_verifying(&other, &p).await;
+    let (iam_port, _i1, _i2, _i3) = serve_verifying(&iam, &p).await;
+
+    let mut failures = Vec::new();
+    for rpc in iamdb_rpcs() {
+        match rpc_status(other_port, presenting(&p.ca_pem, &other), &rpc).await {
+            Ok(Some(s)) if is_the_gate(&s) && s.message().contains("\"task-caller\"") => {}
+            got => failures.push(format!(
+                "{rpc}: the gate did not refuse task-caller: {got:?}"
+            )),
+        }
+        match rpc_status(iam_port, presenting(&p.ca_pem, &iam), &rpc).await {
+            Ok(Some(s)) if is_the_gate(&s) => {
+                failures.push(format!("{rpc}: the gate refused iam-caller: {s:?}"))
+            }
+            Ok(_) => {}
+            Err(e) => failures.push(format!("{rpc}: iam-caller got no answer: {e}")),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
