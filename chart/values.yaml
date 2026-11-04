@@ -350,6 +350,10 @@ database:
   # What it renders: a MariaDB `User` and `Grant`
   # for `appUser`, and a PreSync hook Job that creates `appPasswordSecret`
   # once, when it is absent, and never reads, rotates or overwrites it.
+  # Before the hook, a cluster-scoped ValidatingAdmissionPolicy and binding
+  # (`templates/app-password-policy.yaml`, yaadgaar #566) limit the hook
+  # account to creating that one Secret. They need Kubernetes 1.30 or later
+  # and a deployer allowed to create cluster-scoped admission objects.
   #
   # THE POD DOES NOT USE IT YET. `DB_USER` and the mounted Secret stay `user`
   # and `passwordSecret` until a separate cutover (ADR-1142 rule 9).
