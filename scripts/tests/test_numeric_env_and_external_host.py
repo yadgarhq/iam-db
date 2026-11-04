@@ -401,3 +401,155 @@ def test_the_min_replicas_floor_is_not_read_while_autoscaling_is_off(tmp_path):
     result = render(write(tmp_path, body), *API)
     assert result.returncode == 0, result.stderr
     assert rendered_field(result.stdout, "Deployment", ("spec", "replicas")) == 0
+
+
+# --- 550: the grace period, the preStop sleep and maxSkew ------------------------
+# `templates/deployment.yaml` renders all three through `| int64` (yaadgaar 550). `int64`
+# bends rather than refuses (1.5 to 1, "035" to 29, "abc" to 0), so the whole-number
+# check in `templates/render-checks.yaml` runs BEFORE the cast. All three are bounded at
+# 999999, and `maxSkew` is refused below 1 (the API requires it greater than zero).
+
+TIMING = ["terminationGracePeriodSeconds", "preStopSleepSeconds"]
+SKEW = "topologySpread.maxSkew"
+REFUSED_TIMING = [1000000, 1.5, -1, "abc", "035", "0123", "", 1e18, 1e20, True]
+REFUSED_SKEW = [0, "0", 1000000, 1.5, -1, "abc", "035", "", 1e20, None]
+
+
+def pod_spec(stdout: str) -> dict:
+    return rendered_field(stdout, "Deployment", ("spec", "template", "spec"))
+
+
+def skew_overlay(value) -> dict:
+    return {"topologySpread": {"enabled": True, "maxSkew": value}}
+
+
+def refused_naming(result: subprocess.CompletedProcess[str], key: str, needle: str) -> None:
+    assert result.returncode != 0, f"{key}: rendered, no refusal"
+    assert f"`{key}`" in result.stderr and needle in result.stderr, result.stderr
+
+
+def test_the_shipped_grace_period_sleep_and_skew_render():
+    """35, 5 and 1 from `values.yaml` reach the pod spec. A render line made dead (for
+    example under `{{- if false }}`) drops the field and fails here."""
+    result = helm("template", NAME, str(CHART), "-f", str(CI_VALUES))
+    assert result.returncode == 0, result.stderr
+    spec = pod_spec(result.stdout)
+    assert spec["terminationGracePeriodSeconds"] == 35
+    assert spec["containers"][0]["lifecycle"]["preStop"]["sleep"]["seconds"] == 5
+    assert spec["topologySpreadConstraints"][0]["maxSkew"] == 1
+
+
+@pytest.mark.parametrize("value", [1, 35, 999999, "35", 35.0, 3.5e1], ids=repr)
+def test_a_whole_grace_period_and_sleep_render_as_that_integer(tmp_path, value):
+    result = render(write(tmp_path, {"terminationGracePeriodSeconds": value, "preStopSleepSeconds": value}))
+    assert result.returncode == 0, result.stderr
+    spec = pod_spec(result.stdout)
+    assert spec["terminationGracePeriodSeconds"] == int(value)
+    assert spec["containers"][0]["lifecycle"]["preStop"]["sleep"]["seconds"] == int(value)
+
+
+@pytest.mark.parametrize("value", [None, 0], ids=repr)
+def test_a_null_or_zero_grace_period_and_sleep_render_no_field(tmp_path, value):
+    """`with` skips nil and 0, so neither field renders and kubelet's defaults apply."""
+    result = render(write(tmp_path, {"terminationGracePeriodSeconds": value, "preStopSleepSeconds": value}))
+    assert result.returncode == 0, result.stderr
+    spec = pod_spec(result.stdout)
+    assert "terminationGracePeriodSeconds" not in spec
+    assert "lifecycle" not in spec["containers"][0]
+
+
+@pytest.mark.parametrize("bad", REFUSED_TIMING, ids=repr)
+@pytest.mark.parametrize("key", TIMING)
+def test_a_grace_period_or_sleep_that_is_not_a_whole_number_in_range_is_refused(tmp_path, key, bad):
+    result = render(write(tmp_path, {key: bad}))
+    assert result.returncode != 0, f"{key}={bad!r} rendered: no refusal"
+    assert f"`{key}`" in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize("key", TIMING)
+def test_a_grace_period_or_sleep_above_999999_is_refused_and_999999_renders(tmp_path, key):
+    refused_naming(render(write(tmp_path, {key: 1000000})), key, "at most 999999")
+    assert render(write(tmp_path, {key: 999999})).returncode == 0
+
+
+@pytest.mark.parametrize(("value", "ok"), [("35", True), ("035", False), ("1.5", False),
+                                           ("-1", False), ("abc", False), ("1000000", False)])
+@pytest.mark.parametrize("flag", ["--set-string", "--set"])
+@pytest.mark.parametrize("key", TIMING)
+def test_a_grace_period_or_sleep_given_on_the_command_line_is_checked_too(key, flag, value, ok):
+    result = helm("template", NAME, str(CHART), "-f", str(CI_VALUES), flag, f"{key}={value}")
+    if ok:
+        assert result.returncode == 0, result.stderr
+    else:
+        assert result.returncode != 0, f"{flag} {key}={value} rendered: no refusal"
+        assert f"`{key}`" in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize("value", [1, 2, 999999, "2", 2.0], ids=repr)
+def test_a_whole_max_skew_from_one_to_999999_renders(tmp_path, value):
+    result = render(write(tmp_path, skew_overlay(value)))
+    assert result.returncode == 0, result.stderr
+    assert pod_spec(result.stdout)["topologySpreadConstraints"][0]["maxSkew"] == int(value)
+
+
+@pytest.mark.parametrize("bad", REFUSED_SKEW, ids=repr)
+def test_a_max_skew_that_is_not_a_whole_number_from_one_to_999999_is_refused(tmp_path, bad):
+    result = render(write(tmp_path, skew_overlay(bad)))
+    assert result.returncode != 0, f"maxSkew={bad!r} rendered: no refusal"
+    assert f"`{SKEW}`" in result.stderr, result.stderr
+
+
+def test_a_max_skew_below_one_is_refused_and_above_999999_is_refused(tmp_path):
+    refused_naming(render(write(tmp_path, skew_overlay(0))), SKEW, "at least 1")
+    refused_naming(render(write(tmp_path, skew_overlay(1000000))), SKEW, "at most 999999")
+
+
+@pytest.mark.parametrize(("value", "ok"), [("2", True), ("0", False), ("035", False),
+                                           ("1.5", False), ("abc", False), ("1000000", False)])
+@pytest.mark.parametrize("flag", ["--set-string", "--set"])
+def test_a_max_skew_given_on_the_command_line_is_checked_too(flag, value, ok):
+    result = helm("template", NAME, str(CHART), "-f", str(CI_VALUES), flag, f"{SKEW}={value}")
+    if ok:
+        assert result.returncode == 0, result.stderr
+    else:
+        assert result.returncode != 0, f"{flag} {SKEW}={value} rendered: no refusal"
+        assert f"`{SKEW}`" in result.stderr, result.stderr
+
+
+def test_the_max_skew_is_not_read_while_the_spread_is_off(tmp_path):
+    result = render(write(tmp_path, {"topologySpread": {"enabled": False, "maxSkew": 1.5}}))
+    assert result.returncode == 0, result.stderr
+    assert "topologySpreadConstraints" not in pod_spec(result.stdout)
+
+
+DEPLOYMENT = CHART / "templates" / "deployment.yaml"
+# (any line that renders the key, the one form that line must take). The first is
+# anchored to a whole line with re.M, and the second must re.fullmatch that line, so a
+# cast copy in a comment line or in a trailing comment does not count.
+CAST_SITES = {
+    "grace": (
+        r"^[ \t]*terminationGracePeriodSeconds: \{\{.*$",
+        r"[ \t]*terminationGracePeriodSeconds: \{\{ \. \| int64 \}\}",
+    ),
+    "preStop": (
+        r"^[ \t]*seconds: \{\{.*$",
+        r"[ \t]*seconds: \{\{ \. \| int64 \}\}",
+    ),
+    "maxSkew": (
+        r"^[ \t]*- maxSkew: \{\{.*$",
+        r"[ \t]*- maxSkew: \{\{ \.Values\.topologySpread\.maxSkew \| int64 \}\}",
+    ),
+}
+
+
+@pytest.mark.parametrize("site", CAST_SITES)
+def test_the_grace_period_pre_stop_sleep_and_skew_render_through_int64(site):
+    """Cast, like every other numeric knob (yaadgaar 550). The chart-baseline gate reads
+    `| int64` since yadgarhq/actions v1.64.0. `| int` is not the same cast and does not
+    count. Every value the check in render-checks.yaml admits renders the same bytes with
+    or without the cast, so this pin is the test that holds the cast in place. Mirrors
+    yadgarhq/project#92."""
+    any_render, cast = CAST_SITES[site]
+    renders = re.findall(any_render, DEPLOYMENT.read_text(), re.M)
+    assert len(renders) == 1, f"{site}: expected one render line in deployment.yaml, found {renders!r}"
+    assert re.fullmatch(cast, renders[0]), f"{site}: {renders[0].strip()!r} is not cast through int64"

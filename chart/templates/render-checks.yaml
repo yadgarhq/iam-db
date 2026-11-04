@@ -450,6 +450,16 @@ the int32 field Kubernetes stores a replica count in (yaadgaar 482); `templates/
 `scaledobject.yaml` and `mariadb.yaml` render them through `int64`, so a values-file 1000000
 prints `1000000` and not `1e+06`. This block comes last: `database` and `autoscaling` are
 confirmed maps by the blocks above, so a missing key reads as nil and is refused too.
+
+THE GRACE PERIOD, THE preStop SLEEP AND maxSkew RIDE ON THE SAME LOOP (yaadgaar 550).
+`templates/deployment.yaml` renders all three through `| int64`, and `int64` turns 1.5
+into 1 and `"035"` into 29 without a word, so this check runs before the cast. All three
+are bounded at 999999, the largest value a float64 prints without an exponent, and
+`topologySpread.maxSkew` is refused below 1 (the API requires it greater than zero).
+`terminationGracePeriodSeconds` and `preStopSleepSeconds` sit behind `with`, which skips
+nil and 0, so each is checked only when its key is present and not null.
+`topologySpread.maxSkew` is read only while `topologySpread` is a map and `enabled` is
+true, so a bad skew in a spread that is off changes nothing and is not refused.
 */}}
 {{- $checks := dict
       "database.port" .Values.database.port
@@ -461,6 +471,19 @@ confirmed maps by the blocks above, so a missing key reads as nil and is refused
 {{- if and .Values.database.create (kindIs "map" .Values.database.instance) }}
 {{- $_ := set $checks "database.instance.replicas" .Values.database.instance.replicas }}
 {{- end }}
+{{- if and (hasKey .Values "terminationGracePeriodSeconds") (not (kindIs "invalid" .Values.terminationGracePeriodSeconds)) }}
+{{- $_ := set $checks "terminationGracePeriodSeconds" .Values.terminationGracePeriodSeconds }}
+{{- end }}
+{{- if and (hasKey .Values "preStopSleepSeconds") (not (kindIs "invalid" .Values.preStopSleepSeconds)) }}
+{{- $_ := set $checks "preStopSleepSeconds" .Values.preStopSleepSeconds }}
+{{- end }}
+{{- if and (kindIs "map" .Values.topologySpread) .Values.topologySpread.enabled }}
+{{- $_ := set $checks "topologySpread.maxSkew" .Values.topologySpread.maxSkew }}
+{{- end }}
+{{- $ceiling := dict
+      "terminationGracePeriodSeconds" 999999
+      "preStopSleepSeconds" 999999
+      "topologySpread.maxSkew" 999999 }}
 {{- range $key, $value := $checks }}
 {{- $whole := false }}
 {{- if kindIs "string" $value }}
@@ -482,7 +505,13 @@ confirmed maps by the blocks above, so a missing key reads as nil and is refused
 {{- if and (eq $key "database.port") (lt (int64 $value) 1) }}
 {{- fail (printf "iam-db: `database.port` must be at least 1, because port 0 listens on nothing, and is %s." (toJson $value)) }}
 {{- end }}
-{{- if and (ne $key "database.port") (ne $key "database.maxConnections") (ne $key "database.engineMaxConnections") (gt (int64 $value) 2147483647) }}
+{{- if and (hasKey $ceiling $key) (gt (int64 $value) (int64 (get $ceiling $key))) }}
+{{- fail (printf "iam-db: `%s` must be at most %d, the largest value a float64 prints without an exponent, and is %s." $key (int64 (get $ceiling $key)) (toJson $value)) }}
+{{- end }}
+{{- if and (eq $key "topologySpread.maxSkew") (lt (int64 $value) 1) }}
+{{- fail (printf "iam-db: `topologySpread.maxSkew` must be at least 1, because the API requires it greater than zero, and is %s." (toJson $value)) }}
+{{- end }}
+{{- if and (ne $key "database.port") (ne $key "database.maxConnections") (ne $key "database.engineMaxConnections") (not (hasKey $ceiling $key)) (gt (int64 $value) 2147483647) }}
 {{- fail (printf "iam-db: `%s` must be at most 2147483647, the largest value of the int32 field Kubernetes stores a replica count in, and is %s." $key (toJson $value)) }}
 {{- end }}
 {{- end }}
