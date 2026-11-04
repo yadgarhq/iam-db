@@ -189,7 +189,7 @@ def test_a_nulled_database_block_is_still_refused_at_render() -> None:
 # `MariaDB.spec.username` (measured live on kind-yadgar, 2026-10-24), and the
 # MariaDB CRD has no knob for it. `yadgar-store` refuses at boot when
 # maxConnections x REPLICAS exceeds that cap. The pod connects as that account
-# until the cutover to the app account below (ADR-1141 rule 7), so the shipped
+# until the cutover to the app account below (ADR-1142 rule 9), so the shipped
 # pool, at the most replicas this chart can run, must still fit 20.
 OPERATOR_WRITTEN_USER_CAP = 20
 
@@ -206,7 +206,7 @@ def test_the_shipped_pool_fits_the_operator_written_user_cap() -> None:
     )
 
 
-# THE APP ACCOUNT'S CAP (ADR-1141, yaadgaar #411). The chart owns the app
+# THE APP ACCOUNT'S CAP (ADR-1142, yaadgaar #411). The chart owns the app
 # account's User and computes its `maxUserConnections` as
 # (max(autoscaling.maxReplicas, replicaCount) + rollingUpdate.maxSurge) x
 # database.maxConnections + 1. At the shipped values that is (6 + 1) x 3 + 1.

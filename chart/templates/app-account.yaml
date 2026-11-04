@@ -1,5 +1,5 @@
 {{/*
-THE APP ACCOUNT, A User AND A Grant THE CHART OWNS (yaadgaar #411, ADR-1141 rules 1 and 6),
+THE APP ACCOUNT, A User AND A Grant THE CHART OWNS (yaadgaar #411, ADR-1142 rules 1 and 6),
 behind `database.create` AND `database.createAppAccount`.
 
 mariadb-operator 26.6.0 creates the account named by `database.user` itself, from
@@ -13,9 +13,9 @@ password and cap: host `%`, ALL PRIVILEGES on `<database>.*`, no grant option.
 spec, and `templates/mariadb.yaml` sets neither, so neither is set here.
 
 THE PASSWORD SECRET IS NOT RENDERED. `templates/app-password-hook.yaml` creates it
-in-cluster, once (ADR-1141 rule 3), before this User is applied.
+in-cluster, once (ADR-1142 rule 3), before this User is applied.
 
-THE POD DOES NOT USE THIS ACCOUNT YET (ADR-1141 rule 7). `DB_USER` is still
+THE POD DOES NOT USE THIS ACCOUNT YET (ADR-1142 rule 9). `DB_USER` is still
 `database.user`; the cutover is a separate change.
 */}}
 {{- if and .Values.database.create .Values.database.createAppAccount }}

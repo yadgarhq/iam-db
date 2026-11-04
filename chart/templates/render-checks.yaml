@@ -498,7 +498,7 @@ While autoscaling is off the knob is not read, and `replicaCount: 0` stays legal
 {{- end }}
 {{- end }}
 {{- /*
-THE APP ACCOUNT (yaadgaar #411, ADR-1141 rules 1, 2, 5 and 6), behind `database.create`,
+THE APP ACCOUNT (yaadgaar #411, ADR-1142 rules 1, 2, 5 and 6), behind `database.create`,
 the toggle that renders it. Placed after the whole-number check above, so the knobs the
 cap is computed from are confirmed whole numbers.
 
@@ -506,7 +506,7 @@ cap is computed from are confirmed whole numbers.
     before any `eq`, because `eq` between a string and a number is a raise, not a refusal.
   - `appUser` must match `^[a-z][a-z0-9_]{0,31}$`, a MariaDB user name with no quote.
   - `appUser` must differ from `user`, and `appPasswordSecret` from `passwordSecret`:
-    two accounts on one password, or one account under two caps, is what ADR-1141 rules
+    two accounts on one password, or one account under two caps, is what ADR-1142 rules
     out.
   - `appPasswordSecret` must be a DNS-1123 subdomain: it is a Secret name, and it is
     written into the hook Job's script, so only a name's characters may reach it.
@@ -548,7 +548,7 @@ value checks, like the `server.limits` ones above.
 {{- fail (printf (join "" (list
       "iam-db: `database.%s` must be a non-empty string while `database.create` is true, "
       "and is %s (%s). The chart renders the app account's User and its password Secret "
-      "from it (ADR-1141)."))
+      "from it (ADR-1142)."))
       $key (kindOf $value) (toJson $value)) }}
 {{- end }}
 {{- end }}
@@ -565,13 +565,13 @@ value checks, like the `server.limits` ones above.
 {{- fail (printf (join "" (list
       "iam-db: `database.appUser` (%s) must differ from `database.user`. `database.user` is "
       "the account mariadb-operator creates with its own cap of 20; the app account is a "
-      "second one with a computed cap (ADR-1141 rule 1)."))
+      "second one with a computed cap (ADR-1142 rule 1)."))
       (toJson $db.appUser)) }}
 {{- end }}
 {{- if eq $db.appPasswordSecret (toString $db.passwordSecret) }}
 {{- fail (printf (join "" (list
       "iam-db: `database.appPasswordSecret` (%s) must differ from `database.passwordSecret`. "
-      "Sharing it would give two accounts one password (ADR-1141 rule 2)."))
+      "Sharing it would give two accounts one password (ADR-1142 rule 2)."))
       (toJson $db.appPasswordSecret)) }}
 {{- end }}
 {{- if not (and (le (len $db.appPasswordSecret) 253) (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $db.appPasswordSecret)) }}
@@ -600,7 +600,7 @@ value checks, like the `server.limits` ones above.
       "replicaCount) + rollingUpdate.maxSurge) x database.maxConnections + 1, is above "
       "`database.engineMaxConnections` - `database.engineOperatorReserve` = %d. The engine "
       "could not serve every connection the account may open. Lower the pool or the "
-      "replica knobs, or raise the engine's ceiling (ADR-1141 rule 6)."))
+      "replica knobs, or raise the engine's ceiling (ADR-1142 rule 6)."))
       $cap $headroom) }}
 {{- end }}
 {{- end }}
