@@ -128,7 +128,7 @@ spec:
       # deliberate: a literal 0 is an immediate SIGKILL with no drain at all.
       # Set 0 to return the field to kubelet's 30s default. There is no way to
       # spell "kill instantly" through this chart.
-      terminationGracePeriodSeconds: {{ . }}
+      terminationGracePeriodSeconds: {{ . | int64 }}
       {{- end }}
       {{- if .Values.topologySpread.enabled }}
       # HOSTNAME IS THE ONLY AXIS THERE IS, AND `ScheduleAnyway` IS THE ONLY SAFE
@@ -158,7 +158,7 @@ spec:
       # second way, and two knobs for one decision is how they come to disagree.
       # Ledger 691's `affinity` is declined rather than added.
       topologySpreadConstraints:
-        - maxSkew: {{ .Values.topologySpread.maxSkew }}
+        - maxSkew: {{ .Values.topologySpread.maxSkew | int64 }}
           topologyKey: {{ .Values.topologySpread.topologyKey }}
           whenUnsatisfiable: {{ .Values.topologySpread.whenUnsatisfiable }}
           labelSelector:
@@ -475,7 +475,7 @@ spec:
           lifecycle:
             preStop:
               sleep:
-                seconds: {{ . }}
+                seconds: {{ . | int64 }}
           {{- end }}
           readinessProbe:
             tcpSocket:
