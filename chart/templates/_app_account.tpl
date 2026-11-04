@@ -1,5 +1,5 @@
 {{/*
-THE APP ACCOUNT'S CONNECTION CAP, COMPUTED IN ONE PLACE (yaadgaar #411, ADR-1141 rule 6).
+THE APP ACCOUNT'S CONNECTION CAP, COMPUTED IN ONE PLACE (yaadgaar #411, ADR-1142 rule 6).
 
   (max(autoscaling.maxReplicas, replicaCount) + maxSurge) x database.maxConnections + 1
 

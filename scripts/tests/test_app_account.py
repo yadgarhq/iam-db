@@ -1,9 +1,9 @@
-"""THE APP ACCOUNT THIS CHART OWNS (yaadgaar #411, ADR-1141).
+"""THE APP ACCOUNT THIS CHART OWNS (yaadgaar #411, ADR-1142).
 
 Behind `database.create` AND `database.createAppAccount` (default false) the chart renders a MariaDB `User` and `Grant` for
 `database.appUser`, and a PreSync hook Job (with its own short-lived RBAC) that
 creates `database.appPasswordSecret` once, only when it is absent. The pod still
-connects as `database.user` (ADR-1141 rule 7): the cutover is a later change.
+connects as `database.user` (ADR-1142 rule 9): the cutover is a later change.
 
 EVERY EQUALITY BELOW READS RENDERED OBJECTS, and the literals are literals: a
 number derived from the thing under test agrees with whatever it happens to be.
@@ -152,7 +152,7 @@ def test_the_grant_renders_with_exact_fields() -> None:
 
 
 def test_the_pod_still_connects_as_the_operator_user() -> None:
-    # ADR-1141 rule 7: the credential cutover is a separate change.
+    # ADR-1142 rule 9: the credential cutover is a separate change.
     documents = rendered_on()
     deployment = only(documents, "Deployment")
     (container,) = deployment["spec"]["template"]["spec"]["containers"]
@@ -392,7 +392,7 @@ def test_the_rbac_runs_before_the_job() -> None:
 
 def test_the_role_grants_create_on_secrets_and_nothing_else() -> None:
     # No `get`: the Job cannot read the live password, nor read back a Secret it
-    # creates (ADR-1141 rule 4, narrowed).
+    # creates (ADR-1142 rule 4).
     role = hook_objects(rendered_on())["Role"]
     assert role["rules"] == [{"apiGroups": [""], "resources": ["secrets"], "verbs": ["create"]}]
 

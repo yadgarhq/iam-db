@@ -236,7 +236,7 @@ database:
   # (`PoolError::WouldExceedUserCap`). Raising this or the replica ceiling needs
   # the account's limit raised first. The chart-owned app account below
   # (`appUser`, yaadgaar #411) computes its cap from these knobs, but the pod
-  # does not connect as it until the cutover (ADR-1141 rule 7), so until then
+  # does not connect as it until the cutover (ADR-1142 rule 9), so until then
   # the operator's 20 still binds. NOT YET SAFE MID-ROLL on that account: a
   # roll at the KEDA ceiling with `maxSurge: 1` runs 7 pods x 3 = 21, over 20.
   maxConnections: 3
@@ -339,7 +339,7 @@ database:
   mariadbOperator:
     apiVersion: k8s.mariadb.com/v1alpha1
 
-  # ── THE APP ACCOUNT THIS CHART OWNS (yaadgaar #411, ADR-1141) ──────────────
+  # ── THE APP ACCOUNT THIS CHART OWNS (yaadgaar #411, ADR-1142) ──────────────
   #
   # Rendered only while `create` above AND `createAppAccount` are both true. OFF
   # BY DEFAULT, even where `create` is on: the parent chart sets `create: true`
@@ -352,7 +352,7 @@ database:
   # once, when it is absent, and never reads, rotates or overwrites it.
   #
   # THE POD DOES NOT USE IT YET. `DB_USER` and the mounted Secret stay `user`
-  # and `passwordSecret` until a separate cutover (ADR-1141 rule 7).
+  # and `passwordSecret` until a separate cutover (ADR-1142 rule 9).
   #
   # The User's `maxUserConnections` is COMPUTED, never written here:
   # (max(autoscaling.maxReplicas, replicaCount) + rollingUpdate.maxSurge)
