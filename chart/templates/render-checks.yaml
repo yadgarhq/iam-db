@@ -276,8 +276,13 @@ enforces, types it `integer` and makes it `required`. Two things it cannot see:
 
   - `server` or `server.limits` itself, deleted. This chart's `values.yaml` declares
     the block, so an override of `server: null` DELETES it (helm deletes a null-valued
-    key a chart in the tree declares and restores no default), and a schema whose every
-    constraint sits under `server.limits` has nothing left to check. The ADR-0794 idiom
+    key a chart in the tree declares and restores no default).
+    Since yaadgaar #327 the schema's root `required: [server]` refuses `server: null`
+    FIRST, so with schema validation on an adopter sees only helm's schema line and the
+    `server` is absent arm below is NOT reached. It is not dead: it is the floor under
+    `--skip-schema-validation`, where no other check names the key (without it the
+    `kindIs "map"` arm would say only that `server` is invalid (null)).
+    `scripts/tests/test_server_limits_schema.py` pins it (yaadgaar #562). The ADR-0794 idiom
     (`hasKey`, then `kindIs "map"`) refuses it here with a sentence naming the key,
     before the template reads a leaf of it.
   - A RULE BETWEEN TWO KEYS. `keepaliveTimeoutSeconds` must be strictly below
