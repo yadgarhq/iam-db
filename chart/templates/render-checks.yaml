@@ -457,7 +457,15 @@ into 1 and `"035"` into 29 without a word, so this check runs before the cast. A
 are bounded at 999999, the largest value a float64 prints without an exponent, and
 `topologySpread.maxSkew` is refused below 1 (the API requires it greater than zero).
 `terminationGracePeriodSeconds` and `preStopSleepSeconds` sit behind `with`, which skips
-nil and 0, so each is checked only when its key is present and not null.
+nil and the NUMBER 0, so each is checked only when its key is present and not null.
+`with` PASSES THE STRING "0": every non-empty string is true to a Go template, so
+`--set-string terminationGracePeriodSeconds=0` used to render `terminationGracePeriodSeconds: 0`,
+an immediate SIGKILL. For these two keys (`$refuseZeroString`) a string whose `int64` is 0 is
+therefore refused by name, after the whole-number check (yaadgaar 639). It is the one carve-out
+from ADR-0847. Today the regex admits exactly one such string, "0" ("00", " 0", "0.0" and "-0"
+are refused as not whole); comparing `int64` and not the exact string keeps "00" refused if the
+regex is ever loosened. The number 0 is not refused. `topologySpread.maxSkew` is guarded by
+`if`, not `with`, and its floor of 1 already refuses "0", so it is not marked.
 `topologySpread.maxSkew` is read only while `topologySpread` is a map and `enabled` is
 true, so a bad skew in a spread that is off changes nothing and is not refused.
 */}}
@@ -484,6 +492,9 @@ true, so a bad skew in a spread that is off changes nothing and is not refused.
       "terminationGracePeriodSeconds" 999999
       "preStopSleepSeconds" 999999
       "topologySpread.maxSkew" 999999 }}
+{{- $refuseZeroString := dict
+      "terminationGracePeriodSeconds" true
+      "preStopSleepSeconds" true }}
 {{- range $key, $value := $checks }}
 {{- $whole := false }}
 {{- if kindIs "string" $value }}
@@ -498,6 +509,9 @@ true, so a bad skew in a spread that is off changes nothing and is not refused.
       "`int64`, which turns a word or an out-of-range number into another number without "
       "a warning. Write digits only, for example `1000`."))
       $key (kindOf $value) (toJson $value)) }}
+{{- end }}
+{{- if and (hasKey $refuseZeroString $key) (kindIs "string" $value) (eq (int64 $value) 0) }}
+{{- fail (printf "iam-db: `%s` is the string %s, which a `with` guard treats as set, so it would render as 0 and not as the API default. Write the number 0 (`--set`, not `--set-string`) or delete the key to leave the field unset (yaadgaar 639)." $key (toJson $value)) }}
 {{- end }}
 {{- if and (eq $key "database.port") (gt (int64 $value) 65535) }}
 {{- fail (printf "iam-db: `database.port` must be at most 65535, the largest TCP port, and is %s." (toJson $value)) }}
