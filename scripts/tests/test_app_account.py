@@ -258,6 +258,21 @@ def test_the_bound_reads_the_reserve() -> None:
             "must differ from `database.passwordSecret`",
             id="secret-equal",
         ),
+        pytest.param(
+            ("--set", "database.appPasswordSecret=iam-db-mariadb-root"),
+            "must differ from `database.instance.rootPasswordSecret`",
+            id="secret-equal-root",
+        ),
+        pytest.param(
+            (
+                "--set",
+                "database.instance.rootPasswordSecret=custom-root",
+                "--set",
+                "database.appPasswordSecret=custom-root",
+            ),
+            "must differ from `database.instance.rootPasswordSecret`",
+            id="secret-equal-custom-root",
+        ),
         pytest.param(("--set", "database.appUser="), "`database.appUser` must be a non-empty string", id="user-empty"),
         pytest.param(
             ("--set", "database.appPasswordSecret="),

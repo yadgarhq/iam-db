@@ -508,6 +508,10 @@ cap is computed from are confirmed whole numbers.
   - `appUser` must differ from `user`, and `appPasswordSecret` from `passwordSecret`:
     two accounts on one password, or one account under two caps, is what ADR-1142 rules
     out.
+  - `appPasswordSecret` must differ from `instance.rootPasswordSecret`. The operator
+    mints the root password into that Secret, under the same `password` key, with
+    `generate: true`. The hook, and the admission policy that allows it exactly that
+    one name (yaadgaar #566), would otherwise pre-seed the root password.
   - `appPasswordSecret` must be a DNS-1123 subdomain: it is a Secret name, and it is
     written into the hook Job's script, so only a name's characters may reach it.
   - `appPasswordJob.image` must be pinned by digest: that Job mints a credential.
@@ -572,6 +576,14 @@ value checks, like the `server.limits` ones above.
 {{- fail (printf (join "" (list
       "iam-db: `database.appPasswordSecret` (%s) must differ from `database.passwordSecret`. "
       "Sharing it would give two accounts one password (ADR-1142 rule 2)."))
+      (toJson $db.appPasswordSecret)) }}
+{{- end }}
+{{- if eq $db.appPasswordSecret (toString $db.instance.rootPasswordSecret) }}
+{{- fail (printf (join "" (list
+      "iam-db: `database.appPasswordSecret` (%s) must differ from `database.instance.rootPasswordSecret`. "
+      "mariadb-operator mints the root password into that Secret under the same `password` key, "
+      "so the hook, which the admission policy allows to create exactly that name, could pre-seed "
+      "the root password (yaadgaar #566)."))
       (toJson $db.appPasswordSecret)) }}
 {{- end }}
 {{- if not (and (le (len $db.appPasswordSecret) 253) (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $db.appPasswordSecret)) }}
