@@ -75,7 +75,7 @@ tls:
   # `tls-key.pem`. Named for the same reason.
   keySecretKey: tls.key
   # NO DEFAULT FOR `clientAuth` EITHER (card B-U5; ledger 925, ADR-0846,
-  # X-ADR-1). `clientAuth`, `clientCaSecret` and `clientCaSecretKey` ask
+  # ADR-0854). `clientAuth`, `clientCaSecret` and `clientCaSecretKey` ask
   # iam-db to verify ITS caller's certificate — the other direction from
   # `certSecret` above, which is what iam-db presents. `values.schema.json`
   # makes `clientAuth` `required`, and the binary refuses to boot without
@@ -100,7 +100,9 @@ tls:
   # `optional` and `required` need `enabled: true` and the authority, or
   # `templates/render-checks.yaml` refuses the render:
   #
-  #   clientCaSecret: iam-db-client-ca  # the Secret holding that authority;
+  #   clientCaSecret: iam-db-tls        # the Secret holding that authority:
+  #                                      # this server's own cert-manager
+  #                                      # `<server>-tls` leaf (ADR-0883);
   #                                      # unset, so nothing is mounted
   #                                      # until a hop asks for verification
   #   clientCaSecretKey: ca.crt         # the key inside clientCaSecret

@@ -196,7 +196,7 @@ The refusal text does not quote the raise text it replaces (ADR-0794);
 
 {{/*
 THE SHAPE OF `tls.clientAuth`, REQUIRED WITH NO DEFAULT (card B-U5; ledger
-925, ADR-0846, X-ADR-1 extending ADR-0845; K-8 step 3).
+925, ADR-0846, ADR-0854 extending ADR-0845; K-8 step 3).
 
 The binary refuses to boot without `LISTEN_TLS_CLIENT_AUTH` — WHETHER OR NOT
 TLS IS ON — so this chart refuses an absent key too, and
@@ -229,7 +229,7 @@ inside `tls.enabled`.
       "iam-db: `tls.clientAuth` is absent from the values. It renders "
       "LISTEN_TLS_CLIENT_AUTH, which iam-db refuses to boot without whether or not TLS "
       "is on. Write the keys you mean: `tls.clientAuth` has no default (ADR-0845, "
-      "X-ADR-1) and must be `\"off\"`, `\"optional\"` or `\"required\"`.")) }}
+      "ADR-0854) and must be `\"off\"`, `\"optional\"` or `\"required\"`.")) }}
 {{- end }}
 {{- if not (kindIs "string" .Values.tls.clientAuth) }}
 {{- fail (printf (join "" (list

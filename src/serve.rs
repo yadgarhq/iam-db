@@ -22,7 +22,7 @@
 //! | `LISTEN_TLS_CLIENT_CA_FILE` | `tls.clientCaSecret` | a path |
 //!
 //! **The switch and the mode are REQUIRED, and absence refuses to boot**
-//! (ADR-0845, extended to the mode by X-ADR-1). The mode is read whether or not
+//! (ADR-0845, extended to the mode by ADR-0854). The mode is read whether or not
 //! TLS is on: `off` is the emergency value, and deleting the variable is a boot
 //! refusal, not a way to turn verification off. The chart renders both
 //! unconditionally and ships no default for either key.

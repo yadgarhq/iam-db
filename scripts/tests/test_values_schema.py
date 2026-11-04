@@ -121,7 +121,7 @@ EXTRAS = {
 REQUIRED_NO_DEFAULT = {"tls.enabled"}
 
 # Paths the schema makes `required` with NO `type` and NO `enum`, and for which
-# `values.yaml` ships no default. `tls.clientAuth` (card B-U5, X-ADR-1): it
+# `values.yaml` ships no default. `tls.clientAuth` (card B-U5, ADR-0854): it
 # renders LISTEN_TLS_CLIENT_AUTH, which the binary refuses to boot without, so
 # the key is required — but its type and value are `templates/render-checks.yaml`'s
 # job (ADR-0847, coordinator ruling R1), so a bare `off` meets the named
