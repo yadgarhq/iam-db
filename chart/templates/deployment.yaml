@@ -93,6 +93,7 @@ spec:
         fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
+      {{- /* The rendered comment below says `0` renders nothing and that "kill instantly" cannot be spelled. That holds for the NUMBER 0 only: `with` passes the STRING "0", which would render `terminationGracePeriodSeconds: 0`, so `render-checks.yaml` refuses that string by name (yaadgaar 639). */}}
       {{- with .Values.terminationGracePeriodSeconds }}
       # 35 = 5 + 25 + 5, AND EVERY TERM IS SOMEBODY ELSE'S NUMBER (ledger 690).
       # This is ONE budget covering BOTH halves of a pod's death, which is what
@@ -426,6 +427,7 @@ spec:
           # `tcpSocket` needs no change when tls.enabled is set: it completes a
           # TCP connection and no TLS handshake, so kubelet needs neither the
           # certificate nor the authority that signed it.
+          {{- /* The rendered comment below says `0` renders no `lifecycle` block. That holds for the NUMBER 0 only: `with` passes the STRING "0", which `render-checks.yaml` refuses by name (yaadgaar 639). */}}
           {{- with .Values.preStopSleepSeconds }}
           # THE SLEEP IS FOR THE WITHDRAWAL, NOT FOR THE DRAIN (ledger 690).
           # Deleting a pod fans out to two consumers that do not wait for each

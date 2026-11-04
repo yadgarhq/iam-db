@@ -501,8 +501,9 @@ networkPolicy:
 # HOW LONG THIS POD STAYS ROUTABLE AFTER DELETION BEGINS (ledger 690). Kubelet
 # runs this sleep BEFORE it sends SIGTERM, so it buys the EndpointSlice removal
 # time to reach whatever routes here. It is spent INSIDE
-# `terminationGracePeriodSeconds` below, never added to it. `0` renders no
-# `lifecycle` block at all. The reasoning, and why an `exec` of /bin/sleep is
+# `terminationGracePeriodSeconds` below, never added to it. The number `0`
+# renders no `lifecycle` block at all; the string "0" is refused (yaadgaar 639).
+# The reasoning, and why an `exec` of /bin/sleep is
 # not an option on a distroless image, is in `templates/deployment.yaml`.
 preStopSleepSeconds: 5
 
@@ -511,8 +512,10 @@ preStopSleepSeconds: 5
 # 5 (the slack that constant's docstring reserves to log and exit). Kubelet
 # runs preStop before sending SIGTERM, so the sleep and the drain share one
 # clock. Lowering this below 30 (DRAIN_BUDGET + that slack, both owned by
-# lifecycle/src/drain.rs) breaks that crate's floor, not this chart's. `0`
-# renders nothing and returns the field to kubelet's 30s default.
+# lifecycle/src/drain.rs) breaks that crate's floor, not this chart's. The
+# number `0` renders nothing and returns the field to kubelet's 30s default.
+# The string "0" (`--set-string`) is refused: it would render an immediate
+# SIGKILL (yaadgaar 639).
 terminationGracePeriodSeconds: 35
 
 # THE ROLL. `maxUnavailable: 0` is the guarantee and `maxSurge: 1` is what pays
