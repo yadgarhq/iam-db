@@ -160,6 +160,27 @@ def test_an_omitted_server_block_is_refused_by_the_schema_not_only_the_render_ch
     assert refuses_missing(lint.stdout + lint.stderr, "server"), lint.stdout + lint.stderr
 
 
+def test_the_server_absent_arm_is_the_floor_when_the_schema_is_skipped() -> None:
+    """The root `required: [server]` refuses `server: null` first, so the render check's own
+    "`server` is absent" sentence is reached only with the schema skipped
+    (`--skip-schema-validation`). Without the arm that case would say only that `server` is
+    invalid (null), so the arm stays and must keep naming the key and the cause (yaadgaar #562)."""
+    skipped = render("--set", "server=null", "--skip-schema-validation")
+    assert skipped.returncode != 0, "a values set with no `server` rendered with the schema skipped"
+    assert "`server` is absent from the values" in skipped.stderr, skipped.stderr
+    validated = render("--set", "server=null")
+    assert validated.returncode != 0
+    assert "is absent from the values" not in validated.stderr, validated.stderr
+    # The two sibling arms are the floor under the same flag: each must refuse and name its key.
+    for shape, sentence in (
+        ("server=5", "`server` must be a map"),
+        ("server.limits=null", "`server.limits` is absent"),
+    ):
+        result = render("--set", shape, "--skip-schema-validation")
+        assert result.returncode != 0, f"{shape} rendered with the schema skipped"
+        assert sentence in result.stderr, f"{shape}: {result.stderr}"
+
+
 def test_the_shipped_defaults_still_render_with_the_server_block_required() -> None:
     """Fail-closed guard: requiring `server` must not stop the chart rendering its own
     defaults. `chart/values.yaml` ships the block, so a values set that says nothing about
