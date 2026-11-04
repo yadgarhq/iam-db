@@ -503,6 +503,66 @@ While autoscaling is off the knob is not read, and `replicaCount: 0` stays legal
 {{- end }}
 {{- end }}
 {{- /*
+THE MARIADB INSTANCE'S OWN KNOBS (yaadgaar #595), behind `database.create`, the toggle
+that renders the MariaDB they configure. `templates/mariadb.yaml` reads `database.instance.image`
+and the rest of the block, and names the root-password Secret from
+`database.instance.rootPasswordSecret`. The schema leaves both keys untyped, so
+neither it nor any arm above stopped:
+
+  - a missing or null `database.instance`, which died inside `mariadb.yaml` with a bare
+    template trace that names no key;
+  - a `database.instance` that is not a map, which died the same way;
+  - a missing or null `rootPasswordSecret`, which rendered `rootPasswordSecretKeyRef.name:`
+    EMPTY, and an empty or non-DNS-1123 one, which rendered a Secret name the operator
+    cannot resolve. mariadb-operator would wait for a Secret it never finds, at apply time.
+
+These arms are the ONLY guard for these keys: the schema precedes none of them, and
+they stay the floor under `--skip-schema-validation` if it ever does (ADR-1150).
+Nested so each arm reads only what the arm above confirmed: `len` and `regexMatch` raise on
+a non-string, and `.rootPasswordSecret` raises on a non-map.
+Placed BEFORE the app account's own read of `instance.rootPasswordSecret` below, which runs only
+with `database.createAppAccount` on: a null block is refused here by name, not raised there.
+*/}}
+{{- if .Values.database.create }}
+{{- $instance := .Values.database.instance }}
+{{- if kindIs "invalid" $instance }}
+{{- fail (join "" (list
+      "iam-db: `database.instance` is absent while `database.create` is true. The chart renders the "
+      "MariaDB instance's image, TLS, storage and resources from it. `values.yaml` declares the block, "
+      "so it is missing only when a values file wrote `instance:` with NO VALUE: helm deletes a "
+      "null-valued key a chart declares and restores no default. Restore the block, or set "
+      "`database.create: false`.")) }}
+{{- else if not (kindIs "map" $instance) }}
+{{- fail (printf (join "" (list
+      "iam-db: `database.instance` must be a map while `database.create` is true, and is %s (%s). "
+      "The chart renders the MariaDB instance's image, TLS, storage and resources from its keys."))
+      (kindOf $instance) (toJson $instance)) }}
+{{- else }}
+{{- $root := $instance.rootPasswordSecret }}
+{{- if kindIs "invalid" $root }}
+{{- fail (join "" (list
+      "iam-db: `database.instance.rootPasswordSecret` is absent while `database.create` is true. It names "
+      "the Secret mariadb-operator mints the MariaDB root password into, and an empty name renders "
+      "`rootPasswordSecretKeyRef.name` blank. Write the Secret's name, a DNS-1123 subdomain.")) }}
+{{- else if not (kindIs "string" $root) }}
+{{- fail (printf (join "" (list
+      "iam-db: `database.instance.rootPasswordSecret` must be a string while `database.create` is true, "
+      "and is %s (%s). It names a Secret. Write the name as a string; with `--set`, use `--set-string`."))
+      (kindOf $root) (toJson $root)) }}
+{{- else if eq $root "" }}
+{{- fail (join "" (list
+      "iam-db: `database.instance.rootPasswordSecret` is empty while `database.create` is true. It names "
+      "the Secret mariadb-operator mints the MariaDB root password into, and an empty name renders "
+      "`rootPasswordSecretKeyRef.name` blank. Write the Secret's name, a DNS-1123 subdomain.")) }}
+{{- else if not (and (le (len $root) 253) (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $root)) }}
+{{- fail (printf (join "" (list
+      "iam-db: `database.instance.rootPasswordSecret` must be a DNS-1123 subdomain (lowercase letters, "
+      "digits, `-` and `.`, at most 253 characters), and is %s. It names a Secret."))
+      (toJson $root)) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- /*
 THE APP ACCOUNT (yaadgaar #411, ADR-1142 rules 1, 2, 5 and 6), behind `database.create`,
 the toggle that renders it. Placed after the whole-number check above, so the knobs the
 cap is computed from are confirmed whole numbers.
