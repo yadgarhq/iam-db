@@ -285,7 +285,7 @@ fn an_absent_tls_flag_is_refused_naming_the_variable_and_the_chart_key() {
     assert!(stderr.contains("tls.enabled"), "{stderr}");
 }
 
-/// X-ADR-1 (extends ADR-0845), card B-U5: `LISTEN_TLS_CLIENT_AUTH` has no
+/// ADR-0854 (extends ADR-0845), card B-U5: `LISTEN_TLS_CLIENT_AUTH` has no
 /// default either, and it is read WHETHER OR NOT TLS is on — so a cleartext
 /// deployment that never states it refuses too, naming the variable and the
 /// chart key the operator edits. Everything after the transport is left

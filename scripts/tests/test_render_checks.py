@@ -1645,7 +1645,7 @@ def test_the_unconditional_ternary_agrees_with_tls_enabled_in_both_directions(tm
         )
 
 
-# ── THE CONTRACT ON `tls.clientAuth`, B-U5 (ledger 925, ADR-0846, X-ADR-1) ──
+# ── THE CONTRACT ON `tls.clientAuth`, B-U5 (ledger 925, ADR-0846, ADR-0854) ──
 #
 # REQUIRED, WITH NO DEFAULT. The binary refuses to boot without
 # `LISTEN_TLS_CLIENT_AUTH` whether or not TLS is on, so the chart refuses an

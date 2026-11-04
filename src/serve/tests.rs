@@ -50,7 +50,7 @@ fn an_absent_tls_flag_refuses_naming_the_variable_and_the_chart_key() {
     );
 }
 
-/// X-ADR-1 (extends ADR-0845): an absent `LISTEN_TLS_CLIENT_AUTH` refuses
+/// ADR-0854 (extends ADR-0845): an absent `LISTEN_TLS_CLIENT_AUTH` refuses
 /// WHETHER OR NOT TLS is on. The cleartext case is the one a narrower reading
 /// would let through, so it is the one asserted.
 #[test]
