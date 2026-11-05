@@ -343,6 +343,8 @@ def test_a_replica_count_above_int32_is_refused_and_int32_max_renders(tmp_path, 
         else:
             assert result.returncode != 0, f"{'.'.join(path)}={value} rendered"
             assert ".".join(path) in result.stderr and str(INT32_MAX) in result.stderr, result.stderr
+            # 645: the int32 refusal itself, not the maxReplicas < minReplicas one, which also names both.
+            assert "must be at most 2147483647" in result.stderr, result.stderr
 
 
 @pytest.mark.parametrize("bad", ["abc", 1.5, -1, True, [1], 1e20])
