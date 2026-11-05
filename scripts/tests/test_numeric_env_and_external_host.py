@@ -292,6 +292,8 @@ def replica_overlay(path: tuple[str, ...], value) -> dict:
     body = nest(path, value)
     if path[0] == "autoscaling":
         body["autoscaling"]["enabled"] = True
+    if path == ("autoscaling", "minReplicas"):
+        body["autoscaling"]["maxReplicas"] = INT32_MAX  # 645: the ceiling may not sit below the floor
     if path[0] == "database":
         body["database"]["create"] = True
     return body
@@ -331,6 +333,8 @@ def test_a_replica_count_above_int32_is_refused_and_int32_max_renders(tmp_path, 
                     f"{'.'.join(path)}={value}", *API]
             if path[0] == "autoscaling":
                 args += ["--set", "autoscaling.enabled=true"]
+            if path == ("autoscaling", "minReplicas"):
+                args += ["--set", f"autoscaling.maxReplicas={INT32_MAX}"]  # 645: the ceiling may not sit below the floor
             if path[0] == "database":
                 args += ["--set", "database.create=true"]
             result = helm(*args)
@@ -401,6 +405,70 @@ def test_the_min_replicas_floor_is_not_read_while_autoscaling_is_off(tmp_path):
     result = render(write(tmp_path, body), *API)
     assert result.returncode == 0, result.stderr
     assert rendered_field(result.stdout, "Deployment", ("spec", "replicas")) == 0
+
+
+# --- 645: autoscaling.maxReplicas >= autoscaling.minReplicas while autoscaling is on ----
+# KEDA took `maxReplicaCount` below `minReplicaCount` without a word. Every case keeps
+# `minReplicas` at 2 or more, so the D55 floor above cannot be what refuses it, and sets
+# `replicaCount` to a third value, so a check that compared against it is caught.
+
+
+def max_overlay(minimum, maximum, replica_count, enabled=True) -> dict:
+    return {
+        "autoscaling": {"enabled": enabled, "minReplicas": minimum, "maxReplicas": maximum},
+        "replicaCount": replica_count,
+    }
+
+
+@pytest.mark.parametrize("minimum,maximum", [(2, 0), (2, 1), (5, 4), ("3", "2"), (3, "2")], ids=repr)
+def test_autoscaling_on_with_max_replicas_below_min_replicas_is_refused_by_name(tmp_path, minimum, maximum):
+    result = render(write(tmp_path, max_overlay(minimum, maximum, 1)), *API)
+    assert result.returncode != 0, f"min={minimum!r} max={maximum!r} rendered: no refusal"
+    assert "`autoscaling.maxReplicas`" in result.stderr, result.stderr
+    assert "at least `autoscaling.minReplicas`" in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize("minimum,maximum", [(2, 2), ("3", "3"), (5, 5), (2, 3), ("2", 6)], ids=repr)
+def test_autoscaling_on_with_max_replicas_at_or_above_min_replicas_renders(tmp_path, minimum, maximum):
+    result = render(write(tmp_path, max_overlay(minimum, maximum, 9)), *API)
+    assert result.returncode == 0, result.stderr
+    assert rendered_field(result.stdout, "ScaledObject", ("spec", "minReplicaCount")) == int(minimum)
+    assert rendered_field(result.stdout, "ScaledObject", ("spec", "maxReplicaCount")) == int(maximum)
+
+
+def test_the_max_replicas_ceiling_is_not_read_while_autoscaling_is_off(tmp_path):
+    result = render(write(tmp_path, max_overlay(5, 1, 3, enabled=False)), *API)
+    assert result.returncode == 0, result.stderr
+    assert rendered_field(result.stdout, "Deployment", ("spec", "replicas")) == 3
+
+
+# --- 645: database.instance.replicas >= 1 while database.create is true ---------------
+# `replicas: 0` rendered a MariaDB with no pods. The floor is 1, not 3: `values.yaml` and
+# the MariaDB plan both keep one replica, and say more than one is Galera; no document
+# sets a Galera minimum, so none is invented here.
+
+INSTANCE_REPLICAS = ("database", "instance", "replicas")
+
+
+@pytest.mark.parametrize("value", [0, "0"], ids=repr)
+def test_create_true_with_instance_replicas_zero_is_refused_by_name(tmp_path, value):
+    result = render(write(tmp_path, replica_overlay(INSTANCE_REPLICAS, value)), *API)
+    assert result.returncode != 0, f"database.instance.replicas={value!r} rendered: no refusal"
+    assert "`database.instance.replicas`" in result.stderr and "at least 1" in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize("value", [1, "1", 2, 3], ids=repr)
+def test_create_true_with_instance_replicas_one_or_more_renders(tmp_path, value):
+    result = render(write(tmp_path, replica_overlay(INSTANCE_REPLICAS, value)), *API)
+    assert result.returncode == 0, result.stderr
+    assert rendered_field(result.stdout, "MariaDB", ("spec", "replicas")) == int(value)
+
+
+def test_the_instance_replicas_floor_is_not_read_while_create_is_false(tmp_path):
+    body = {"database": {"create": False, "instance": {"replicas": 0}}}
+    result = render(write(tmp_path, body), *API)
+    assert result.returncode == 0, result.stderr
+    assert "kind: MariaDB" not in result.stdout
 
 
 # --- 550: the grace period, the preStop sleep and maxSkew ------------------------
