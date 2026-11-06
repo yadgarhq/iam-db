@@ -2,7 +2,9 @@
 
 use tonic::Request;
 
-use super::{capped, request_id_of, ACTOR_RECORD_CAP};
+use yadgar_telemetry::request_id::{capped, CAP, CUT_MARKER};
+
+use super::request_id_of;
 
 /// **A CAPPED REQUEST ID SURVIVES A HOP, AND READS BACK AS THE SAME STRING.**
 ///
@@ -20,7 +22,7 @@ fn a_capped_request_id_round_trips_through_metadata_unchanged() {
         cut.is_ascii(),
         "the marker must be ASCII to cross a header: {cut}"
     );
-    assert!(cut.starts_with(&"z".repeat(ACTOR_RECORD_CAP)));
+    assert!(cut.starts_with(&"z".repeat(CAP)));
 
     let mut req = Request::new(());
     req.metadata_mut()
@@ -30,4 +32,17 @@ fn a_capped_request_id_round_trips_through_metadata_unchanged() {
         cut,
         "the twin reads back the identical capped string iam forwarded"
     );
+}
+
+/// **THE SHARED CAP IS BYTE-IDENTICAL TO THE COPY THIS SERVICE HELD** (ledger
+/// 1255): the bound is 256, the marker is the ASCII
+/// `...`, 256 characters pass untouched, 257 are cut, and
+/// the cut falls on a character boundary.
+#[test]
+fn the_shared_cap_keeps_the_bound_the_marker_and_the_char_boundary() {
+    assert_eq!((CAP, CUT_MARKER), (256, "..."));
+    let at_cap = "a".repeat(256);
+    assert_eq!(capped(&at_cap), at_cap);
+    assert_eq!(capped(&"a".repeat(257)), format!("{at_cap}..."));
+    assert_eq!(capped(&"é".repeat(257)), format!("{}...", "é".repeat(256)));
 }
