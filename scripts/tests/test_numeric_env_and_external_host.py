@@ -58,6 +58,7 @@ KNOBS = [
     (("server", "limits", "keepaliveIntervalSeconds"), "LISTEN_KEEPALIVE_INTERVAL_SECS"),
     (("server", "limits", "keepaliveTimeoutSeconds"), "LISTEN_KEEPALIVE_TIMEOUT_SECS"),
     (("server", "limits", "maxHeaderListBytes"), "LISTEN_MAX_HEADER_LIST_BYTES"),
+    (("server", "limits", "maxConnectionAgeSeconds"), "LISTEN_MAX_CONNECTION_AGE_SECS"),
 ]
 # The render check's own domain cap, where the knob has one the schema cannot carry.
 RENDER_CAP = {

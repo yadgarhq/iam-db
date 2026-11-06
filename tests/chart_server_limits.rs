@@ -22,31 +22,41 @@ use std::path::PathBuf;
 use yadgar_iam_db::serve::{ServerLimits, LIMITS_CHART_KEY, LISTEN};
 
 /// Chart key, environment variable suffix, ADR-1006 default, library range.
-fn limits() -> [(&'static str, &'static str, u64, RangeInclusive<u64>); 4] {
+/// The range is `None` for `maxConnectionAgeSeconds` until the lifecycle pin
+/// carries `ServerLimits::MAX_CONNECTION_AGE_SECS` (yadgarhq/lifecycle#78,
+/// v0.4.0); its bounds are held by the literal test below, and the pin-bump PR
+/// replaces the `None` with the const.
+fn limits() -> [(&'static str, &'static str, u64, Option<RangeInclusive<u64>>); 5] {
     [
         (
             "maxConcurrentStreams",
             "MAX_CONCURRENT_STREAMS",
             256,
-            ServerLimits::MAX_CONCURRENT_STREAMS,
+            Some(ServerLimits::MAX_CONCURRENT_STREAMS),
         ),
         (
             "keepaliveIntervalSeconds",
             "KEEPALIVE_INTERVAL_SECS",
             30,
-            ServerLimits::KEEPALIVE_INTERVAL_SECS,
+            Some(ServerLimits::KEEPALIVE_INTERVAL_SECS),
         ),
         (
             "keepaliveTimeoutSeconds",
             "KEEPALIVE_TIMEOUT_SECS",
             10,
-            ServerLimits::KEEPALIVE_TIMEOUT_SECS,
+            Some(ServerLimits::KEEPALIVE_TIMEOUT_SECS),
         ),
         (
             "maxHeaderListBytes",
             "MAX_HEADER_LIST_BYTES",
             16384,
-            ServerLimits::MAX_HEADER_LIST_BYTES,
+            Some(ServerLimits::MAX_HEADER_LIST_BYTES),
+        ),
+        (
+            "maxConnectionAgeSeconds",
+            "MAX_CONNECTION_AGE_SECS",
+            1800,
+            None,
         ),
     ]
 }
@@ -106,16 +116,19 @@ fn the_shipped_defaults_are_the_adr_1006_numbers() {
 fn every_shipped_default_sits_inside_the_librarys_range() {
     for (key, _, _, range) in limits() {
         let value = shipped(key);
-        assert!(
-            range.contains(&value),
-            "server.limits.{key} ships {value}, outside the library's {range:?}"
-        );
+        if let Some(range) = range {
+            assert!(
+                range.contains(&value),
+                "server.limits.{key} ships {value}, outside the library's {range:?}"
+            );
+        }
     }
 }
 
 #[test]
 fn the_schema_bounds_are_the_librarys_range() {
     for (key, _, _, range) in limits() {
+        let Some(range) = range else { continue };
         assert_eq!(
             schema(key, "minimum"),
             *range.start(),
@@ -127,6 +140,14 @@ fn the_schema_bounds_are_the_librarys_range() {
             "server.limits.{key}: schema maximum is not the library's"
         );
     }
+}
+
+/// `maxConnectionAgeSeconds` has no library const to compare with yet (see
+/// `limits()`), so its range is pinned as a literal: ADR-1006, 1..=86400.
+#[test]
+fn the_connection_age_schema_bounds_are_the_literal_range() {
+    assert_eq!(schema("maxConnectionAgeSeconds", "minimum"), 1);
+    assert_eq!(schema("maxConnectionAgeSeconds", "maximum"), 86_400);
 }
 
 #[test]

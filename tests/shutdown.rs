@@ -59,6 +59,7 @@ fn limits() -> serve::ServerLimits {
             "LISTEN_KEEPALIVE_INTERVAL_SECS" => Some("30"),
             "LISTEN_KEEPALIVE_TIMEOUT_SECS" => Some("10"),
             "LISTEN_MAX_HEADER_LIST_BYTES" => Some("16384"),
+            "LISTEN_MAX_CONNECTION_AGE_SECS" => Some("1800"),
             _ => None,
         }
         .map(str::to_string)
