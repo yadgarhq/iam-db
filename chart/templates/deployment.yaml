@@ -268,7 +268,7 @@ spec:
               {{- else }}
               value: "off"
               {{- end }}
-            # ADR-1006: the four listener limits, ALWAYS RENDERED, because the
+            # ADR-1006: the five listener limits, ALWAYS RENDERED, because the
             # binary reads each with no fallback and refuses to boot without it
             # (ADR-0569). `values.schema.json` bounds each to the library's own
             # range and makes the block `required`; `templates/render-checks.yaml`
@@ -281,6 +281,8 @@ spec:
               value: {{ .Values.server.limits.keepaliveTimeoutSeconds | int64 | quote }}
             - name: LISTEN_MAX_HEADER_LIST_BYTES
               value: {{ .Values.server.limits.maxHeaderListBytes | int64 | quote }}
+            - name: LISTEN_MAX_CONNECTION_AGE_SECS
+              value: {{ .Values.server.limits.maxConnectionAgeSeconds | int64 | quote }}
             {{- if and .Values.tls.enabled .Values.tls.clientCaSecret }}
             # THE AUTHORITY iam-db CHECKS A CALLER'S CERTIFICATE AGAINST under
             # `optional` or `required` (card B-U5). RENDERED ONLY WHEN TLS IS

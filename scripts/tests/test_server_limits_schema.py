@@ -25,6 +25,7 @@ LIMITS = [
     pytest.param("keepaliveIntervalSeconds", "LISTEN_KEEPALIVE_INTERVAL_SECS", "30", 1, 3600, id="interval"),
     pytest.param("keepaliveTimeoutSeconds", "LISTEN_KEEPALIVE_TIMEOUT_SECS", "10", 1, 600, id="timeout"),
     pytest.param("maxHeaderListBytes", "LISTEN_MAX_HEADER_LIST_BYTES", "16384", 1024, 1048576, id="header"),
+    pytest.param("maxConnectionAgeSeconds", "LISTEN_MAX_CONNECTION_AGE_SECS", "1800", 1, 86400, id="age"),
 ]
 
 

@@ -119,7 +119,6 @@ tls:
 # below are the library's own `ServerLimits::*` consts, repeated in
 # `values.schema.json` and held by `tests/chart_server_limits.rs`.
 server:
-  # Connection age (ADR-1006, 30 min) omitted until tonic#2780 ships; yaadgaar #417.
   limits:
     # Concurrent HTTP/2 streams one connection may open. Range 1..10000.
     # Rendered as LISTEN_MAX_CONCURRENT_STREAMS.
@@ -135,6 +134,10 @@ server:
     # The largest HTTP/2 header list a request may carry, in bytes. Range
     # 1024..1048576. Rendered as LISTEN_MAX_HEADER_LIST_BYTES.
     maxHeaderListBytes: 16384
+    # How long a connection lives before the server sends GOAWAY, in seconds
+    # (30 min). Range 1..86400. Rendered as LISTEN_MAX_CONNECTION_AGE_SECS.
+    # yadgar-lifecycle reads it from v0.4.0; older releases ignore it.
+    maxConnectionAgeSeconds: 1800
 
 # D80: the platform is a deployment choice, so every number the binary needs is
 # a value here rather than a default only a fork can reach. These four were
