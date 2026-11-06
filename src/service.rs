@@ -79,6 +79,7 @@ use yadgar_lifecycle::serve_tls::caller_common_name;
 use yadgar_telemetry::grpc::status_name;
 use yadgar_telemetry::observe::{Call, Outcome};
 use yadgar_telemetry::pb::yadgar::telemetry::v1::Kind;
+use yadgar_telemetry::request_id::capped;
 
 use crate::pb::yadgar::common::v1::{
     InheritedSetting, Meta, SettingScope, SettingValue, UnverifiedActor,
@@ -216,7 +217,7 @@ impl IamDb {
 /// and published, and because a correlation id is transport-level context rather
 /// than part of what is being asked.
 ///
-/// **CAPPED HERE, AND ONLY HERE, WITH [`capped`] — THE SAME BOUND AND MARKER
+/// **CAPPED HERE, AND ONLY HERE, WITH `yadgar_telemetry::request_id::capped` — THE SAME BOUND AND MARKER
 /// EVERY OTHER CALLER STRING ON THIS BOUNDARY GETS.** A header is bounded only
 /// by the transport's own header-size limit — `h2`'s own default is 16 MiB
 /// ("a sane default taken from golang http2"), and this service sets no
@@ -234,7 +235,7 @@ impl IamDb {
 ///
 /// `gateway::request_id` (D67) mints this id as a 36-character UUIDv7, and
 /// ledger 1248 puts it on the header: yadgarhq/gateway#97 sends it to `iam`,
-/// and yadgarhq/iam#88 forwards it here CAPPED with a copy of [`capped`]. Any
+/// and yadgarhq/iam#88 forwards it here CAPPED with the same shared function. Any
 /// value long enough to be cut did not come from the gateway's generator.
 /// Re-capping what `iam` already capped changes nothing, so both hops'
 /// records carry the identical string.
@@ -294,7 +295,7 @@ fn tel(request_id: String, user_id: &str) -> yadgar_telemetry::observe::Scope {
 /// `CreateCredential`'s credential id) and an enum name are written as they
 /// are; neither can hold a `/`.
 ///
-/// **EVERY CALLER STRING IS CAPPED** at [`ACTOR_RECORD_CAP`] characters, with
+/// **EVERY CALLER STRING IS CAPPED** at `yadgar_telemetry::request_id::CAP` characters, with
 /// `...` marking a cut: each target segment inside [`seg`], the actor id here,
 /// and `request_id` itself inside [`request_id_of`] — the one caller string on
 /// this line that is also read by `tel` for the `CallRecord`, capped at its
@@ -360,40 +361,9 @@ fn record_actor(request_id: &str, actor: Option<&UnverifiedActor>, rpc: &str, ta
     );
 }
 
-/// How many of a caller's characters one string may put on an actor record —
-/// and, since [`request_id_of`] caps with this same function, on the
-/// `request_id` the actor record and the `CallRecord` both carry.
-///
-/// A request may be 4 MB, and a header can run to the transport's own limit:
-/// the actor id, every caller-supplied target segment, and `x-yadgar-request-id`
-/// are all the caller's own strings, read before anything validates them. Past
-/// this many characters the rest is cut and [`CUT_MARKER`] marks the cut, so a
-/// cut value is at most `ACTOR_RECORD_CAP + 3` characters.
-///
-/// **`iam` HOLDS A COPY OF THIS BOUND AND OF [`CUT_MARKER`]** (yadgarhq/iam#88,
-/// its `REQUEST_ID_CAP` and `capped`). The copies must stay identical, or the
-/// two hops cut one over-long request id differently and their records stop
-/// joining.
-const ACTOR_RECORD_CAP: usize = 256;
-
-/// What marks a cut. **ASCII, and that is load-bearing** (ledger 1248): the
-/// capped request id crosses a hop in `x-yadgar-request-id`, and
-/// [`request_id_of`] reads it with `to_str()`, which refuses any non-ASCII
-/// byte. The `…` this used to be was accepted into metadata and read back as
-/// `""`.
-const CUT_MARKER: &str = "...";
-
-/// `s` cut to [`ACTOR_RECORD_CAP`] characters, with [`CUT_MARKER`] appended if
-/// it was cut.
-fn capped(s: &str) -> std::borrow::Cow<'_, str> {
-    match s.char_indices().nth(ACTOR_RECORD_CAP) {
-        Some((at, _)) => format!("{}{CUT_MARKER}", &s[..at]).into(),
-        None => s.into(),
-    }
-}
-
-/// One caller-supplied segment of a `record_actor` target: capped, then
-/// escaped `%` → `%25` FIRST and `/` → `%2F` second.
+/// One caller-supplied segment of a `record_actor` target: capped (at
+/// `yadgar_telemetry::request_id::CAP`, the bound the request id shares; ledger
+/// 1255), then escaped `%` → `%25` FIRST and `/` → `%2F` second.
 ///
 /// No id grammar in this contract forbids a `/`, so an unescaped one would let
 /// one object's target read as another's. `%` goes first, or a literal `%2F`
