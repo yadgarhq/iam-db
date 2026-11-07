@@ -55,7 +55,7 @@ prost-types = "0.14"
 # The shared instrumentation seam (D67), pinned by release tag like every in-org
 # crate. This repository sat one commit behind every other consumer until now —
 # a bare revision in five files has nothing that notices one falling behind.
-yadgar-telemetry = { git = "https://github.com/yadgarhq/telemetry.git", tag = "v0.2.15", features = ["grpc"] }
+yadgar-telemetry = { git = "https://github.com/yadgarhq/telemetry.git", tag = "v0.2.16", features = ["grpc"] }
 # The metrics facade, DIRECTLY rather than through yadgar-telemetry. D67's three
 # signals go through that seam and still do; `create_enrolment`'s idempotency
 # sensor is a fourth, belonging to this one handler — the same reasoning
@@ -98,7 +98,7 @@ metrics = "0.24"
 # in v0.2.23. It reads the common name off the verified client leaf, and the
 # caller gate on every `IamDbService` verb compares that name with
 # `iam-caller`. The step past v0.2.23 adds only a tokio patch bump.
-yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle.git", tag = "v0.3.10", features = [
+yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle.git", tag = "v0.4.1", features = [
   "serve-tls",
 ] }
 # A NORMAL DEPENDENCY NOW, no longer dev-only (ADR-1019, yaadgaar #337).
