@@ -2253,9 +2253,9 @@ dependencies = [
 
 [[package]]
 name = "tonic"
-version = "0.14.6"
+version = "0.14.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac2a5518c70fa84342385732db33fb3f44bc4cc748936eb5833d2df34d6445ef"
+checksum = "e2cdfc673aabd30fe8fee92e65837b644c37c5d47f0f97ae6d5e0f1237d15e1b"
 dependencies = [
  "async-trait",
  "axum",
@@ -2275,6 +2275,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-stream",
+ "tokio-util",
  "tower",
  "tower-layer",
  "tower-service",
@@ -2817,7 +2818,7 @@ dependencies = [
 [[package]]
 name = "yadgar-lifecycle"
 version = "0.1.0"
-source = "git+https://github.com/yadgarhq/lifecycle.git?tag=v0.3.10#bdfb1e960804fe8086478cac8dc427cb5f467920"
+source = "git+https://github.com/yadgarhq/lifecycle.git?tag=v0.4.1#6548e1debda9e9ab9bada5f03d8043f28481b323"
 dependencies = [
  "metrics",
  "rustls",
@@ -2847,7 +2848,7 @@ dependencies = [
 [[package]]
 name = "yadgar-telemetry"
 version = "0.1.0"
-source = "git+https://github.com/yadgarhq/telemetry.git?tag=v0.2.15#2afdc31aa26328e3f4f2554496b4babfd6d762cd"
+source = "git+https://github.com/yadgarhq/telemetry.git?tag=v0.2.16#0b3d3ebab8291249980b893136b378086c207b14"
 dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
