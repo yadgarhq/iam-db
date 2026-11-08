@@ -117,7 +117,7 @@ yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle.git", tag = "v
 # back from the same crate.
 #
 # v0.2.25 is the first tag with `Deadline`.
-yadgar-dial = { git = "https://github.com/yadgarhq/dial.git", tag = "v0.2.32" }
+yadgar-dial = { git = "https://github.com/yadgarhq/dial.git", tag = "v0.2.33" }
 sqlx = { version = "0.9", default-features = false, features = [
   "runtime-tokio",
   "tls-rustls-ring",

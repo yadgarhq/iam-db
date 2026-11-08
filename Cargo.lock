@@ -2777,7 +2777,7 @@ dependencies = [
 [[package]]
 name = "yadgar-dial"
 version = "0.1.0"
-source = "git+https://github.com/yadgarhq/dial.git?tag=v0.2.32#03d6cacb30bec84551967b89f627fdbbad5e657c"
+source = "git+https://github.com/yadgarhq/dial.git?tag=v0.2.33#3019f264993fb0388de402e5427574d8351eeb22"
 dependencies = [
  "metrics",
  "rustls",
