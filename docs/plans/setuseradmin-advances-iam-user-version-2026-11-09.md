@@ -90,6 +90,10 @@ How every example seeds and compares `updated_at` (zone-independent):
   does not move `version`.
 - Success: `UNIX_TIMESTAMP(updated_at) > 1000000000`.
 - Refusal: `UNIX_TIMESTAMP(updated_at) = 1000000000`.
+- No example seeds or compares `updated_at` with a datetime string literal
+  (plan-audit refusal of run wf_ce9bf3eb-e62). MariaDB reads a string literal
+  in the session zone, while `UNIX_TIMESTAMP` of a `TIMESTAMP` column returns
+  the stored UTC instant.
 
 "Contract test against MariaDB 11.8" (the task's words): each new file is a
 real-MariaDB test target on the shared `tests/db/mod.rs` fixture (`mod db;`),
@@ -125,9 +129,13 @@ No version-bump checker, CHANGELOG or generated file applies. Checked:
 The DB-backed targets need `YADGAR_TEST_DSN`, which the fleet's `test_env`
 supplies.
 
-Probe (this run): scratch worktree at HEAD, throwaway `mariadb:11.8.9`,
+Probe (first plan run): scratch worktree at HEAD, throwaway `mariadb:11.8.9`,
 `cargo test --all-features -- promoting_an_unknown_user_is_not_found_but_re_asserting_a_flag_is_not`
 exited 0 (1 passed in `tests/contract.rs`).
+
+Probe (re-plan run): same set-up,
+`cargo test --all-features -- revoke_all_bumps_the_epoch` exited 0 (1 passed
+in `tests/credential_epoch.rs`).
 
 Gap: the fleet's cargo allowlist takes no file argument (`--test <name>` is
 refused), and a file path as a trailing argument becomes a test-name filter
