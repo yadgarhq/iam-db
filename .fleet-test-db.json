@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "engine": "mariadb",
+  "major": "11.4",
+  "env": "YADGAR_TEST_DSN",
+  "test_db_prefix": "iam_db_"
+}
