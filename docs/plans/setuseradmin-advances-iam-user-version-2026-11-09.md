@@ -1,7 +1,8 @@
 # Every UPDATE on iam_user advances version (D8)
 
 Status: proposed (fleet plan, yaadgaar 671). Nothing here is built.
-Date: 2026-11-09. Base: `main` at 1332c1e.
+Date: 2026-11-09, re-planned 2026-11-10 under fleet 5.0.3. Base: `main` at
+1332c1e (the fleet branch adds only this plan doc).
 
 ## Problem
 
@@ -16,14 +17,18 @@ So a version compare-and-swap on `iam_user` cannot see a change. proto#99
 (which superseded proto#98) uses a byte compare-and-swap for that reason, and
 names SetUserAdmin as the cause.
 
+This is a bug fix: it restores what D8 requires ("every successful update").
+
 ## Premise check (HEAD 1332c1e)
 
 The defect reproduces. `src/service/policy.rs:44` is still
 `UPDATE iam_user SET is_admin = ? WHERE id = ? AND deleted_at IS NULL`.
 Reference re-map: the task cites `src/service/policy.rs:44` at 933ddea. At
-1332c1e the statement is still at line 44. No drift.
+1332c1e the statement is still at line 44, and the epoch statements are still
+at `src/service/epoch.rs:35` and `:56`. No drift.
 
-Measured on `mariadb:11.8.9` with a copy of the relevant columns:
+Measured on `mariadb:11.8.9` and on the fleet's `mariadb:11.4` (11.4.13) with
+a copy of the relevant columns:
 
 - A re-asserted `is_admin` (same value) leaves `version` AND `updated_at`
   unchanged. `ON UPDATE CURRENT_TIMESTAMP` (`src/schema.rs:221-222`) fires
@@ -41,7 +46,10 @@ Searched under `src/`: `UPDATE iam_user` (any line break), `INSERT INTO
 iam_user` with `ON DUPLICATE KEY UPDATE`, and `REPLACE`. The two
 `INSERT INTO iam_user` statements (`src/service/identity.rs:53`,
 `src/service/identity/bootstrap.rs:95`) have no `ON DUPLICATE KEY UPDATE`.
-There is no `REPLACE`. Three production statements update `iam_user`:
+There is no `REPLACE` statement. The `ON DUPLICATE KEY UPDATE` clauses in
+`src/service/password.rs:140`, `src/service/enrolment/redeem.rs:208`,
+`src/service/policy.rs:126` and `src/service/setting.rs:145`, `:264` write
+other tables. Three production statements update `iam_user`:
 
 | Site                                                                 | Statement                                                                | version      | updated_at                     |
 | -------------------------------------------------------------------- | ------------------------------------------------------------------------ | ------------ | ------------------------------ |
@@ -49,14 +57,24 @@ There is no `REPLACE`. Three production statements update `iam_user`:
 | `src/service/epoch.rs:35` (`bump`: redemption, RevokeAllCredentials) | `SET credential_epoch = credential_epoch + 1`                            | not advanced | implicit (column always moves) |
 | `src/service/epoch.rs:56` (`bump_live`: SetPassword)                 | `SET credential_epoch = credential_epoch + 1 ... AND deleted_at IS NULL` | not advanced | implicit (column always moves) |
 
-All three have the version gap. The plan fixes all three. The other
-`UPDATE iam_user` lines are test fixtures (soft deletes in `tests/`), not
-production writes. No existing test reads `iam_user.version`.
+All three have the version gap. The plan fixes all three (Max ruling 2,
+2026-11-10). The other `UPDATE iam_user` lines are test fixtures (soft
+deletes in `tests/`), not production writes. No existing test reads
+`iam_user.version`.
+
+Callers of the two epoch functions: `epoch::bump` at
+`src/service/credential/all.rs:51` (RevokeAllCredentials) and
+`src/service/enrolment/redeem.rs:190` (every redemption, flagged or not; a
+replay returns at `redeem.rs:132-139` before it, and a refused redemption
+never reaches it). `epoch::bump_live` at `src/service/password.rs:131`
+(SetPassword). A flagged redemption calls `revoke::all`, which does not bump,
+so it bumps exactly once.
 
 ## Design
 
 1. `set_admin` (`src/service/policy.rs:44`): the UPDATE becomes
    `UPDATE iam_user SET is_admin = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL`.
+   The bump is unconditional: a re-asserted flag also adds 1 (Max ruling 1).
    The `rows_affected() == 0` branch and the `live_user` re-read stay as they
    are. `sqlx-mysql` reports MATCHED rows, so the count for a live user is
    still 1 and the reported `rows` does not change.
@@ -64,10 +82,13 @@ production writes. No existing test reads `iam_user.version`.
    the same two assignments are added to each statement. The statements lock
    the same row as before, so lock order and the ADR-0972 (4) argument do not
    change.
-3. The coder may add one comment line per statement that names D8. No module
+3. The coder may add one comment line per statement that names D8, and may
+   correct the "running it twice reaches the same state" comment in
+   `set_admin` (the flag state is the same; `version` now moves). No module
    doc change is required.
 
 No schema change. No migration. No proto change. No new dependency.
+`updated_by` stays unwritten (Max ruling 3).
 
 ## Acceptance criteria (summary; the literal examples are in the fleet json)
 
@@ -90,10 +111,9 @@ How every example seeds and compares `updated_at` (zone-independent):
   does not move `version`.
 - Success: `UNIX_TIMESTAMP(updated_at) > 1000000000`.
 - Refusal: `UNIX_TIMESTAMP(updated_at) = 1000000000`.
-- No example seeds or compares `updated_at` with a datetime string literal
-  (plan-audit refusal of run wf_ce9bf3eb-e62). MariaDB reads a string literal
-  in the session zone, while `UNIX_TIMESTAMP` of a `TIMESTAMP` column returns
-  the stored UTC instant.
+- No example seeds or compares `updated_at` with a datetime string literal.
+  MariaDB reads a string literal in the session zone, while `UNIX_TIMESTAMP`
+  of a `TIMESTAMP` column returns the stored UTC instant.
 
 "Contract test against MariaDB 11.8" (the task's words): each new file is a
 real-MariaDB test target on the shared `tests/db/mod.rs` fixture (`mod db;`),
@@ -101,7 +121,8 @@ as `tests/credential_epoch.rs` is. It panics without `YADGAR_TEST_DSN`, and
 CI runs it on MariaDB 11.8. `version` and `updated_at` are not exposed by any
 read RPC, so each test reads them with SQL on `svc.pool()`, as `stored_epoch`
 does. Each file keeps its own SQL helpers; neither edits `tests/db/mod.rs`.
-Each test uses its own database name, prefixed `iam_db_version_`.
+Each test uses its own database name, prefixed `iam_db_version_` (inside the
+repo's declared `iam_db_` test-database prefix).
 
 TDD red: AC1's re-assert and every AC1/AC2 `version` assertion fail on
 1332c1e.
@@ -125,45 +146,78 @@ No version-bump checker, CHANGELOG or generated file applies. Checked:
 
 ## test_cmd
 
-`cargo test --all-features` (the `Makefile` `test` target), with `env: {}`.
-The DB-backed targets need `YADGAR_TEST_DSN`, which the fleet's `test_env`
-supplies.
+`cargo test --all-features` (the `Makefile` `test` target, `Makefile:15-16`),
+with `env: {}`. Each criterion is targeted with its own `test_args`: AC1
+`--test user_version_admin`, AC2 `--test user_version_epoch`. The command
+carries no `<paths>` token.
 
-Probe (first plan run): scratch worktree at HEAD, throwaway `mariadb:11.8.9`,
-`cargo test --all-features -- promoting_an_unknown_user_is_not_found_but_re_asserting_a_flag_is_not`
-exited 0 (1 passed in `tests/contract.rs`).
+The DB-backed targets need `YADGAR_TEST_DSN`. `origin/main` (2def7ba) now
+declares the fleet test database in `.fleet-test-db.json` (engine `mariadb`,
+major `11.4`, env `YADGAR_TEST_DSN`, test-database prefix `iam_db_`). The
+fleet run hands the tests the YADGAR_TEST_DSN URL: a per-run user and
+password, host 127.0.0.1, a port and a database given by the workflow, with
+CREATE and DROP on databases named `iam_db_*`. The shared fixture
+(`tests/db/mod.rs:30-42`) drops and creates per-test databases, and every name
+this plan uses starts with `iam_db_version_`, so that grant is enough.
 
-Probe (re-plan run): same set-up,
-`cargo test --all-features -- revoke_all_bumps_the_epoch` exited 0 (1 passed
-in `tests/credential_epoch.rs`).
+Probe (this run, 2026-11-10): scratch worktree at 4372f89 (code identical to
+1332c1e), this run's fleet database (`mariadb:11.4`), the workflow's
+YADGAR_TEST_DSN URL, `cargo test --all-features --test credential_epoch --
+revoke_all_bumps_the_epoch --exact` exited 0 (1 passed, 19 filtered out). The
+fixture created and dropped `iam_db_epoch_revoke_all` under that user.
 
-Gap: the fleet's cargo allowlist takes no file argument (`--test <name>` is
-refused), and a file path as a trailing argument becomes a test-name filter
-that matches nothing and exits 0. So the command carries no `<paths>` token:
-every targeted run is a full-suite run. Slower, never a false green.
+Gap: the fleet gates test on MariaDB 11.4, not the 11.8 the task names. The
+11.4 measurements above match 11.8.9, and 11.8 coverage stays with CI.
+
+## Non-goals
+
+- No `expect_version` compare-and-swap on SetUserAdmin or on any epoch bump.
+  This plan makes `version` move; it adds no caller that checks it.
+- No `updated_by` write (Max ruling 3; a follow-up if wanted).
+- No change to the response of any RPC. `version` and `updated_at` stay
+  unexposed by every read RPC.
+- No change to `iam_user` writes outside `src/` (test fixtures in `tests/`
+  keep their bare soft-delete UPDATEs).
+- No change to `tests/db/mod.rs` or `tests/contract.rs`.
+- No idempotency-key honouring for RevokeAllCredentials (ledger 668).
+- No edit to `.fleet-test-db.json`.
+
+## Trust boundaries (STRIDE)
+
+The change adds no input and no trust boundary: the three statements take the
+same bound `user_id` and `is_admin` as before, and the two new assignments use
+no caller value. Spoofing, tampering, repudiation, information disclosure,
+denial of service and elevation of privilege are unchanged; the existing
+caller gate (`IAM_CALLER`) and the `deleted_at IS NULL` refusals stay, and AC1
+re-asserts the soft-deleted and unknown-id refusals. AC2 re-asserts that a
+refused SetPassword, an expired redemption and an unknown-user
+RevokeAllCredentials write nothing.
 
 ## Risks
 
 - A re-asserted flag now moves `version`. A caller that compares versions sees
   a conflict after another caller's no-op write. That fails safe (a spurious
   conflict, never a missed change) and is D8 as written ("every successful
-  update"). See open decision 1.
+  update"). Max ruling 1 accepts it.
 - Epoch bumps now move `version`. A future version compare-and-swap on the
   admin flag conflicts with a concurrent password reset. Correct under D8, but
-  visible. See open decision 2.
+  visible. Max ruling 2 accepts it.
 - A RevokeAllCredentials redelivery re-runs the bump today (ledger 668), so it
   moves `version` again. Same class as risk 1.
 
+## Decisions (Max rulings, 2026-11-10)
+
+1. A re-asserted admin flag still bumps `version`, with an unconditional
+   `version + 1`.
+2. Credential-epoch bumps (`src/service/epoch.rs:35`, `:56`) also advance
+   `version`, so AC2 stays.
+3. `updated_by` stays unwritten by SetUserAdmin. Out of scope; a follow-up if
+   wanted.
+4. Test database: route (a). The fleet's database grants the role user CREATE
+   and DROP on `iam_db_%`.\*, and `.fleet-test-db.json` is on iam-db `main`
+   (2def7ba). Measured by this run's probe. The fleet tests on 11.4 only; CI
+   covers 11.8.
+
 ## Open decisions for Max
 
-1. Re-assert bumps `version`. Recommended: yes (unconditional
-   `version + 1`). Alternative: bump only when `is_admin` changes, which keeps
-   a strict D9 "same state" reading but adds a two-valued write for no current
-   consumer.
-2. Credential-epoch bumps advance `version`. Recommended: yes; D8 names no
-   exception, and RotateKeyIdentity (proto#99) also advances it. Alternative:
-   treat `credential_epoch` as an internal counter outside D8 and leave
-   `epoch.rs` alone (then drop AC2).
-3. `updated_by` stays unwritten by SetUserAdmin, although `Meta` says an edit
-   changes it (`common.proto:303-306`). Out of scope here; a follow-up if
-   wanted.
+None. The four decisions above are ruled.
