@@ -31,12 +31,15 @@ pub(super) async fn bump(
     tx: &mut sqlx::MySqlTransaction<'_>,
     user_id: &str,
 ) -> Result<u64, Status> {
-    let done =
-        sqlx::query("UPDATE iam_user SET credential_epoch = credential_epoch + 1 WHERE id = ?")
-            .bind(user_id)
-            .execute(&mut **tx)
-            .await
-            .map_err(db)?;
+    let done = sqlx::query(
+        "UPDATE iam_user SET credential_epoch = credential_epoch + 1, version = version + 1,
+                updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?",
+    )
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(db)?;
     Ok(done.rows_affected())
 }
 
@@ -53,7 +56,8 @@ pub(super) async fn bump_live(
     user_id: &str,
 ) -> Result<u64, Status> {
     let done = sqlx::query(
-        "UPDATE iam_user SET credential_epoch = credential_epoch + 1
+        "UPDATE iam_user SET credential_epoch = credential_epoch + 1, version = version + 1,
+                updated_at = CURRENT_TIMESTAMP
           WHERE id = ? AND deleted_at IS NULL",
     )
     .bind(user_id)
