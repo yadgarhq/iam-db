@@ -1,8 +1,9 @@
 # Every UPDATE on iam_user advances version (D8)
 
 Status: proposed (fleet plan, yaadgaar 671). Nothing here is built.
-Date: 2026-11-09, re-planned 2026-11-10 under fleet 5.0.3. Base: `main` at
-1332c1e (the fleet branch adds only this plan doc).
+Date: 2026-11-09, re-planned 2026-11-10 under fleet 5.0.3, and again on
+2026-11-10 under fleet 5.0.6 (criteria split into new behaviour and guards).
+Base: `main` at 1332c1e (the fleet branch adds only this plan doc).
 
 ## Problem
 
@@ -92,16 +93,53 @@ No schema change. No migration. No proto change. No new dependency.
 
 ## Acceptance criteria (summary; the literal examples are in the fleet json)
 
-- AC1 `[e2e]` `tests/user_version_admin.rs`: each successful SetUserAdmin call
-  advances `version` by exactly 1 (re-assert included) and sets `updated_at`.
-  A NOT_FOUND (unknown id, soft-deleted person) writes nothing. Another
+Four criteria. AC1 and AC2 hold only the new behaviour: every example in them
+fails on 1332c1e. AC3 and AC4 hold the refusals that already write nothing
+today: they pass on 1332c1e and must still pass after the fix, so they are
+marked `guards_existing` with a quoted spec line. The split exists because the
+fleet test judge refuses a test that passes on current code unless its
+criterion guards existing behaviour (fleet 5.0.6 build wf_5cc06208-e0b
+stopped there).
+
+- AC1 `[e2e]` `tests/user_version_admin.rs` (new behaviour): each successful
+  SetUserAdmin call advances `version` by exactly 1 (promote, demote and
+  re-assert) and sets `updated_at`. Another person's row is untouched while
+  the target's `version` moves.
+- AC2 `[e2e]` `tests/user_version_epoch.rs` (new behaviour): each epoch bump
+  advances `version` by exactly 1 and sets `updated_at`: RevokeAllCredentials
+  (live and soft-deleted person), SetPassword, an unflagged and a flagged
+  redemption. A redemption and its replay together add exactly 1: the first
+  delivery adds 1, the replay adds 0 and leaves `updated_at` alone. Another
   person's row is untouched.
-- AC2 `[e2e]` `tests/user_version_epoch.rs`: each epoch bump advances
-  `version` by exactly 1 and sets `updated_at`: RevokeAllCredentials (live and
-  soft-deleted person), SetPassword, an unflagged and a flagged redemption.
-  An unknown-user RevokeAllCredentials, a refused SetPassword, an expired
-  redemption and a replayed redemption leave `version` and `updated_at`
-  unchanged.
+- AC3 `[e2e]` `tests/user_version_admin_guard.rs` (guard, passes today):
+  SetUserAdmin for an unknown id or a soft-deleted person answers NOT_FOUND
+  and changes neither `version` nor `updated_at` (nor `is_admin`). Spec:
+  `src/service/policy.rs:51` ("A MISTYPED USER ID MUST NOT REPORT SUCCESS"),
+  `:36-38` (no promotion of a soft-deleted person), `:63-65` (NOT_FOUND for
+  both), and D8 (`common.proto:282-283`: only a successful update increments).
+- AC4 `[e2e]` `tests/user_version_epoch_guard.rs` (guard, passes today):
+  RevokeAllCredentials for an unknown user answers NOT_FOUND, SetPassword for a
+  soft-deleted person answers NOT_FOUND, and an expired redemption answers
+  `RedeemOutcome::Expired`. Each leaves `version` and `updated_at` unchanged.
+  Spec: `iamdb.proto:705` ("NOT_FOUND MEANS NO `iam_user` ROW AT ALL."),
+  `src/service/epoch.rs:49-50` (SetPassword's zero is NOT_FOUND, "decided
+  before anything is written"), `iamdb.proto:462-463` (expiry evaluated in the
+  statement), and D8.
+
+Measured (this run, scratch worktree at HEAD, fleet MariaDB 11.4): the earlier
+writer output for the old two criteria had exactly five tests GREEN on
+current code: SetUserAdmin unknown id and soft-deleted person,
+RevokeAllCredentials unknown user, SetPassword soft-deleted person, expired
+redemption. Those five are AC3 and AC4. Every other test failed on its
+`version` assertion. The replay test is RED because it asserts the first
+delivery's +1 before the replay; AC2 keeps that form.
+
+Each guard example asserts both the refusal (status code or outcome) and the
+no-write (`version` and `updated_at` unchanged), so a stub that answers OK or
+swallows the error is caught. A stub that skips the write does not apply to a
+refusal: the refusal has no write. Each test file uses database names of its
+own (`iam_db_version_` for AC1 and AC2, `iam_db_vguard_` for AC3 and AC4), so
+two targets never share a database.
 
 How every example seeds and compares `updated_at` (zone-independent):
 
@@ -124,8 +162,9 @@ does. Each file keeps its own SQL helpers; neither edits `tests/db/mod.rs`.
 Each test uses its own database name, prefixed `iam_db_version_` (inside the
 repo's declared `iam_db_` test-database prefix).
 
-TDD red: AC1's re-assert and every AC1/AC2 `version` assertion fail on
-1332c1e.
+TDD red: every AC1 and AC2 test fails on 1332c1e on a `version` assertion.
+AC3 and AC4 pass on 1332c1e by design (guards) and must still pass after the
+fix.
 
 ## Repo obligations (coder steps)
 
@@ -148,8 +187,9 @@ No version-bump checker, CHANGELOG or generated file applies. Checked:
 
 `cargo test --all-features` (the `Makefile` `test` target, `Makefile:15-16`),
 with `env: {}`. Each criterion is targeted with its own `test_args`: AC1
-`--test user_version_admin`, AC2 `--test user_version_epoch`. The command
-carries no `<paths>` token.
+`--test user_version_admin`, AC2 `--test user_version_epoch`, AC3
+`--test user_version_admin_guard`, AC4 `--test user_version_epoch_guard`. The
+command carries no `<paths>` token.
 
 The DB-backed targets need `YADGAR_TEST_DSN`. `origin/main` (2def7ba) now
 declares the fleet test database in `.fleet-test-db.json` (engine `mariadb`,
@@ -158,13 +198,14 @@ fleet run hands the tests the YADGAR_TEST_DSN URL: a per-run user and
 password, host 127.0.0.1, a port and a database given by the workflow, with
 CREATE and DROP on databases named `iam_db_*`. The shared fixture
 (`tests/db/mod.rs:30-42`) drops and creates per-test databases, and every name
-this plan uses starts with `iam_db_version_`, so that grant is enough.
+this plan uses starts with `iam_db_version_` or `iam_db_vguard_`, so that grant
+is enough.
 
-Probe (this run, 2026-11-10): scratch worktree at 4372f89 (code identical to
-1332c1e), this run's fleet database (`mariadb:11.4`), the workflow's
-YADGAR_TEST_DSN URL, `cargo test --all-features --test credential_epoch --
-revoke_all_bumps_the_epoch --exact` exited 0 (1 passed, 19 filtered out). The
-fixture created and dropped `iam_db_epoch_revoke_all` under that user.
+Probe (this run, 2026-11-10, fleet 5.0.6): scratch worktree at 10580fc (code
+identical to 1332c1e), this run's fleet database (`mariadb:11.4`), the
+workflow's YADGAR_TEST_DSN URL, `cargo test --all-features --test
+credential_epoch -- revoke_all_bumps_the_epoch --exact` exited 0 (1 passed,
+19 filtered out).
 
 Gap: the fleet gates test on MariaDB 11.4, not the 11.8 the task names. The
 11.4 measurements above match 11.8.9, and 11.8 coverage stays with CI.
@@ -188,10 +229,11 @@ The change adds no input and no trust boundary: the three statements take the
 same bound `user_id` and `is_admin` as before, and the two new assignments use
 no caller value. Spoofing, tampering, repudiation, information disclosure,
 denial of service and elevation of privilege are unchanged; the existing
-caller gate (`IAM_CALLER`) and the `deleted_at IS NULL` refusals stay, and AC1
-re-asserts the soft-deleted and unknown-id refusals. AC2 re-asserts that a
+caller gate (`IAM_CALLER`) and the `deleted_at IS NULL` refusals stay. AC3
+re-asserts the soft-deleted and unknown-id SetUserAdmin refusals (elevation of
+privilege: no promotion of a person who is gone). AC4 re-asserts that a
 refused SetPassword, an expired redemption and an unknown-user
-RevokeAllCredentials write nothing.
+RevokeAllCredentials write nothing (tampering).
 
 ## Risks
 
