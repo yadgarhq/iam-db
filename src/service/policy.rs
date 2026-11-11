@@ -40,13 +40,18 @@ impl IamDb {
         // Idempotent (D9) without a ledger because it ASSIGNS rather than
         // toggles — running it twice reaches the same state.
         let mut conn = self.acquire(deadline).await?;
-        let done =
-            sqlx::query("UPDATE iam_user SET is_admin = ? WHERE id = ? AND deleted_at IS NULL")
-                .bind(r.is_admin)
-                .bind(&r.user_id)
-                .execute(&mut *conn)
-                .await
-                .map_err(db)?;
+        //
+        // `version` and `updated_at` move on every successful call, flag changed
+        // or re-asserted (common.proto D8).
+        let done = sqlx::query(
+            "UPDATE iam_user SET is_admin = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP
+              WHERE id = ? AND deleted_at IS NULL",
+        )
+        .bind(r.is_admin)
+        .bind(&r.user_id)
+        .execute(&mut *conn)
+        .await
+        .map_err(db)?;
 
         // A MISTYPED USER ID MUST NOT REPORT SUCCESS, the same way
         // RevokeCredential refuses a credential id it does not recognise. This
