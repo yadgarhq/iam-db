@@ -189,7 +189,7 @@ async fn evidence_is_listed_oldest_first_including_soft_deleted_rows() {
     // Creation order here is the REVERSE of the ids' order, so an `ORDER BY id`
     // reddens the `assert_eq!` on the ids. The oldest row is soft-deleted, so a
     // `deleted_at IS NULL` filter reddens it too.
-    let svc = fresh("iamdb_evidence_order").await;
+    let svc = fresh("iam_db_evidence_order").await;
     let a = person(&svc, 1).await;
     let b = person(&svc, 2).await;
     let c = person(&svc, 3).await;
@@ -212,7 +212,7 @@ async fn evidence_is_listed_oldest_first_including_soft_deleted_rows() {
 
 #[tokio::test]
 async fn an_empty_store_lists_no_evidence() {
-    let svc = fresh("iamdb_evidence_empty").await;
+    let svc = fresh("iam_db_evidence_empty").await;
     let page = evidence_page(&svc, 0, "").await;
     assert!(page.evidence.is_empty());
     assert_eq!(page.next_page_token, "");
@@ -225,7 +225,7 @@ async fn evidence_pages_by_keyset_and_a_row_created_mid_walk_does_not_shift_the_
     // OLDER row arrives: a keyset walk never sees it and serves each original
     // row once, where an OFFSET walk serves the second page's first row twice.
     // THE ASSERTION THAT REDDENS under OFFSET paging: the walked `assert_eq!`.
-    let svc = fresh("iamdb_evidence_paging").await;
+    let svc = fresh("iam_db_evidence_paging").await;
     let rows = bulk(&svc, 5).await;
 
     let first = evidence_page(&svc, 2, "").await;
@@ -260,7 +260,7 @@ async fn evidence_rows_on_different_seconds_page_across_the_boundary() {
     // THE TOKEN CARRIES BOTH HALVES OF THE POSITION. Rows on two seconds, a
     // page boundary between them: a token of the id alone skips or repeats
     // rows here, because the ids do not sort in creation order.
-    let svc = fresh("iamdb_evidence_two_seconds").await;
+    let svc = fresh("iam_db_evidence_two_seconds").await;
     let a = person(&svc, 1).await;
     let b = person(&svc, 2).await;
     let c = person(&svc, 3).await;
@@ -278,7 +278,7 @@ async fn evidence_rows_on_different_seconds_page_across_the_boundary() {
 
 #[tokio::test]
 async fn a_page_size_above_the_ceiling_is_capped_and_zero_takes_the_default() {
-    let svc = fresh("iamdb_evidence_page_size").await;
+    let svc = fresh("iam_db_evidence_page_size").await;
     bulk(&svc, 201).await;
 
     let capped = evidence_page(&svc, 10_000, "").await;
@@ -301,7 +301,7 @@ async fn a_page_size_above_the_ceiling_is_capped_and_zero_takes_the_default() {
 
 #[tokio::test]
 async fn a_malformed_page_token_is_invalid_argument() {
-    let svc = fresh("iamdb_evidence_bad_token").await;
+    let svc = fresh("iam_db_evidence_bad_token").await;
     let got = svc
         .list_key_identity_evidence_as(
             Some(IAM_CALLER),
@@ -321,7 +321,7 @@ async fn a_malformed_page_token_is_invalid_argument() {
 async fn adoption_on_a_populated_store_with_no_marker_records_and_then_matches() {
     // THE PATH ADR-1089 OPENS. Set refuses this store; Adopt with the oldest
     // rows records, and Get then answers MATCH.
-    let svc = fresh("iamdb_adopt_records").await;
+    let svc = fresh("iam_db_adopt_records").await;
     let ids = people(&svc, 3).await;
     refused(
         set_marker(&svc, &fingerprint(1), 1).await,
@@ -347,7 +347,7 @@ async fn adoption_where_a_marker_exists_compares_and_never_overwrites() {
     // WRITE-ONCE ON THIS ARM TOO. A stored marker answers the COMPARISON —
     // even to evidence that would be refused — and is never replaced.
     // THE ASSERTION THAT REDDENS under an upsert: `stored_marker`.
-    let svc = fresh("iamdb_adopt_compares").await;
+    let svc = fresh("iam_db_adopt_compares").await;
     assert_eq!(
         set_marker(&svc, &fingerprint(1), 1)
             .await
@@ -391,7 +391,7 @@ async fn adoption_where_a_marker_exists_compares_and_never_overwrites() {
 
 #[tokio::test]
 async fn adoption_on_an_empty_store_is_refused() {
-    let svc = fresh("iamdb_adopt_empty").await;
+    let svc = fresh("iam_db_adopt_empty").await;
     refused(
         adopt(
             &svc,
@@ -406,7 +406,7 @@ async fn adoption_on_an_empty_store_is_refused() {
 
 #[tokio::test]
 async fn an_evidence_id_naming_no_row_is_refused() {
-    let svc = fresh("iamdb_adopt_unknown").await;
+    let svc = fresh("iam_db_adopt_unknown").await;
     let ids = people(&svc, 2).await;
     for evidence in [
         vec![ids[0].clone(), "yadgar:user:nobody".into()],
@@ -426,7 +426,7 @@ async fn evidence_that_is_not_the_oldest_rows_is_refused() {
     // THE RULE ADR-1089 MOVES INTO THIS SERVICE. Each set below names rows
     // that exist; none is the N oldest. THE ASSERTION THAT REDDENS when the
     // predicate checks existence only: every `refused` in the loop.
-    let svc = fresh("iamdb_adopt_not_oldest").await;
+    let svc = fresh("iam_db_adopt_not_oldest").await;
     let ids = people(&svc, 4).await;
     for evidence in [
         vec![ids[3].clone()],
@@ -458,7 +458,7 @@ async fn the_oldest_rows_are_chosen_by_creation_and_not_by_id() {
     // count, so the id-ordered prefix and the creation-ordered prefix are
     // different sets. THE ASSERTION THAT REDDENS when the INSERT's predicate
     // orders by `id` alone: the `refused` on the id-ordered prefix.
-    let svc = fresh("iamdb_adopt_creation_not_id").await;
+    let svc = fresh("iam_db_adopt_creation_not_id").await;
     let mut by_id = [
         person(&svc, 1).await,
         person(&svc, 2).await,
@@ -497,7 +497,7 @@ async fn ids_equal_under_the_column_collation_are_a_duplicate() {
     // and PAD SPACE. Two ids that differ only in case or in trailing spaces
     // are ONE row to the predicate, so they are a duplicate in the request,
     // INVALID_ARGUMENT, and not a statement about the store.
-    let svc = fresh("iamdb_adopt_collation_dup").await;
+    let svc = fresh("iam_db_adopt_collation_dup").await;
     let ids = people(&svc, 2).await;
     for evidence in [
         vec![ids[0].clone(), ids[0].to_uppercase()],
@@ -516,7 +516,7 @@ async fn ids_equal_under_the_column_collation_are_a_duplicate() {
 async fn soft_deleted_rows_count_as_evidence() {
     // The oldest row is soft-deleted. Leaving it out is NOT the oldest set;
     // including it is. A `deleted_at IS NULL` in the predicate reddens both.
-    let svc = fresh("iamdb_adopt_soft_deleted").await;
+    let svc = fresh("iam_db_adopt_soft_deleted").await;
     let ids = people(&svc, 3).await;
     soft_delete(&svc, &ids[0]).await;
 
@@ -535,7 +535,7 @@ async fn soft_deleted_rows_count_as_evidence() {
 
 #[tokio::test]
 async fn the_evidence_is_a_set_so_its_order_does_not_matter() {
-    let svc = fresh("iamdb_adopt_shuffled").await;
+    let svc = fresh("iam_db_adopt_shuffled").await;
     let ids = people(&svc, 3).await;
     let shuffled = vec![ids[2].clone(), ids[0].clone(), ids[1].clone()];
     assert_eq!(
@@ -548,7 +548,7 @@ async fn the_evidence_is_a_set_so_its_order_does_not_matter() {
 
 #[tokio::test]
 async fn sixty_four_ids_are_accepted_and_sixty_five_are_invalid() {
-    let svc = fresh("iamdb_adopt_cap").await;
+    let svc = fresh("iam_db_adopt_cap").await;
     let rows = bulk(&svc, 65).await;
     refused(
         adopt(&svc, adopt_request(&fingerprint(1), 1, &rows, "")).await,
@@ -565,7 +565,7 @@ async fn sixty_four_ids_are_accepted_and_sixty_five_are_invalid() {
 
 #[tokio::test]
 async fn a_malformed_adoption_is_invalid_argument_and_writes_nothing() {
-    let svc = fresh("iamdb_adopt_invalid").await;
+    let svc = fresh("iam_db_adopt_invalid").await;
     let ids = people(&svc, 2).await;
     let dup = vec![ids[0].clone(), ids[0].clone()];
     for (fp, version, evidence, what) in [
@@ -595,7 +595,7 @@ async fn two_concurrent_adoptions_answer_one_recorded_and_one_match() {
     // writes; the other is told the marker matches. A loser answered on the
     // status channel (a 1213 or 1020 rendered UNAVAILABLE) reddens the
     // `expect`s; a double write reddens the sorted pair.
-    let svc = fresh("iamdb_adopt_concurrent").await;
+    let svc = fresh("iam_db_adopt_concurrent").await;
     let ids = people(&svc, 3).await;
     let (one, two) = tokio::join!(
         adopt(&svc, adopt_request(&fingerprint(1), 1, &ids, "pod-one")),
@@ -619,7 +619,7 @@ async fn five_concurrent_adoptions_answer_one_recorded_and_four_match() {
     // `LOCK IN SHARE MODE` re-read was chosen against (see `marker`): one
     // loser is one share, and one share has nothing to cycle with. A 1213
     // rendered UNAVAILABLE reddens the `expect`.
-    let svc = fresh("iamdb_adopt_concurrent_five").await;
+    let svc = fresh("iam_db_adopt_concurrent_five").await;
     let ids = people(&svc, 3).await;
     let req = |key: &str| adopt_request(&fingerprint(1), 1, &ids, key);
     let (a, b, c, d, e) = tokio::join!(
@@ -651,7 +651,7 @@ async fn a_replayed_adoption_answers_recorded_and_a_changed_payload_is_refused()
     // D9: the replay returns the ORIGINAL outcome, RECORDED and not MATCH. The
     // payload is the fingerprint and the version; the evidence is not part of
     // it, so a replay carrying other (still valid) evidence is a replay.
-    let svc = fresh("iamdb_adopt_replay").await;
+    let svc = fresh("iam_db_adopt_replay").await;
     let ids = people(&svc, 3).await;
     assert_eq!(
         adopt(&svc, adopt_request(&fingerprint(1), 1, &ids, "k1"))
@@ -688,7 +688,7 @@ async fn a_key_recorded_by_set_replays_as_recorded_on_adopt() {
     // the empty store; rows arrive; Adopt under the same key with the same
     // pair is a replay and answers the ORIGINAL outcome. Harmless: the marker
     // already holds exactly that pair.
-    let svc = fresh("iamdb_adopt_cross_arm_replay").await;
+    let svc = fresh("iam_db_adopt_cross_arm_replay").await;
     svc.set_key_identity_as(
         Some(IAM_CALLER),
         Request::new(SetKeyIdentityRequest {
@@ -713,7 +713,7 @@ async fn a_key_recorded_by_set_replays_as_recorded_on_adopt() {
 async fn a_refusal_is_not_recorded_under_the_idempotency_key() {
     // A refused call writes nothing, so a retry under the SAME key with
     // corrected evidence is evaluated afresh and records.
-    let svc = fresh("iamdb_adopt_refusal_not_keyed").await;
+    let svc = fresh("iam_db_adopt_refusal_not_keyed").await;
     let ids = people(&svc, 3).await;
     refused(
         adopt(&svc, adopt_request(&fingerprint(1), 1, &ids[1..], "k1")).await,
@@ -731,7 +731,7 @@ async fn a_refusal_is_not_recorded_under_the_idempotency_key() {
 #[tokio::test]
 async fn set_still_refuses_a_populated_store_after_a_refused_adoption() {
     // The adoption arm opens no side door in Set's refusal.
-    let svc = fresh("iamdb_adopt_set_unchanged").await;
+    let svc = fresh("iam_db_adopt_set_unchanged").await;
     let ids = people(&svc, 2).await;
     refused(
         adopt(&svc, adopt_request(&fingerprint(1), 1, &ids[1..], "")).await,
