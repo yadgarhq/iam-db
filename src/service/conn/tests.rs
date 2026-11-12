@@ -102,7 +102,7 @@ async fn next_borrower(pool: &MySqlPool) -> (i64, String) {
 /// (`sync_teams`, the bootstrap `CreateUser`, the declared enrolment).
 #[tokio::test]
 async fn a_drop_between_set_transaction_and_begin_leaves_no_pending_isolation_level() {
-    let pool = one_connection_pool("iamdb_conn_cancel_set").await;
+    let pool = one_connection_pool("iam_db_conn_cancel_set").await;
 
     // Inside a request that then completes normally, so only the `begin`
     // guard decides: the request's own cancellation flag stays clear.
@@ -131,7 +131,7 @@ async fn a_drop_between_set_transaction_and_begin_leaves_no_pending_isolation_le
 /// `BEGIN` and leaves it waiting for the reply; then the future is dropped.
 #[tokio::test]
 async fn a_drop_while_begin_is_in_flight_leaves_no_open_transaction() {
-    let pool = one_connection_pool("iamdb_conn_cancel_begin").await;
+    let pool = one_connection_pool("iam_db_conn_cancel_begin").await;
 
     // Inside a request that completes normally: only the `begin` guard decides.
     store_work(async {
@@ -160,7 +160,7 @@ async fn a_drop_while_begin_is_in_flight_leaves_no_open_transaction() {
 /// rest, and the connection is reused rather than closed.
 #[tokio::test]
 async fn a_started_transaction_dropped_unfinished_returns_a_clean_reused_connection() {
-    let pool = one_connection_pool("iamdb_conn_cancel_started").await;
+    let pool = one_connection_pool("iam_db_conn_cancel_started").await;
 
     let first = store_work(async {
         let mut conn = acquire(&pool, Deadline::none()).await.expect("acquire");
@@ -204,7 +204,7 @@ async fn a_started_transaction_dropped_unfinished_returns_a_clean_reused_connect
 /// DEADLINE_EXCEEDED before the deadline, not UNAVAILABLE at the ceiling.
 #[tokio::test]
 async fn an_exhausted_pool_answers_deadline_exceeded_inside_the_callers_deadline() {
-    let pool = one_connection_pool("iamdb_conn_bound").await;
+    let pool = one_connection_pool("iam_db_conn_bound").await;
     let _held = pool.acquire().await.expect("hold the only connection");
 
     let started = std::time::Instant::now();
@@ -221,7 +221,7 @@ async fn an_exhausted_pool_answers_deadline_exceeded_inside_the_callers_deadline
 /// A deadline already inside the margin refuses at once, without waiting.
 #[tokio::test]
 async fn a_deadline_inside_the_margin_refuses_without_waiting() {
-    let pool = one_connection_pool("iamdb_conn_spent").await;
+    let pool = one_connection_pool("iam_db_conn_spent").await;
     let started = std::time::Instant::now();
     let refused = acquire(&pool, Deadline::after(Duration::from_millis(10)))
         .await
@@ -236,7 +236,7 @@ async fn a_deadline_inside_the_margin_refuses_without_waiting() {
 /// completes keeps its connection.
 #[tokio::test]
 async fn a_connection_used_only_for_plain_statements_is_reused() {
-    let pool = one_connection_pool("iamdb_conn_plain").await;
+    let pool = one_connection_pool("iam_db_conn_plain").await;
 
     let first: u64 = store_work(async {
         let mut conn = acquire(&pool, Deadline::none()).await.expect("acquire");
@@ -343,7 +343,7 @@ impl Relay {
 /// this one-connection pool must succeed.
 #[tokio::test]
 async fn a_plain_statement_cancelled_mid_reply_does_not_leak_its_pool_slot() {
-    one_connection_pool("iamdb_conn_cancel_reply").await;
+    one_connection_pool("iam_db_conn_cancel_reply").await;
     let dsn = dsn();
     let (base, _ci_database) = dsn.rsplit_once('/').expect("dsn has a database component");
     let (credentials, upstream) = base.rsplit_once('@').expect("dsn has user@host");
@@ -352,7 +352,7 @@ async fn a_plain_statement_cancelled_mid_reply_does_not_leak_its_pool_slot() {
         .max_connections(1)
         .acquire_timeout(Duration::from_secs(5))
         .connect(&format!(
-            "{credentials}@{}/iamdb_conn_cancel_reply",
+            "{credentials}@{}/iam_db_conn_cancel_reply",
             relay.addr
         ))
         .await
