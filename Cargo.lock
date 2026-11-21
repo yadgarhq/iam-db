@@ -2818,7 +2818,7 @@ dependencies = [
 [[package]]
 name = "yadgar-lifecycle"
 version = "0.1.0"
-source = "git+https://github.com/yadgarhq/lifecycle.git?tag=v0.4.1#6548e1debda9e9ab9bada5f03d8043f28481b323"
+source = "git+https://github.com/yadgarhq/lifecycle.git?tag=v0.4.2#efac8bb50eb17a0daccb5749222093121e83b8da"
 dependencies = [
  "metrics",
  "rustls",
@@ -2848,7 +2848,7 @@ dependencies = [
 [[package]]
 name = "yadgar-telemetry"
 version = "0.1.0"
-source = "git+https://github.com/yadgarhq/telemetry.git?tag=v0.2.17#0e295b7cd99101f2f4d259f693e9bf60ab2d3a2b"
+source = "git+https://github.com/yadgarhq/telemetry.git?tag=v0.2.18#4f4d6bb99669e29c5780ff47c2cf8b3a80cb7d7c"
 dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
