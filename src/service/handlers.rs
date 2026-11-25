@@ -17,10 +17,11 @@
 //!
 //! The operations, by module: `credential` resolves, mints, revokes one or all
 //! of a person's, and lists; `password` reads and writes the stored hash;
-//! `identity` creates a person, and refuses the retired team verbs; `team`
+//! `identity` creates and finds a person, and refuses the retired team verbs; `team`
 //! applies the declared team set (`SyncTeams`); `policy`
 //! sets what applies to a person; `enrolment` mints and spends; `setting`
-//! writes the inheritable ones.
+//! writes the inheritable ones. `RotateKeyIdentity` is a stub that answers
+//! `UNIMPLEMENTED` in `seam` and has no operation module yet.
 
 use super::*;
 
@@ -300,5 +301,21 @@ impl IamDbService for IamDb {
     ) -> Result<Response<AdoptKeyIdentityResponse>, Status> {
         let caller = caller_common_name(&req);
         self.adopt_key_identity_as(caller.as_deref(), req).await
+    }
+
+    async fn lookup_user(
+        &self,
+        req: Request<LookupUserRequest>,
+    ) -> Result<Response<LookupUserResponse>, Status> {
+        let caller = caller_common_name(&req);
+        self.lookup_user_as(caller.as_deref(), req).await
+    }
+
+    async fn rotate_key_identity(
+        &self,
+        req: Request<RotateKeyIdentityRequest>,
+    ) -> Result<Response<RotateKeyIdentityResponse>, Status> {
+        let caller = caller_common_name(&req);
+        self.rotate_key_identity_as(caller.as_deref(), req).await
     }
 }
