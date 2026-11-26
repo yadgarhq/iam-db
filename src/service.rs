@@ -14,13 +14,13 @@
 //!
 //! # What happens to `Idempotency`, per RPC
 //!
-//! **STATED HERE BECAUSE THE SILENCE IS ITSELF THE DEFECT.** FOURTEEN request
+//! **STATED HERE BECAUSE THE SILENCE IS ITSELF THE DEFECT.** FIFTEEN request
 //! messages on this contract carry `yadgar.common.v1.Idempotency` and this module
 //! reads `r.idempotency` on FIVE of them: the four that honour it below, and
 //! `CreateEnrolment`, which reads it only to feed
 //! [`ENROLMENT_IDEMPOTENCY_DISCARDED`]. A reader who greps for that field finds
-//! nine handlers that accept a key and never mention it, and cannot tell an
-//! omission from a mechanism. The fourteen are not one answer fourteen times:
+//! ten handlers that accept a key and never mention it, and cannot tell an
+//! omission from a mechanism. The fifteen are not one answer fifteen times:
 //!
 //! - **FOUR honour the key.** `RedeemEnrolment`, on the ledger
 //!   `iam_enrolment_redemption`; `SetInheritedSetting`, on the ledger
@@ -54,6 +54,8 @@
 //!   after the person logs in again revokes the new credential too. The
 //!   contract states both on the request, rather than this module claiming a
 //!   replay property it does not have.
+//! - **ONE IS A STUB.** `RotateKeyIdentity` reads no field until yaadgaar 168
+//!   builds it.
 //!
 //! **NOTHING IS REFUSED, AND THAT IS A DECISION RATHER THAN THE OVERSIGHT
 //! CONTINUING.** `INVALID_ARGUMENT` on a key this module cannot honour is the
@@ -314,6 +316,7 @@ fn tel(request_id: String, user_id: &str) -> yadgar_telemetry::observe::Scope {
 /// | `AddTeamMember`        | `{team_id}/{user_id}`                          |
 /// | `RemoveTeamMember`     | `{team_id}/{user_id}`                          |
 /// | `SetInheritedSetting`  | `{scope}/{team_id}/{name}`                     |
+/// | `LookupUser`           | the empty string; the blind index is never logged |
 ///
 /// `CreateCredential` names the credential so its record joins a later
 /// `RevokeCredential`'s on the id. `{kind}` and `{scope}` are the contract's enum
@@ -328,15 +331,16 @@ fn tel(request_id: String, user_id: &str) -> yadgar_telemetry::observe::Scope {
 /// from a default one, so `filter` is what keeps the two together;
 /// `unwrap_or_default` would write "" as an actor.
 ///
-/// **ALL TEN RPCs THAT CARRY THE FIELD CALL THIS**, each before any refusal or
-/// SQL in its operation. `CreateUser`, `CreateEnrolment`,
-/// `SetUserAdmin` and `SetInheritedSetting` came first; `CreateCredential`,
-/// `RevokeCredential`, `SetRateLimitOverride`, `AddTeamMember` and
-/// `RemoveTeamMember` were wired later (ledger 870), with the same test per verb
-/// in `tests/contract.rs`. `RevokeAllCredentials` (ADR-0945) is the tenth. An
-/// eleventh verb that starts carrying an actor joins this list and that test
-/// pattern, or the grep that lands here finds an omission indistinguishable
-/// from a decision again.
+/// **ELEVEN RPCs RECORD THROUGH THIS**, each before any refusal or SQL in its
+/// operation. `CreateUser`, `CreateEnrolment`, `SetUserAdmin` and
+/// `SetInheritedSetting` came first; `CreateCredential`, `RevokeCredential`,
+/// `SetRateLimitOverride`, `AddTeamMember` and `RemoveTeamMember` were wired
+/// later (ledger 870), with the same test per verb in `tests/contract.rs`.
+/// `RevokeAllCredentials` (ADR-0945) and `LookupUser` are the last two.
+/// `ListCredentials` is a twelfth carrier of the field that does not record.
+/// A verb that starts carrying an actor joins this list and that test pattern,
+/// or the grep that lands here finds an omission indistinguishable from a
+/// decision again.
 ///
 /// **THE LINE RECORDS AN ATTEMPT, NEVER AN OUTCOME.** It is written before the
 /// operation refuses or touches the store, so a request refused as NOT_FOUND or

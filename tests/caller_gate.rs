@@ -190,6 +190,13 @@ async fn every_rpc_as(svc: &IamDb, caller: Option<&str>) -> Vec<Outcome> {
         ),
         // Team access stage 2 red 8: SyncTeams admits `iam`'s leaf only.
         call!("SyncTeams", sync_teams_as, SyncTeamsRequest),
+        // Proto v1.28.0 (proto#85) and v1.29.0 (proto#99).
+        call!("LookupUser", lookup_user_as, LookupUserRequest),
+        call!(
+            "RotateKeyIdentity",
+            rotate_key_identity_as,
+            RotateKeyIdentityRequest
+        ),
     ]
 }
 
@@ -264,6 +271,12 @@ async fn every_rpc_via_the_trait(svc: &IamDb) -> Vec<Outcome> {
             AdoptKeyIdentityRequest
         ),
         call!("SyncTeams", sync_teams, SyncTeamsRequest),
+        call!("LookupUser", lookup_user, LookupUserRequest),
+        call!(
+            "RotateKeyIdentity",
+            rotate_key_identity,
+            RotateKeyIdentityRequest
+        ),
     ]
 }
 
@@ -300,6 +313,10 @@ fn the_rpc_lists_name_every_rpc_on_the_contract() {
             )
         })
     });
+    // AC1: the vendored v1.29.1 contract has 22 RPCs, and both lists name all 22.
+    assert_eq!(on_the_contract, 22);
+    assert_eq!(as_seam, 22);
+    assert_eq!(via_trait, 22);
     assert_eq!(as_seam, on_the_contract);
     assert_eq!(via_trait, on_the_contract);
 }
@@ -433,4 +450,139 @@ fn the_refusal_names_the_admitted_caller_and_the_presented_one() {
         "the refusal must name {IAM_CALLER:?} and the presented name: {}",
         status.message()
     );
+}
+
+/// AC1: the two verbs the v1.29.1 bump adds are refused for a non-iam leaf
+/// through the `_as` seam, with zero store connections, and each refusal is
+/// counted once under the presented name.
+#[test]
+fn lookup_user_and_rotate_key_identity_refuse_a_non_iam_leaf_through_the_seam() {
+    // AC1: lookup_user_as from "task-caller".
+    let ((status, connections), refused) = under_recorder(|rt| {
+        rt.block_on(async {
+            let store = CountingStore::start().await;
+            let status = store
+                .service()
+                .lookup_user_as(
+                    Some("task-caller"),
+                    Request::new(LookupUserRequest::default()),
+                )
+                .await
+                .expect_err("a non-iam leaf must be refused");
+            (status, store.connections())
+        })
+    });
+    assert_eq!(status.code(), Code::PermissionDenied);
+    assert_eq!(connections, 0);
+    assert_eq!(refused, BTreeMap::from([("task-caller".to_string(), 1)]));
+
+    // AC1: rotate_key_identity_as from "gateway-caller".
+    let ((status, connections), refused) = under_recorder(|rt| {
+        rt.block_on(async {
+            let store = CountingStore::start().await;
+            let status = store
+                .service()
+                .rotate_key_identity_as(
+                    Some("gateway-caller"),
+                    Request::new(RotateKeyIdentityRequest::default()),
+                )
+                .await
+                .expect_err("a non-iam leaf must be refused");
+            (status, store.connections())
+        })
+    });
+    assert_eq!(status.code(), Code::PermissionDenied);
+    assert_eq!(connections, 0);
+    assert_eq!(refused, BTreeMap::from([("gateway-caller".to_string(), 1)]));
+
+    // AC1 triangulation: the swapped pairing, so a gate keyed on the verb or
+    // on one name fails.
+    let ((a, b, connections), refused) = under_recorder(|rt| {
+        rt.block_on(async {
+            let store = CountingStore::start().await;
+            let svc = store.service();
+            let a = svc
+                .lookup_user_as(
+                    Some("gateway-caller"),
+                    Request::new(LookupUserRequest::default()),
+                )
+                .await
+                .expect_err("refused");
+            let b = svc
+                .rotate_key_identity_as(
+                    Some("task-caller"),
+                    Request::new(RotateKeyIdentityRequest::default()),
+                )
+                .await
+                .expect_err("refused");
+            (a.code(), b.code(), store.connections())
+        })
+    });
+    assert_eq!(a, Code::PermissionDenied);
+    assert_eq!(b, Code::PermissionDenied);
+    assert_eq!(connections, 0);
+    assert_eq!(
+        refused,
+        BTreeMap::from([
+            ("gateway-caller".to_string(), 1),
+            ("task-caller".to_string(), 1)
+        ])
+    );
+}
+
+/// AC1: through the TRAIT METHOD (the path `IamDbServiceServer` dispatches to)
+/// with no client-certificate name, both new verbs answer `PERMISSION_DENIED`
+/// and open no connection; the refusal counts once under `none` per verb.
+#[test]
+fn lookup_user_and_rotate_key_identity_refuse_through_the_trait_with_no_certificate() {
+    let ((lookup, rotate, connections), refused) = under_recorder(|rt| {
+        rt.block_on(async {
+            let store = CountingStore::start().await;
+            let svc = store.service();
+            let lookup = svc
+                .lookup_user(Request::new(LookupUserRequest::default()))
+                .await
+                .expect_err("refused");
+            let rotate = svc
+                .rotate_key_identity(Request::new(RotateKeyIdentityRequest::default()))
+                .await
+                .expect_err("refused");
+            (lookup.code(), rotate.code(), store.connections())
+        })
+    });
+    // AC1: boundary, no caller certificate through the trait.
+    assert_eq!(lookup, Code::PermissionDenied);
+    assert_eq!(rotate, Code::PermissionDenied);
+    assert_eq!(connections, 0);
+    assert_eq!(refused, BTreeMap::from([("none".to_string(), 2)]));
+}
+
+/// AC1 positive control for the two new verbs: `iam`'s leaf is not refused by
+/// the gate, and no refusal is counted.
+#[test]
+fn the_iam_leaf_passes_the_gate_on_lookup_user_and_rotate_key_identity() {
+    let ((lookup, rotate), refused) = under_recorder(|rt| {
+        rt.block_on(async {
+            let store = CountingStore::start().await;
+            let svc = store.service();
+            let lookup = svc
+                .lookup_user_as(Some(IAM_CALLER), Request::new(LookupUserRequest::default()))
+                .await
+                .map(|_| ())
+                .map_err(|s| s.code());
+            let rotate = svc
+                .rotate_key_identity_as(
+                    Some(IAM_CALLER),
+                    Request::new(RotateKeyIdentityRequest::default()),
+                )
+                .await
+                .map(|_| ())
+                .map_err(|s| s.code());
+            (lookup, rotate)
+        })
+    });
+    // AC1: admitted means the gate did not refuse.
+    assert_ne!(lookup, Err(Code::PermissionDenied));
+    assert_ne!(rotate, Err(Code::PermissionDenied));
+    assert!(refused.is_empty(), "no refusal counted: {refused:?}");
 }

@@ -1,6 +1,6 @@
 //! Who exists.
 //!
-//! Creating a person, by a minted id or — on F2's bootstrap arm, the `bootstrap`
+//! Finding a live person by blind index (`LookupUser`), and creating one, by a minted id or — on F2's bootstrap arm, the `bootstrap`
 //! child — by the pre-minted id GitOps declares. Moving a person in and out of a
 //! team was here too; `AddTeamMember` and `RemoveTeamMember` are retired
 //! (ADR-0963 (7)) and refuse below, and `SyncTeams` (`team`) is the one writer
@@ -13,6 +13,9 @@ use super::*;
 
 mod bootstrap;
 pub use bootstrap::BOOTSTRAP_CREATE_REFUSED;
+
+/// A blind index is an HMAC-SHA256, so exactly this many bytes.
+const BLIND_INDEX_BYTES: usize = 32;
 
 impl IamDb {
     pub(super) async fn insert_user(
@@ -32,9 +35,8 @@ impl IamDb {
         // `idempotency` IS DISCARDED HERE, AND A RETRY IS NOT A REPLAY. The
         // UNIQUE below turns a redelivered CreateUser into ALREADY_EXISTS, so a
         // caller whose first response was lost never learns the `meta.id` that
-        // attempt returned — and this boundary has no verb that would find it,
-        // because `external_id_blind_index` is one-way and `GetPasswordHash`
-        // answers only for a user who already has a password row. `iam` forwards
+        // attempt returned — `LookupUser` is the verb that finds it, by the
+        // blind index, whether or not the user has a password row. `iam` forwards
         // a key on this hop today. See the module header.
         let id = format!("yadgar:user:{}", uuid::Uuid::now_v7());
 
@@ -77,6 +79,44 @@ impl IamDb {
                 ..Default::default()
             }),
         }))
+    }
+
+    /// `LookupUser`: the id of the live person under a blind index (yaadgaar 270).
+    ///
+    /// A read. The actor is recorded first, as the attempt, with an empty target:
+    /// no id exists yet, and the blind index is never logged in any form.
+    pub(super) async fn find_user(
+        &self,
+        r: LookupUserRequest,
+        deadline: Deadline,
+        rid: &str,
+        call: Call,
+    ) -> Result<Response<LookupUserResponse>, Status> {
+        record_actor(rid, r.unverified_actor.as_ref(), "LookupUser", "");
+        if r.external_id_blind_index.len() != BLIND_INDEX_BYTES {
+            let refusal = Status::invalid_argument("the blind index must be exactly 32 bytes");
+            call.fail(label(&refusal));
+            return Err(refusal);
+        }
+        let mut conn = self.acquire(deadline).await?;
+        let found: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM iam_user WHERE external_id_blind_index = ? AND deleted_at IS NULL",
+        )
+        .bind(&r.external_id_blind_index)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(db)?;
+        let Some(user_id) = found else {
+            let refusal = Status::not_found("no such live user");
+            call.fail(label(&refusal));
+            return Err(refusal);
+        };
+        call.finish(Outcome {
+            status: "OK",
+            rows: 1,
+            ..Default::default()
+        });
+        Ok(Response::new(LookupUserResponse { user_id }))
     }
 
     pub(super) async fn add_member(

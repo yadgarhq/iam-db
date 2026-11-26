@@ -385,4 +385,41 @@ impl IamDb {
         let r = req.into_inner();
         conn::store_work(self.adopt_marker(r, deadline, call)).await
     }
+
+    /// `lookup_user` as the named `caller`, through the gate in `caller::admitted`.
+    pub async fn lookup_user_as(
+        &self,
+        caller: Option<&str>,
+        req: Request<LookupUserRequest>,
+    ) -> Result<Response<LookupUserResponse>, Status> {
+        let call = Call::start(
+            SERVICE,
+            "LookupUser",
+            Kind::Read,
+            tel(request_id_of(&req), ""),
+        );
+        let call = admitted(caller, call)?;
+        let rid = request_id_of(&req);
+        let deadline = Deadline::of(&req);
+        let r = req.into_inner();
+        conn::store_work(self.find_user(r, deadline, &rid, call)).await
+    }
+
+    /// `rotate_key_identity` as the named `caller`: a stub until yaadgaar 168.
+    pub async fn rotate_key_identity_as(
+        &self,
+        caller: Option<&str>,
+        req: Request<RotateKeyIdentityRequest>,
+    ) -> Result<Response<RotateKeyIdentityResponse>, Status> {
+        let call = Call::start(
+            SERVICE,
+            "RotateKeyIdentity",
+            Kind::Write,
+            tel(request_id_of(&req), ""),
+        );
+        let call = admitted(caller, call)?;
+        let refusal = Status::unimplemented("RotateKeyIdentity is not built yet");
+        call.fail(label(&refusal));
+        Err(refusal)
+    }
 }
